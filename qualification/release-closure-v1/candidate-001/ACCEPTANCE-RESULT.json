@@ -1,0 +1,1678 @@
+{
+  "schema": "release_closure.acceptance_result.v1",
+  "campaign": "release-closure-20260925",
+  "started_at": "2026-09-25T02:42:38.411606Z",
+  "updated_at": "2026-09-25T02:47:59.805846Z",
+  "candidate": {
+    "directory": "/data/git/.campaign-artifacts/release-closure-20260925/candidate-001",
+    "deb_sha256": "cc290ee2543282a1a1e6c9cbc6674a325baba00d612e480b360fd15c8c76d680",
+    "tarball_sha256": "17a1357aef9c059b5500c293a608f73a7d054ce2bc346c8748ceaf36befb395d",
+    "receipt_sha256": "19773efd732cd393dd5986dcc4cbe627707a7ceb8675e1e5ec825cb0c409d2c1",
+    "receipt_source": {
+      "clean": true,
+      "head": "fc671a4126c5fabbf87be15dbd79d6c12132ee3f",
+      "tracked_inputs_sha256": {
+        "Cargo.lock": "6efaa59cc4e9d8374f0f48c47dd73c1345f30f22e134876f7efb094070333a78",
+        "Cargo.toml": "0f3a25a5159d4e7c0eafef131490b8b0512aa4a4964fdc58f2ff663076990a00",
+        "profiles/manifest.json": "6442d5b4652ef004210c2193d1f6fb8376d85573f0435e3b661328d3c7251835",
+        "rust-toolchain.toml": "6152f0907eaac1d9806d46246c4c9715bfdb7eaa400323a34b9f493ff0e6f946",
+        "scripts/build-release-bundle.sh": "d932f419cd3958f92a78b10c7bec27dbf994bcfa493337ce7428415b87949401"
+      },
+      "tree": "64e118d642703fe17da4e7f959099e8a1726fe31"
+    }
+  },
+  "predecessor": {
+    "directory": "/data/git/.campaign-artifacts/operator-beta-completion-20260908/m3-nq-package-001",
+    "deb_sha256": "bb9b89fbe87d2b9b720de497c8a8f96e00aabfeadb0a7598fe0acc8c4fed76ca"
+  },
+  "base_image": {
+    "path": "/data/git/.campaign-artifacts/constellation-operator-beta-composed-m2-run-002/input/debian-12-genericcloud-amd64-20260903-2590.qcow2",
+    "sha512": "490f38e2665bc4c31f1bd4cd66dfab3c7695f652a62862a7034d95f8f05ede4146d6dd55c70cc8b0ac9d9b4f54e18f8860bd5ad5ebfb7a8d5e934f3d12cf3817"
+  },
+  "guests": {
+    "a": {
+      "name": "nq-rc-a",
+      "ssh_port": 23301,
+      "qemu_command": [
+        "qemu-system-x86_64",
+        "-name",
+        "nq-rc-a,process=nq-rc-a",
+        "-no-user-config",
+        "-nodefaults",
+        "-accel",
+        "kvm",
+        "-machine",
+        "q35",
+        "-cpu",
+        "host",
+        "-smp",
+        "2",
+        "-m",
+        "2048",
+        "-display",
+        "none",
+        "-monitor",
+        "none",
+        "-serial",
+        "file:/home/jbeck/.local/state/release-closure-20260925/a/serial.log",
+        "-pidfile",
+        "/home/jbeck/.local/state/release-closure-20260925/a/qemu.pid",
+        "-drive",
+        "if=virtio,file=/home/jbeck/.local/state/release-closure-20260925/a/overlay.qcow2,format=qcow2,cache=none,aio=threads",
+        "-drive",
+        "if=virtio,file=/home/jbeck/.local/state/release-closure-20260925/a/seed.iso,format=raw,readonly=on",
+        "-netdev",
+        "user,id=mgmt,restrict=on,hostfwd=tcp:127.0.0.1:23301-:22",
+        "-device",
+        "virtio-net-pci,netdev=mgmt,mac=52:54:00:9c:00:01",
+        "-sandbox",
+        "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny"
+      ]
+    },
+    "b": {
+      "name": "nq-rc-b",
+      "ssh_port": 23302,
+      "qemu_command": [
+        "qemu-system-x86_64",
+        "-name",
+        "nq-rc-b,process=nq-rc-b",
+        "-no-user-config",
+        "-nodefaults",
+        "-accel",
+        "kvm",
+        "-machine",
+        "q35",
+        "-cpu",
+        "host",
+        "-smp",
+        "2",
+        "-m",
+        "2048",
+        "-display",
+        "none",
+        "-monitor",
+        "none",
+        "-serial",
+        "file:/home/jbeck/.local/state/release-closure-20260925/b/serial.log",
+        "-pidfile",
+        "/home/jbeck/.local/state/release-closure-20260925/b/qemu.pid",
+        "-drive",
+        "if=virtio,file=/home/jbeck/.local/state/release-closure-20260925/b/overlay.qcow2,format=qcow2,cache=none,aio=threads",
+        "-drive",
+        "if=virtio,file=/home/jbeck/.local/state/release-closure-20260925/b/seed.iso,format=raw,readonly=on",
+        "-netdev",
+        "user,id=mgmt,restrict=on,hostfwd=tcp:127.0.0.1:23302-:22",
+        "-device",
+        "virtio-net-pci,netdev=mgmt,mac=52:54:00:9c:00:02",
+        "-sandbox",
+        "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny"
+      ]
+    }
+  },
+  "guest_identities": {
+    "a": {
+      "hostname": "nq-rc-a",
+      "kernel": "6.1.0-52-cloud-amd64",
+      "machine_id": "b3c2da0b34844c6aa6be9025b4e14646",
+      "boot_id": "1593d792-021e-475b-995c-9ec49282f396",
+      "cmdline": "BOOT_IMAGE=/boot/vmlinuz-6.1.0-52-cloud-amd64 root=PARTUUID=71951f82-ff9b-40b9-917e-f86ce8f8981b ro console=tty0 console=ttyS0,115200 earlyprintk=ttyS0,115200 consoleblank=0",
+      "psi_memory_present": true,
+      "psi_memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "cpus": 2
+    },
+    "b": {
+      "hostname": "nq-rc-b",
+      "kernel": "6.1.0-52-cloud-amd64",
+      "machine_id": "d98ce0a1e8a64e7db46897fffd65e1f5",
+      "boot_id": "5bf2bbdf-79cb-4549-8a45-5f738b4da30f",
+      "cmdline": "BOOT_IMAGE=/boot/vmlinuz-6.1.0-52-cloud-amd64 root=PARTUUID=71951f82-ff9b-40b9-917e-f86ce8f8981b ro console=tty0 console=ttyS0,115200 earlyprintk=ttyS0,115200 consoleblank=0",
+      "psi_memory_present": true,
+      "psi_memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "cpus": 2
+    }
+  },
+  "fixtures": {
+    "filesystems": {
+      "full": {
+        "mountpoint": "/srv/nq-fixture/full",
+        "device": "/dev/loop0",
+        "uuid": "8e21625a-14fe-4e0c-8456-b074c4528641",
+        "by_uuid_link": true,
+        "used_bytes": 52119552,
+        "avail_bytes": 3920896,
+        "used_fraction_of_usable": 0.93,
+        "inodes_total": 16384,
+        "inodes_free": 16372,
+        "inodes_used_fraction": 0.0007
+      },
+      "roomy": {
+        "mountpoint": "/srv/nq-fixture/roomy",
+        "device": "/dev/loop1",
+        "uuid": "3fed26e0-6669-43b8-8ae6-f87f7fa445f9",
+        "by_uuid_link": true,
+        "used_bytes": 14336,
+        "avail_bytes": 56026112,
+        "used_fraction_of_usable": 0.0003,
+        "inodes_total": 16384,
+        "inodes_free": 16373,
+        "inodes_used_fraction": 0.0007
+      },
+      "inodes": {
+        "mountpoint": "/srv/nq-fixture/inodes",
+        "device": "/dev/loop2",
+        "uuid": "be01ce26-87f1-4e42-9587-c7d01b15796b",
+        "by_uuid_link": true,
+        "used_bytes": 19456,
+        "avail_bytes": 15039488,
+        "used_fraction_of_usable": 0.0013,
+        "inodes_total": 256,
+        "inodes_free": 19,
+        "inodes_used_fraction": 0.9258
+      }
+    },
+    "absent_unit": "nq-fixture-absent-4606e2f3.service",
+    "units_at_setup": "nq-fixture.service: success nq-fixture.service nq-fixture.service nq-fixture-alias.service loaded active running\nnq-fixture-fail.service: exit-code nq-fixture-fail.service nq-fixture-fail.service loaded failed failed\nnq-fixture-alias.service: success nq-fixture.service nq-fixture.service nq-fixture-alias.service loaded active running\nnq-fixture-absent.service: success nq-fixture-absent.service nq-fixture-absent.service not-found inactive dead\nnq-fixture.service: success nq-fixture.service nq-fixture.service nq-fixture-alias.service loaded active running\nnq-fixture-fail.service: exit-code nq-fixture-fail.service nq-fixture-fail.service loaded failed failed\nnq-fixture-alias.service: success nq-fixture.service nq-fixture.service nq-fixture-alias.service loaded active running\nnq-fixture-absent-4606e2f3.service: success nq-fixture-absent-4606e2f3.service nq-fixture-absent-4606e2f3.service not-found inactive dead\n",
+    "admissions": {
+      "host-local": {
+        "exit": 0,
+        "outcome": "activated",
+        "admission_id": "a755e826-0573-4884-bad1-492bbee078d9",
+        "output": null
+      },
+      "fs-full-capacity": {
+        "exit": 0,
+        "outcome": "activated",
+        "admission_id": "ebd217e8-5d95-4d7e-84b9-ba4c65f3e1ae",
+        "output": null
+      },
+      "fs-roomy-capacity": {
+        "exit": 0,
+        "outcome": "activated",
+        "admission_id": "e4b32662-6921-49e3-9c7f-02572054f51c",
+        "output": null
+      },
+      "fs-inodes-full": {
+        "exit": 0,
+        "outcome": "activated",
+        "admission_id": "410cfd6f-1858-4ffc-bb6d-b05603816c95",
+        "output": null
+      },
+      "fs-inodes-roomy": {
+        "exit": 0,
+        "outcome": "activated",
+        "admission_id": "6dedf255-c6d5-413b-bf96-78932f629b0f",
+        "output": null
+      },
+      "mem-local": {
+        "exit": 0,
+        "outcome": "activated",
+        "admission_id": "ba1576f0-3ec0-4f46-83c2-b2e04857e1b8",
+        "output": null
+      },
+      "unit-fixture": {
+        "exit": 0,
+        "outcome": "activated",
+        "admission_id": "57a0a9be-1f3a-4f12-826f-b45f68793b8c",
+        "output": null
+      },
+      "unit-fail": {
+        "exit": 0,
+        "outcome": "activated",
+        "admission_id": "cdde77db-ad3a-4edd-9a07-d13a30c2c651",
+        "output": null
+      },
+      "unit-alias": {
+        "exit": 0,
+        "outcome": "activated",
+        "admission_id": "c691b475-445f-45ba-950e-47d835f897b3",
+        "output": null
+      },
+      "unit-absent": {
+        "exit": 0,
+        "outcome": "activated",
+        "admission_id": "8d6baa58-7149-45d8-be26-678f1feb21ef",
+        "output": null
+      },
+      "unit-machine": {
+        "exit": 0,
+        "outcome": "activated",
+        "admission_id": "f42cbc9c-600d-4bcc-9507-da5b5e6651a3",
+        "output": null
+      }
+    },
+    "psi_memory_present_at_baseline": true
+  },
+  "summary": {
+    "PASS": 45,
+    "FAIL": 3,
+    "NOT_EXERCISED": 2
+  },
+  "cases": [
+    {
+      "id": "A-01",
+      "title": "install: sha256sum --check SHA256SUMS in the guest",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:06.707511Z",
+      "log": "cases/A-01.log",
+      "exit": 0,
+      "output": "nq-ng-0.1.0-linux-amd64.tar.gz: OK\nnq-ng_0.1.0_amd64.deb: OK\nffb64a3dbd1f4fd785810f69430346fd766768b7b1dc328fa3eb9a9adc39f7e3  SHA256SUMS\n19773efd732cd393dd5986dcc4cbe627707a7ceb8675e1e5ec825cb0c409d2c1  bookworm-build-receipt.v1.json\n17a1357aef9c059b5500c293a608f73a7d054ce2bc346c8748ceaf36befb395d  nq-ng-0.1.0-linux-amd64.tar.gz\n62d4fbbc26ac256e679da0dd857ef0ce40c0b27c9e041ef73700d3ab92273b84  nq-ng-0.1.0-linux-amd64.tar.gz.sha256\ncc290ee2543282a1a1e6c9cbc6674a325baba00d612e480b360fd15c8c76d680  nq-ng_0.1.0_amd64.deb\n71180d3d432a099bcfb903696f490ceaac442d08ae934d03bd1fc0d2a72719c3  nq-ng_0.1.0_amd64.deb.sha256\n",
+      "stderr": ""
+    },
+    {
+      "id": "A-02",
+      "title": "install: dpkg -i offline, dependencies satisfied",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:08.132772Z",
+      "log": "cases/A-02.log",
+      "dpkg_exit": 0,
+      "dpkg_output": "Selecting previously unselected package nq-ng.\n(Reading database ... 20807 files and directories currently installed.)\nPreparing to unpack .../nq-ng_0.1.0_amd64.deb ...\nUnpacking nq-ng (0.1.0) ...\nSetting up nq-ng (0.1.0) ...\nCreating group 'nq' with GID 994.\nCreating user 'nq' (NQ-ng service account) with UID 994 and GID 994.\nCreating group 'nq-helper' with GID 993.\nCreating user 'nq-helper' (NQ-ng watcher account) with UID 993 and GID 993.\n",
+      "status": "Status: install ok installed\nVersion: 0.1.0\nDepends: libc6, python3 (>= 3.8), adduser\naudit-exit=0\n"
+    },
+    {
+      "id": "A-03",
+      "title": "install: nq and nq-helper accounts",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:08.371024Z",
+      "log": "cases/A-03.log",
+      "accounts": [
+        "nq:x:994:994:NQ-ng service account:/var/lib/nq:/usr/sbin/nologin",
+        "nq-helper:x:993:993:NQ-ng watcher account:/nonexistent:/usr/sbin/nologin",
+        "nq:x:994:",
+        "nq-helper:x:993:"
+      ]
+    },
+    {
+      "id": "A-04",
+      "title": "install: tmpfiles paths and modes",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:08.636598Z",
+      "log": "cases/A-04.log",
+      "observed": [
+        "/etc/nq 750 root:nq",
+        "/var/lib/nq 700 nq:nq",
+        "/var/lib/nq/admissions 700 nq:nq",
+        "/var/lib/nq/backups 700 nq:nq",
+        "/run/nq 751 nq:nq",
+        "/run/nq/helpers 711 nq:nq"
+      ],
+      "expected": [
+        "/etc/nq 750 root:nq",
+        "/run/nq 751 nq:nq",
+        "/run/nq/helpers 711 nq:nq",
+        "/var/lib/nq 700 nq:nq",
+        "/var/lib/nq/admissions 700 nq:nq",
+        "/var/lib/nq/backups 700 nq:nq"
+      ]
+    },
+    {
+      "id": "A-05",
+      "title": "install: unit installed, not enabled, not started",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:08.891027Z",
+      "log": "cases/A-05.log",
+      "observed": "disabled\ninactive\nLoadState=loaded\nActiveState=inactive\nFragmentPath=/lib/systemd/system/nqd.service\nUnitFileState=disabled\n"
+    },
+    {
+      "id": "A-06",
+      "title": "install: executables at allowlisted paths and modes",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:09.120431Z",
+      "log": "cases/A-06.log",
+      "observed": [
+        "/usr/bin/nq 755 root:root regular file",
+        "/usr/bin/nqd 755 root:root regular file",
+        "/usr/lib/nq/helpers/nq-host-helper 755 root:root regular file",
+        "/usr/lib/nq/helpers/nq-host-resource-helper 755 root:root regular file",
+        "/usr/lib/nq/helpers/nq-operator-beta-helper 755 root:root regular file",
+        "/usr/lib/nq/helpers/nq-synthetic-cache-result-helper 755 root:root regular file",
+        "/usr/lib/nq/helpers/nq_conformance_helper.py 755 root:root regular file",
+        "-rwxr-xr-x 1 root root 18391296 Nov 14  2023 /usr/bin/nq",
+        "-rwxr-xr-x 1 root root 13090760 Nov 14  2023 /usr/bin/nqd",
+        "",
+        "/usr/lib/nq/helpers:",
+        "total 10576",
+        "drwxr-xr-x 2 root root    4096 Sep 25 02:43 .",
+        "drwxr-xr-x 3 root root    4096 Sep 25 02:43 ..",
+        "-rwxr-xr-x 1 root root 1403960 Nov 14  2023 nq-host-helper",
+        "-rwxr-xr-x 1 root root 1671128 Nov 14  2023 nq-host-resource-helper",
+        "-rwxr-xr-x 1 root root 4228208 Nov 14  2023 nq-operator-beta-helper",
+        "-rwxr-xr-x 1 root root 3493120 Nov 14  2023 nq-synthetic-cache-result-helper",
+        "-rwxr-xr-x 1 root root   20144 Nov 14  2023 nq_conformance_helper.py"
+      ],
+      "count": 7
+    },
+    {
+      "id": "A-07",
+      "title": "install: MANIFEST.sha256 verifies",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:09.490802Z",
+      "log": "cases/A-07.log",
+      "exit": 0,
+      "output": "manifest-ok\n87\n"
+    },
+    {
+      "id": "A-08",
+      "title": "install: --build-info on every compiled binary",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:11.180600Z",
+      "log": "cases/A-08.log",
+      "build_info": {
+        "/usr/bin/nq": {
+          "schema": "nq.build_info.v1",
+          "component": "nq",
+          "version": "0.1.0",
+          "debug_assertions": false,
+          "helper_isolation_policy": "production_separate_identity_required"
+        },
+        "/usr/bin/nqd": {
+          "schema": "nq.build_info.v1",
+          "component": "nqd",
+          "version": "0.1.0",
+          "debug_assertions": false,
+          "helper_isolation_policy": "production_separate_identity_required"
+        },
+        "/usr/lib/nq/helpers/nq-host-helper": {
+          "schema": "nq.build_info.v1",
+          "component": "nq-host-helper",
+          "version": "0.1.0",
+          "debug_assertions": false,
+          "helper_isolation_policy": "production_separate_identity_required"
+        },
+        "/usr/lib/nq/helpers/nq-host-resource-helper": {
+          "schema": "nq.build_info.v1",
+          "component": "nq-host-resource-helper",
+          "version": "0.1.0",
+          "debug_assertions": false,
+          "helper_isolation_policy": "production_separate_identity_required"
+        },
+        "/usr/lib/nq/helpers/nq-operator-beta-helper": {
+          "schema": "nq.build_info.v1",
+          "component": "nq-operator-beta-helper",
+          "version": "0.1.0",
+          "debug_assertions": false,
+          "helper_isolation_policy": "production_separate_identity_required"
+        },
+        "/usr/lib/nq/helpers/nq-synthetic-cache-result-helper": {
+          "schema": "nq.build_info.v1",
+          "component": "nq-synthetic-cache-result-helper",
+          "version": "0.1.0",
+          "debug_assertions": false,
+          "helper_isolation_policy": "production_separate_identity_required"
+        }
+      },
+      "python_helper": {
+        "exit": 64,
+        "output": "invalid request: stdin must contain exactly one LF-terminated JSON document\n",
+        "note": "script, not a compiled binary; recorded for completeness"
+      }
+    },
+    {
+      "id": "A-09",
+      "title": "environment: no source tree, no host share, no egress",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:12.172152Z",
+      "log": "cases/A-09.log",
+      "findings": [],
+      "egress": [],
+      "report": "evidence/a-assert-clean.txt"
+    },
+    {
+      "id": "A-10",
+      "title": "outside-in: nq profiles list equals installed manifest.json",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:12.644219Z",
+      "log": "cases/A-10.log",
+      "compiled_count": 9,
+      "manifest_count": 9,
+      "only_in_compiled": [],
+      "only_in_manifest": [],
+      "identities": [
+        [
+          "nq.conformance",
+          1
+        ],
+        [
+          "nq.host",
+          1
+        ],
+        [
+          "nq.host_filesystem_capacity",
+          1
+        ],
+        [
+          "nq.host_filesystem_inodes",
+          1
+        ],
+        [
+          "nq.host_memory",
+          1
+        ],
+        [
+          "nq.http_endpoint",
+          1
+        ],
+        [
+          "nq.synthetic_cache_executor_result",
+          1
+        ],
+        [
+          "nq.systemd_unit",
+          1
+        ],
+        [
+          "nq.systemd_unit",
+          2
+        ]
+      ]
+    },
+    {
+      "id": "A-11",
+      "title": "outside-in: failure-codes agree (nq, file, resource helper)",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:13.367492Z",
+      "log": "cases/A-11.log",
+      "packaged_equals_compiled": true,
+      "helper_keys": [
+        "nq.host_filesystem_capacity@1",
+        "nq.host_filesystem_inodes@1",
+        "nq.host_memory@1",
+        "nq.systemd_unit@2"
+      ],
+      "helper_agrees": true,
+      "helper_serves_exactly_resource_profiles": true,
+      "code_count": 41,
+      "vocabularies": "evidence/a-failure-codes.json"
+    },
+    {
+      "id": "A-12",
+      "title": "outside-in: nq protocol check",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:13.874277Z",
+      "log": "cases/A-12.log",
+      "exit": 0,
+      "receipt": "evidence/a-protocol-check.json",
+      "installed_corpus": "368aef58464215d5821154de56fd7482ebe40ee8191fa453fecf2b611a684bcb  fixtures/manifest.json\n17\n"
+    },
+    {
+      "id": "A-13",
+      "title": "runtime: production config, nq init, nq config check",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:17.391857Z",
+      "log": "cases/A-13.log",
+      "config": "evidence/a-nq.toml",
+      "config_stat": "/etc/nq/nq.toml 640 root:nq",
+      "init": {
+        "database": "/var/lib/nq/nq.db",
+        "initialized": true,
+        "schema_version": 13
+      },
+      "init_exit": 0,
+      "config_check_exit": 0,
+      "config_check": "{\n  \"config_digest\": \"sha256:f146e7eb2f6184228955a73775c57a10cb73197d06808218b7105654d7501a2e\",\n  \"path\": \"/etc/nq/nq.toml\",\n  \"valid\": true\n}\n"
+    },
+    {
+      "id": "A-14",
+      "title": "runtime: watcher admit per instance",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:22.738693Z",
+      "log": "cases/A-14.log",
+      "admissions": {
+        "host-local": {
+          "exit": 0,
+          "outcome": "activated",
+          "admission_id": "a755e826-0573-4884-bad1-492bbee078d9",
+          "output": null
+        },
+        "fs-full-capacity": {
+          "exit": 0,
+          "outcome": "activated",
+          "admission_id": "ebd217e8-5d95-4d7e-84b9-ba4c65f3e1ae",
+          "output": null
+        },
+        "fs-roomy-capacity": {
+          "exit": 0,
+          "outcome": "activated",
+          "admission_id": "e4b32662-6921-49e3-9c7f-02572054f51c",
+          "output": null
+        },
+        "fs-inodes-full": {
+          "exit": 0,
+          "outcome": "activated",
+          "admission_id": "410cfd6f-1858-4ffc-bb6d-b05603816c95",
+          "output": null
+        },
+        "fs-inodes-roomy": {
+          "exit": 0,
+          "outcome": "activated",
+          "admission_id": "6dedf255-c6d5-413b-bf96-78932f629b0f",
+          "output": null
+        },
+        "mem-local": {
+          "exit": 0,
+          "outcome": "activated",
+          "admission_id": "ba1576f0-3ec0-4f46-83c2-b2e04857e1b8",
+          "output": null
+        },
+        "unit-fixture": {
+          "exit": 0,
+          "outcome": "activated",
+          "admission_id": "57a0a9be-1f3a-4f12-826f-b45f68793b8c",
+          "output": null
+        },
+        "unit-fail": {
+          "exit": 0,
+          "outcome": "activated",
+          "admission_id": "cdde77db-ad3a-4edd-9a07-d13a30c2c651",
+          "output": null
+        },
+        "unit-alias": {
+          "exit": 0,
+          "outcome": "activated",
+          "admission_id": "c691b475-445f-45ba-950e-47d835f897b3",
+          "output": null
+        },
+        "unit-absent": {
+          "exit": 0,
+          "outcome": "activated",
+          "admission_id": "8d6baa58-7149-45d8-be26-678f1feb21ef",
+          "output": null
+        },
+        "unit-machine": {
+          "exit": 0,
+          "outcome": "activated",
+          "admission_id": "f42cbc9c-600d-4bcc-9507-da5b5e6651a3",
+          "output": null
+        }
+      }
+    },
+    {
+      "id": "A-15",
+      "title": "runtime: load normal -> explicitly_absent",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:23.166295Z",
+      "log": "cases/A-15.log",
+      "expected": "explicitly_absent",
+      "observed": "explicitly_absent",
+      "artifact": {
+        "artifact_id": "sha256:b810d526eadafaa2b76c918cc8483e5a9c3f839723aec12256d4292d4ed1e8dd",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:c8c10fed1cc5598d953b4defbc98e8c106fc59e035c249d43681698a5c7b4ff9",
+          "id": "nq.host",
+          "version": "1"
+        },
+        "subject": "host:nq-rc-a",
+        "condition": "explicitly_absent",
+        "derivation": "completed",
+        "summary": "current complete coverage places one-minute load below the detector threshold",
+        "refusals": [],
+        "evidence": "evidence/a-host-local-initial.json",
+        "exit": 0
+      }
+    },
+    {
+      "id": "A-16",
+      "title": "runtime: load induced -> present",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:44.076441Z",
+      "log": "cases/A-16.log",
+      "expected": "present",
+      "observed": "present",
+      "load_fixture": {
+        "reached": true,
+        "loadavg1": "4.70",
+        "cpus": 2,
+        "busy_loops": 16
+      },
+      "loadavg_after": "4.70 1.08 0.35 17/107 1623",
+      "admission": {
+        "instance": "host-local-load",
+        "exit": 0,
+        "activated": true,
+        "admission_id": "c5f80590-7bd2-41da-85b1-ba2bd03d7a66",
+        "output": null
+      },
+      "artifact": {
+        "artifact_id": "sha256:0bfd8bce52634526ea83d63d01350099b8990b35fef9f83414caecbab0712517",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:c8c10fed1cc5598d953b4defbc98e8c106fc59e035c249d43681698a5c7b4ff9",
+          "id": "nq.host",
+          "version": "1"
+        },
+        "subject": "host:nq-rc-a",
+        "condition": "present",
+        "derivation": "completed",
+        "summary": "one-minute load reached the detector threshold of 2.00x logical CPU count",
+        "refusals": [],
+        "evidence": "evidence/a-host-local-load-under-load.json",
+        "exit": 0
+      },
+      "supplementary_acquire_next_local_on_host_local": {
+        "artifact_id": "sha256:7e6fda5d4fa78acd57bf5eb9ae0a51553e369fcd7006ec87b945bed0868e04a8",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:c8c10fed1cc5598d953b4defbc98e8c106fc59e035c249d43681698a5c7b4ff9",
+          "id": "nq.host",
+          "version": "1"
+        },
+        "subject": "host:nq-rc-a",
+        "condition": "present",
+        "derivation": "completed",
+        "summary": "one-minute load reached the detector threshold of 2.00x logical CPU count",
+        "refusals": [],
+        "evidence": "evidence/a-host-local-under-load-acquire.json",
+        "exit": 0,
+        "acquisition_id": "load-001",
+        "replay_byte_identical": true,
+        "effective": "present"
+      },
+      "note": "fresh instance host-local-load (same scope) because diagnostics execute refuses an instance with prior history; acquire-next-local is the documented successor path and is recorded as supplementary evidence"
+    },
+    {
+      "id": "A-17",
+      "title": "runtime: filesystem capacity >= 91% -> present",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:44.515285Z",
+      "log": "cases/A-17.log",
+      "expected": "present",
+      "observed": "present",
+      "artifact": {
+        "artifact_id": "sha256:45e7ab39d032d2d0ba4fc9024933e61846d437692ee3cd941e3838e2e7d8a2a0",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:48d23e2e27fa47f591455c27a3d994b6409eb57a52dabf08d92607332d215636",
+          "id": "nq.host_filesystem_capacity",
+          "version": "1"
+        },
+        "subject": "host-filesystem:b3c2da0b34844c6aa6be9025b4e14646/8e21625a-14fe-4e0c-8456-b074c4528641",
+        "condition": "present",
+        "derivation": "completed",
+        "summary": "available space is at or below 10% of non-reserved capacity on the exact filesystem",
+        "refusals": [],
+        "evidence": "evidence/a-fs-full-capacity-initial.json",
+        "exit": 0
+      },
+      "fixture": {
+        "mountpoint": "/srv/nq-fixture/full",
+        "device": "/dev/loop0",
+        "uuid": "8e21625a-14fe-4e0c-8456-b074c4528641",
+        "by_uuid_link": true,
+        "used_bytes": 52119552,
+        "avail_bytes": 3920896,
+        "used_fraction_of_usable": 0.93,
+        "inodes_total": 16384,
+        "inodes_free": 16372,
+        "inodes_used_fraction": 0.0007
+      }
+    },
+    {
+      "id": "A-18",
+      "title": "runtime: filesystem capacity roomy -> explicitly_absent",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:44.995887Z",
+      "log": "cases/A-18.log",
+      "expected": "explicitly_absent",
+      "observed": "explicitly_absent",
+      "artifact": {
+        "artifact_id": "sha256:2b71fa3b251259aa9ec2509dc427d5b83e00b7cc02343a0fcc8ac5977c78d868",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:48d23e2e27fa47f591455c27a3d994b6409eb57a52dabf08d92607332d215636",
+          "id": "nq.host_filesystem_capacity",
+          "version": "1"
+        },
+        "subject": "host-filesystem:b3c2da0b34844c6aa6be9025b4e14646/3fed26e0-6669-43b8-8ae6-f87f7fa445f9",
+        "condition": "explicitly_absent",
+        "derivation": "completed",
+        "summary": "current complete counters place available space above 10% of non-reserved capacity",
+        "refusals": [],
+        "evidence": "evidence/a-fs-roomy-capacity-initial.json",
+        "exit": 0
+      },
+      "fixture": {
+        "mountpoint": "/srv/nq-fixture/roomy",
+        "device": "/dev/loop1",
+        "uuid": "3fed26e0-6669-43b8-8ae6-f87f7fa445f9",
+        "by_uuid_link": true,
+        "used_bytes": 14336,
+        "avail_bytes": 56026112,
+        "used_fraction_of_usable": 0.0003,
+        "inodes_total": 16384,
+        "inodes_free": 16373,
+        "inodes_used_fraction": 0.0007
+      }
+    },
+    {
+      "id": "A-19",
+      "title": "runtime: filesystem inodes >= 91% -> present",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:45.490122Z",
+      "log": "cases/A-19.log",
+      "expected": "present",
+      "observed": "present",
+      "artifact": {
+        "artifact_id": "sha256:11de9d2f81df9e03fc91f455a6e735204be92e4536997dfadf4986784da141aa",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:1a4f5e289b2f63e811e552141c7d624ca46880343b3126450522dc338bcdd664",
+          "id": "nq.host_filesystem_inodes",
+          "version": "1"
+        },
+        "subject": "host-filesystem:b3c2da0b34844c6aa6be9025b4e14646/be01ce26-87f1-4e42-9587-c7d01b15796b",
+        "condition": "present",
+        "derivation": "completed",
+        "summary": "free inodes are at or below 10% of total inodes on the exact filesystem",
+        "refusals": [],
+        "evidence": "evidence/a-fs-inodes-full-initial.json",
+        "exit": 0
+      },
+      "fixture": {
+        "mountpoint": "/srv/nq-fixture/inodes",
+        "device": "/dev/loop2",
+        "uuid": "be01ce26-87f1-4e42-9587-c7d01b15796b",
+        "by_uuid_link": true,
+        "used_bytes": 19456,
+        "avail_bytes": 15039488,
+        "used_fraction_of_usable": 0.0013,
+        "inodes_total": 256,
+        "inodes_free": 19,
+        "inodes_used_fraction": 0.9258
+      }
+    },
+    {
+      "id": "A-20",
+      "title": "runtime: filesystem inodes roomy -> explicitly_absent",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:43:45.996124Z",
+      "log": "cases/A-20.log",
+      "expected": "explicitly_absent",
+      "observed": "explicitly_absent",
+      "artifact": {
+        "artifact_id": "sha256:c2a7be3c984c0448ccf7c56d5d3f89b83ee160d9ed58d18e1dc4d580205cd572",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:1a4f5e289b2f63e811e552141c7d624ca46880343b3126450522dc338bcdd664",
+          "id": "nq.host_filesystem_inodes",
+          "version": "1"
+        },
+        "subject": "host-filesystem:b3c2da0b34844c6aa6be9025b4e14646/3fed26e0-6669-43b8-8ae6-f87f7fa445f9",
+        "condition": "explicitly_absent",
+        "derivation": "completed",
+        "summary": "current complete counters place free inodes above 10% of total inodes",
+        "refusals": [],
+        "evidence": "evidence/a-fs-inodes-roomy-initial.json",
+        "exit": 0
+      },
+      "fixture": {
+        "mountpoint": "/srv/nq-fixture/roomy",
+        "device": "/dev/loop1",
+        "uuid": "3fed26e0-6669-43b8-8ae6-f87f7fa445f9",
+        "by_uuid_link": true,
+        "used_bytes": 14336,
+        "avail_bytes": 56026112,
+        "used_fraction_of_usable": 0.0003,
+        "inodes_total": 16384,
+        "inodes_free": 16373,
+        "inodes_used_fraction": 0.0007
+      }
+    },
+    {
+      "id": "A-21",
+      "title": "runtime: memory PSI baseline",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:45:47.011424Z",
+      "log": "cases/A-21.log",
+      "psi_memory_present": true,
+      "psi_memory": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
+      "kernel": "6.1.0-52-cloud-amd64",
+      "cmdline": "BOOT_IMAGE=/boot/vmlinuz-6.1.0-52-cloud-amd64 root=PARTUUID=71951f82-ff9b-40b9-917e-f86ce8f8981b ro console=tty0 console=ttyS0,115200 earlyprintk=ttyS0,115200 consoleblank=0",
+      "uptime_at_execution": "185.76 313.13",
+      "expected": "explicitly_absent",
+      "observed": "explicitly_absent",
+      "artifact": {
+        "artifact_id": "sha256:7c1d347e8b397667a9b8406bf9ef16379fa1bbefc00943a7fe38cd62477e506f",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:e4eb42dd954e7e4cd13514a5c787caa905fb395f9aaadc82e5b060638edf523e",
+          "id": "nq.host_memory",
+          "version": "1"
+        },
+        "subject": "host:b3c2da0b34844c6aa6be9025b4e14646",
+        "condition": "explicitly_absent",
+        "derivation": "completed",
+        "summary": "current complete PSI coverage places memory some avg60 below the detector threshold",
+        "refusals": [],
+        "evidence": "evidence/a-mem-local-baseline.json",
+        "exit": 0
+      },
+      "note": "executed after boot age >= 185 s because the memory detector refuses psi_average_warming_up below 180 s; memory pressure present is not induced (spec: not required)"
+    },
+    {
+      "id": "A-22",
+      "title": "runtime: memory PSI after psi=1 reboot",
+      "outcome": "NOT_EXERCISED",
+      "recorded_at": "2026-09-25T02:45:47.012674Z",
+      "log": "cases/A-22.log",
+      "reason": "/proc/pressure/memory is already provided by the Debian kernel at baseline; the psi=1 reboot branch is not needed (baseline case A-21 recorded explicitly_absent)"
+    },
+    {
+      "id": "A-23",
+      "title": "runtime: systemd v2 active -> explicitly_absent",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:45:47.548152Z",
+      "log": "cases/A-23.log",
+      "expected": "explicitly_absent",
+      "observed": "explicitly_absent",
+      "artifact": {
+        "artifact_id": "sha256:f96555234c9eb52bc6d7ead54085a3a6a8455ce41ae81bb0c93b8eb70948ba42",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:5691c4db8d736df5a7cf7da3557f8e07a9d9523d27ff16326963734e2b737b49",
+          "id": "nq.systemd_unit",
+          "version": "2"
+        },
+        "subject": "systemd-unit:b3c2da0b34844c6aa6be9025b4e14646/nq-fixture.service",
+        "condition": "explicitly_absent",
+        "derivation": "completed",
+        "summary": "the system manager reports the unit loaded and active",
+        "refusals": [],
+        "evidence": "evidence/a-unit-fixture-initial.json",
+        "exit": 0
+      }
+    },
+    {
+      "id": "A-24",
+      "title": "runtime: systemd v2 stopped -> present (inactive)",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:45:49.033231Z",
+      "log": "cases/A-24.log",
+      "expected": "present",
+      "observed": "present",
+      "artifact": {
+        "artifact_id": "sha256:f4246a6436c3fa439a6cff32a97ccc6a5f18f6b91653680e997e282a1023474c",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:5691c4db8d736df5a7cf7da3557f8e07a9d9523d27ff16326963734e2b737b49",
+          "id": "nq.systemd_unit",
+          "version": "2"
+        },
+        "subject": "systemd-unit:b3c2da0b34844c6aa6be9025b4e14646/nq-fixture.service",
+        "condition": "present",
+        "derivation": "completed",
+        "summary": "the system manager reports the unit in a state other than loaded and active",
+        "refusals": [],
+        "evidence": "evidence/a-unit-fixture-stopped-stopped.json",
+        "exit": 0
+      },
+      "note": "fresh instance unit-fixture-stopped (same scope) because diagnostics execute refuses an instance with prior history",
+      "prepare": "ActiveState=inactive\nSubState=dead\n",
+      "admission": {
+        "instance": "unit-fixture-stopped",
+        "exit": 0,
+        "activated": true,
+        "admission_id": "7bf1fbef-dfda-42eb-8ce9-31faafe74ab7",
+        "output": null
+      }
+    },
+    {
+      "id": "A-25",
+      "title": "runtime: systemd v2 exits non-zero -> present (failed)",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:45:50.121365Z",
+      "log": "cases/A-25.log",
+      "expected": "present",
+      "observed": "present",
+      "artifact": {
+        "artifact_id": "sha256:48782a46284535add7ec494ab7d2a448cff32d7842c91aac289c12fd38138db6",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:5691c4db8d736df5a7cf7da3557f8e07a9d9523d27ff16326963734e2b737b49",
+          "id": "nq.systemd_unit",
+          "version": "2"
+        },
+        "subject": "systemd-unit:b3c2da0b34844c6aa6be9025b4e14646/nq-fixture-fail.service",
+        "condition": "present",
+        "derivation": "completed",
+        "summary": "the system manager reports the unit in a state other than loaded and active",
+        "refusals": [],
+        "evidence": "evidence/a-unit-fail-initial.json",
+        "exit": 0
+      },
+      "unit_state": "Result=exit-code\nActiveState=failed\nSubState=failed\n"
+    },
+    {
+      "id": "A-26",
+      "title": "runtime: systemd v2 alias name -> cannot_evaluate unit_name_not_canonical",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:45:50.994535Z",
+      "log": "cases/A-26.log",
+      "expected": "cannot_evaluate unit_name_not_canonical",
+      "observed": "cannot_evaluate",
+      "artifact": {
+        "artifact_id": "sha256:2a34aa4409fbcf7f160b123cf8497eab95c3e8f74107c2e4fb94ecc79dc1a84d",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:5691c4db8d736df5a7cf7da3557f8e07a9d9523d27ff16326963734e2b737b49",
+          "id": "nq.systemd_unit",
+          "version": "2"
+        },
+        "subject": "systemd-unit:b3c2da0b34844c6aa6be9025b4e14646/nq-fixture-alias.service",
+        "condition": "unresolved",
+        "derivation": "refused",
+        "summary": "the newest systemd unit testimony lacks complete systemd_unit_state coverage",
+        "refusals": [
+          {
+            "code": "cannot_evaluate",
+            "boundary": "detector",
+            "message": "the newest systemd unit testimony lacks complete systemd_unit_state coverage",
+            "reason": "incomplete_systemd_unit_coverage",
+            "failure_code": "unit_name_not_canonical",
+            "failure_retriable": "false",
+            "details": {
+              "failure_code": "unit_name_not_canonical",
+              "failure_error_count": "1",
+              "failure_retriable": "false",
+              "reason": "incomplete_systemd_unit_coverage"
+            }
+          }
+        ],
+        "evidence": "evidence/a-unit-alias-initial.json",
+        "exit": 0
+      },
+      "unit_state": "Id=nq-fixture.service\nNames=nq-fixture.service nq-fixture-alias.service\nActiveState=active\n"
+    },
+    {
+      "id": "A-27",
+      "title": "runtime: systemd v2 nonexistent -> present (not-found)",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:45:51.853150Z",
+      "log": "cases/A-27.log",
+      "expected": "present",
+      "observed": "present",
+      "artifact": {
+        "artifact_id": "sha256:471e0778822d5c7cc3330c8117bde2d52eaf74887635584a6d2e7fa8899b48e9",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:5691c4db8d736df5a7cf7da3557f8e07a9d9523d27ff16326963734e2b737b49",
+          "id": "nq.systemd_unit",
+          "version": "2"
+        },
+        "subject": "systemd-unit:b3c2da0b34844c6aa6be9025b4e14646/nq-fixture-absent-4606e2f3.service",
+        "condition": "present",
+        "derivation": "completed",
+        "summary": "the system manager reports the unit in a state other than loaded and active",
+        "refusals": [],
+        "evidence": "evidence/a-unit-absent-initial.json",
+        "exit": 0
+      },
+      "unit_state": "LoadState=not-found\nActiveState=inactive\n"
+    },
+    {
+      "id": "A-28",
+      "title": "runtime: systemd v2 wrong machine id -> cannot_evaluate machine_identity_mismatch",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:45:52.590749Z",
+      "log": "cases/A-28.log",
+      "expected": "cannot_evaluate machine_identity_mismatch",
+      "observed": "cannot_evaluate",
+      "artifact": {
+        "artifact_id": "sha256:20d9cbf56672c36bc8dd9087d11ca48213306f329d9b7c642d1ec253a6a1cdae",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:5691c4db8d736df5a7cf7da3557f8e07a9d9523d27ff16326963734e2b737b49",
+          "id": "nq.systemd_unit",
+          "version": "2"
+        },
+        "subject": "systemd-unit:ffffffffffffffffffffffffffffffff/nq-fixture.service",
+        "condition": "unresolved",
+        "derivation": "refused",
+        "summary": "the newest systemd unit testimony lacks complete systemd_unit_state coverage",
+        "refusals": [
+          {
+            "code": "cannot_evaluate",
+            "boundary": "detector",
+            "message": "the newest systemd unit testimony lacks complete systemd_unit_state coverage",
+            "reason": "incomplete_systemd_unit_coverage",
+            "failure_code": "machine_identity_mismatch",
+            "failure_retriable": "false",
+            "details": {
+              "failure_code": "machine_identity_mismatch",
+              "failure_error_count": "1",
+              "failure_retriable": "false",
+              "reason": "incomplete_systemd_unit_coverage"
+            }
+          }
+        ],
+        "evidence": "evidence/a-unit-machine-initial.json",
+        "exit": 0
+      }
+    },
+    {
+      "id": "A-29",
+      "title": "runtime: typed owner failure detail on every cannot_evaluate",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:45:52.591921Z",
+      "log": "cases/A-29.log",
+      "cannot_evaluate_refusals": [
+        {
+          "instance": "unit-alias",
+          "tag": "initial",
+          "code": "cannot_evaluate",
+          "boundary": "detector",
+          "message": "the newest systemd unit testimony lacks complete systemd_unit_state coverage",
+          "reason": "incomplete_systemd_unit_coverage",
+          "failure_code": "unit_name_not_canonical",
+          "failure_retriable": "false",
+          "owner_failure": true
+        },
+        {
+          "instance": "unit-machine",
+          "tag": "initial",
+          "code": "cannot_evaluate",
+          "boundary": "detector",
+          "message": "the newest systemd unit testimony lacks complete systemd_unit_state coverage",
+          "reason": "incomplete_systemd_unit_coverage",
+          "failure_code": "machine_identity_mismatch",
+          "failure_retriable": "false",
+          "owner_failure": true
+        }
+      ],
+      "owner_failure_count": 2,
+      "note": "failure_code and failure_retriable read from each artifact refusal's details; detector-level refusals without an owner collection failure carry neither field"
+    },
+    {
+      "id": "A-30",
+      "title": "runtime: nqd.service start (ExecStartPre), status, stop, restart",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:46:01.587423Z",
+      "log": "cases/A-30.log",
+      "start": "start-exit=0\nactive\n",
+      "exec_start_pre": [
+        "ExecStartPre={ path=/usr/bin/install ; argv[]=/usr/bin/install -d -o nq -g nq -m 0711 /run/nq/helpers ; ignore_errors=no ; start_time=[Fri 2026-09-25 02:45:52 UTC] ; stop_time=[Fri 2026-09-25 02:45:52 UTC] ; pid=2084 ; code=exited ; status=0 }",
+        "ExecStartPre={ path=/usr/bin/sha256sum ; argv[]=/usr/bin/sha256sum --quiet --check /usr/share/nq/MANIFEST.sha256 ; ignore_errors=no ; start_time=[Fri 2026-09-25 02:45:52 UTC] ; stop_time=[Fri 2026-09-25 02:45:52 UTC] ; pid=2085 ; code=exited ; status=0 }",
+        "ExecStartPre={ path=/usr/bin/nq ; argv[]=/usr/bin/nq --config=/etc/nq/nq.toml config check ; ignore_errors=no ; start_time=[Fri 2026-09-25 02:45:52 UTC] ; stop_time=[Fri 2026-09-25 02:45:52 UTC] ; pid=2086 ; code=exited ; status=0 }"
+      ],
+      "stop": "stop-exit=0\ninactive\n",
+      "restart": "start-exit=0\nactive\nrestart-exit=0\nactive\nNRestarts=0\nExecMainPID=2202\nActiveState=active\nSubState=running\n",
+      "status": "evidence/a-nqd-status.txt"
+    },
+    {
+      "id": "A-31",
+      "title": "runtime: nqd scheduled collections after start (journal)",
+      "outcome": "FAIL",
+      "recorded_at": "2026-09-25T02:46:27.546589Z",
+      "log": "cases/A-31.log",
+      "error_count": 13,
+      "warn_count": 9,
+      "admitted_and_evaluated_count": 0,
+      "distinct_error_messages": [
+        "2026-09-25T02:46:03.255736Z ERROR collection engine error instance=fs-inodes-full error=storage invariant violated: evaluation trigger run <uuid> uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03.264016Z ERROR collection engine error instance=host-local-load error=storage invariant violated: evaluation trigger run <uuid> uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03.273405Z ERROR collection engine error instance=unit-fixture error=storage invariant violated: evaluation trigger run <uuid> uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03.275799Z ERROR collection engine error instance=mem-local error=storage invariant violated: evaluation trigger run <uuid> uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03.278378Z ERROR collection engine error instance=fs-full-capacity error=storage invariant violated: evaluation trigger run <uuid> uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03.283007Z ERROR collection engine error instance=unit-fixture-stopped error=storage invariant violated: evaluation trigger run <uuid> uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03.288263Z ERROR collection engine error instance=unit-alias error=storage invariant violated: evaluation trigger run <uuid> uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03.293487Z ERROR collection engine error instance=fs-roomy-capacity error=storage invariant violated: evaluation trigger run <uuid> uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03.298801Z ERROR collection engine error instance=unit-machine error=storage invariant violated: evaluation trigger run <uuid> uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03.305733Z ERROR collection engine error instance=unit-fail error=storage invariant violated: evaluation trigger run <uuid> uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03.309932Z ERROR collection engine error instance=host-local error=storage invariant violated: evaluation trigger run <uuid> uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03.314048Z ERROR collection engine error instance=unit-absent error=storage invariant violated: evaluation trigger run <uuid> uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03.321381Z ERROR collection engine error instance=fs-inodes-roomy error=storage invariant violated: evaluation trigger run <uuid> uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f"
+      ],
+      "first_errors": [
+        "2026-09-25T02:46:03+0000 nq-rc-a nqd[2202]: 2026-09-25T02:46:03.255736Z ERROR collection engine error instance=fs-inodes-full error=storage invariant violated: evaluation trigger run 01148a62-fb80-43b6-8196-49041824fb89 uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03+0000 nq-rc-a nqd[2202]: 2026-09-25T02:46:03.264016Z ERROR collection engine error instance=host-local-load error=storage invariant violated: evaluation trigger run ac2bbf7d-00e8-4b98-944c-bf377fb0bf77 uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03+0000 nq-rc-a nqd[2202]: 2026-09-25T02:46:03.273405Z ERROR collection engine error instance=unit-fixture error=storage invariant violated: evaluation trigger run 4fc6dd06-5a25-4f59-aa12-e123ac044bed uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03+0000 nq-rc-a nqd[2202]: 2026-09-25T02:46:03.275799Z ERROR collection engine error instance=mem-local error=storage invariant violated: evaluation trigger run 76b6ade9-1d76-4afc-8f58-b14f2dc90123 uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03+0000 nq-rc-a nqd[2202]: 2026-09-25T02:46:03.278378Z ERROR collection engine error instance=fs-full-capacity error=storage invariant violated: evaluation trigger run f76e5e88-67d3-4b88-959e-e9f131e1da4d uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f",
+        "2026-09-25T02:46:03+0000 nq-rc-a nqd[2202]: 2026-09-25T02:46:03.283007Z ERROR collection engine error instance=unit-fixture-stopped error=storage invariant violated: evaluation trigger run 8b28bfee-dcc7-4897-82d9-b57fc915af3c uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f"
+      ],
+      "journal": "evidence/a-nqd-journal-after-start.txt",
+      "note": "nqd started against watchers admitted and executed by the nq CLI; any ERROR line is recorded verbatim"
+    },
+    {
+      "id": "N-01",
+      "title": "negative: execution_account = nq refused",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:46:29.901987Z",
+      "log": "cases/N-01.log",
+      "config": "evidence/a-neg-same-identity.toml",
+      "steps": {
+        "config_check": {
+          "exit": 1,
+          "output": "nq: cannot validate /etc/nq/neg-same-identity.toml: invalid configuration at watchers[0].command.execution_account: helper execution UID 994 is the current daemon/operator UID\n"
+        }
+      }
+    },
+    {
+      "id": "N-02",
+      "title": "negative: helper missing refused; dpkg -i reinstall restores",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:46:37.292199Z",
+      "log": "cases/N-02.log",
+      "admission_before_removal": {
+        "instance": "fs-roomy-n02",
+        "exit": 0,
+        "activated": true,
+        "admission_id": "5ede21c5-bab9-47f0-9dc7-03c5f5137488",
+        "output": null
+      },
+      "watcher_test": {
+        "exit": 1,
+        "output": "nq: cannot identify executable /usr/lib/nq/helpers/nq-host-resource-helper: No such file or directory (os error 2): No such file or directory (os error 2)\n"
+      },
+      "admission_while_missing": {
+        "instance": "fs-roomy-n02c",
+        "exit": 1,
+        "activated": false,
+        "admission_id": null,
+        "output": "nq: cannot identify executable /usr/lib/nq/helpers/nq-host-resource-helper: No such file or directory (os error 2): No such file or directory (os error 2)\n"
+      },
+      "execute_while_missing": {
+        "condition": null,
+        "note": "no JSON artifact",
+        "evidence": "evidence/a-fs-roomy-n02-helper-missing.json",
+        "exit": 1,
+        "stderr": "nq: diagnostic execution unsupported: collection for fs-roomy-n02 produced no admitted determinate diagnostic execution; inspect the retained collection outcome\n",
+        "stdout": ""
+      },
+      "reinstall": {
+        "label": "restore after helper removal",
+        "nqd_state_before": "inactive",
+        "dpkg_exit": 0,
+        "dpkg_output": "(Reading database ... 20921 files and directories currently installed.)\nPreparing to unpack .../nq-ng_0.1.0_amd64.deb ...\nUnpacking nq-ng (0.1.0) over (0.1.0) ...\nSetting up nq-ng (0.1.0) ...\n",
+        "store_and_accounts_before": "4ee60b839a7c7e62e5ad95d25965eb1fef04bc7d6ce9b37d46870695101817ad\nnq:x:994:994\nnq-helper:x:993:993\n",
+        "store_and_accounts_after": "4ee60b839a7c7e62e5ad95d25965eb1fef04bc7d6ce9b37d46870695101817ad\nnq:x:994:994\nnq-helper:x:993:993\n",
+        "unchanged": true,
+        "manifest": "manifest-ok"
+      },
+      "existing_admission_after_reinstall": {
+        "exit": 0,
+        "output": "{\n  \"outcome\": \"tested\",\n  \"instance_id\": \"fs-roomy-capacity\",\n  \"report_digest\": \"sha256:343d947ffb282ede89032a9ed7e6ead283aabb442e5466ff1c78c63c17aad4d4\",\n  \"report_status\": \"complete\"\n}\n",
+        "note": "watcher test of an instance admitted before the reinstall; recorded, not gating"
+      },
+      "admission_after_reinstall": {
+        "instance": "fs-roomy-n02b",
+        "exit": 0,
+        "activated": true,
+        "admission_id": "2d281fab-4d98-4ff6-896d-64b84c071ac2",
+        "output": null
+      },
+      "execute_after_reinstall": "explicitly_absent"
+    },
+    {
+      "id": "N-03",
+      "title": "negative: helper mode 0700 root refused",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:46:42.070936Z",
+      "log": "cases/N-03.log",
+      "admission_before_chmod": {
+        "instance": "fs-roomy-n03",
+        "exit": 0,
+        "activated": true,
+        "admission_id": "781b34e6-7573-4fb2-ae48-c166236066ac",
+        "output": null
+      },
+      "watcher_test": {
+        "exit": 1,
+        "output": "nq: cannot identify executable /usr/lib/nq/helpers/nq-host-resource-helper: Permission denied (os error 13): Permission denied (os error 13)\n"
+      },
+      "admission_while_0700": {
+        "instance": "fs-roomy-n03c",
+        "exit": 1,
+        "activated": false,
+        "admission_id": null,
+        "output": "nq: cannot identify executable /usr/lib/nq/helpers/nq-host-resource-helper: Permission denied (os error 13): Permission denied (os error 13)\n"
+      },
+      "execute_while_0700": {
+        "condition": null,
+        "note": "no JSON artifact",
+        "evidence": "evidence/a-fs-roomy-n03-helper-0700.json",
+        "exit": 1,
+        "stderr": "nq: diagnostic execution unsupported: collection for fs-roomy-n03 produced no admitted determinate diagnostic execution; inspect the retained collection outcome\n",
+        "stdout": ""
+      },
+      "admission_after_restore": {
+        "instance": "fs-roomy-n03b",
+        "exit": 0,
+        "activated": true,
+        "admission_id": "edf350ff-1fed-41e0-9cd7-bb469279f09c",
+        "output": null
+      },
+      "execute_after_restore": "explicitly_absent"
+    },
+    {
+      "id": "N-04",
+      "title": "negative: helper bytes substituted -> execution and nqd refused",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:46:53.723083Z",
+      "log": "cases/N-04.log",
+      "admission_before_substitution": {
+        "instance": "fs-roomy-n04",
+        "exit": 0,
+        "activated": true,
+        "admission_id": "ba5a7efc-c7e3-4f41-b4f7-0fe52337a6c9",
+        "output": null
+      },
+      "execute_after_substitution": {
+        "condition": null,
+        "note": "no JSON artifact",
+        "evidence": "evidence/a-fs-roomy-n04-helper-substituted.json",
+        "exit": 1,
+        "stderr": "nq: diagnostic execution unsupported: collection for fs-roomy-n04 produced no admitted determinate diagnostic execution; inspect the retained collection outcome\n",
+        "stdout": ""
+      },
+      "nqd_start_with_substituted_helper": "start-exit=1\nactivating\nResult=exit-code\nExecStartPre={ path=/usr/bin/install ; argv[]=/usr/bin/install -d -o nq -g nq -m 0711 /run/nq/helpers ; ignore_errors=no ; start_time=[Fri 2026-09-25 02:46:43 UTC] ; stop_time=[Fri 2026-09-25 02:46:43 UTC] ; pid=3059 ; code=exited ; status=0 }\nExecStartPre={ path=/usr/bin/sha256sum ; argv[]=/usr/bin/sha256sum --quiet --check /usr/share/nq/MANIFEST.sha256 ; ignore_errors=no ; start_time=[Fri 2026-09-25 02:46:43 UTC] ; stop_time=[Fri 2026-09-25 02:46:43 UTC] ; pid=3060 ; code=exited ; status=1 }\nExecStartPre={ path=/usr/bin/nq ; argv[]=/usr/bin/nq --config=/etc/nq/nq.toml config check ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\nActiveState=activating\n2026-09-25T02:46:03+0000 nq-rc-a nqd[2202]: 2026-09-25T02:46:03.298801Z ERROR collection engine error instance=unit-machine error=storage invariant violated: evaluation trigger run 4b643105-e9ba-4730-a0fc-4c5a798bb8a6 uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f\n2026-09-25T02:46:03+0000 nq-rc-a nqd[2202]: 2026-09-25T02:46:03.305733Z ERROR collection engine error instance=unit-fail error=storage invariant violated: evaluation trigger run 6e856e6d-69a1-4c4f-a2fa-d0797bd62271 uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f\n2026-09-25T02:46:03+0000 nq-rc-a nqd[2202]: 2026-09-25T02:46:03.309932Z ERROR collection engine error instance=host-local error=storage invariant violated: evaluation trigger run 7a3a26ed-f930-4a89-8f01-42fae7b879d9 uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f\n2026-09-25T02:46:03+0000 nq-rc-a nqd[2202]: 2026-09-25T02:46:03.314048Z ERROR collection engine error instance=unit-absent error=storage invariant violated: evaluation trigger run bc83d887-d4e5-4a79-b024-13d3e246cea9 uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f\n2026-09-25T02:46:03+0000 nq-rc-a nqd[2202]: 2026-09-25T02:46:03.321381Z ERROR collection engine error instance=fs-inodes-roomy error=storage invariant violated: evaluation trigger run a55cf054-6ba0-4a42-9af5-522760769605 uses evaluator artifact sha256:82c823aadbbf50447633a99e81c13a666da4fd4146af0b8df464f48246d24bfa but its admission binds sha256:d8aa60ca6e51d61e0670cd11bd05d9ffe4c2b554415a269b65d948faeb1d9b9f\n2026-09-25T02:46:27+0000 nq-rc-a systemd[1]: Stopping nqd.service - NQ-ng local operational evidence service...\n2026-09-25T02:46:27+0000 nq-rc-a systemd[1]: nqd.service: Deactivated successfully.\n2026-09-25T02:46:27+0000 nq-rc-a systemd[1]: Stopped nqd.service - NQ-ng local operational evidence service.\n2026-09-25T02:46:27+0000 nq-rc-a systemd[1]: nqd.service: Consumed 8.159s CPU time.\n2026-09-25T02:46:43+0000 nq-rc-a systemd[1]: Starting nqd.service - NQ-ng local operational evidence service...\n2026-09-25T02:46:43+0000 nq-rc-a nqd[3060]: ./lib/nq/helpers/nq-host-resource-helper: FAILED\n2026-09-25T02:46:43+0000 nq-rc-a nqd[3060]: /usr/bin/sha256sum: WARNING: 1 computed checksum did NOT match\n2026-09-25T02:46:43+0000 nq-rc-a systemd[1]: nqd.service: Control process exited, code=exited, status=1/FAILURE\n2026-09-25T02:46:43+0000 nq-rc-a systemd[1]: nqd.service: Failed with result 'exit-code'.\n2026-09-25T02:46:43+0000 nq-rc-a systemd[1]: Failed to start nqd.service - NQ-ng local operational evidence service.\nJob for nqd.service failed because the control process exited with error code.\nSee \"systemctl status nqd.service\" and \"journalctl -xeu nqd.service\" for details.\n",
+      "reinstall": {
+        "label": "restore after helper substitution",
+        "nqd_state_before": "inactive",
+        "dpkg_exit": 0,
+        "dpkg_output": "(Reading database ... 20921 files and directories currently installed.)\nPreparing to unpack .../nq-ng_0.1.0_amd64.deb ...\nUnpacking nq-ng (0.1.0) over (0.1.0) ...\nSetting up nq-ng (0.1.0) ...\n",
+        "store_and_accounts_before": "8a6bda951a84c7e5650c0d3808b847912fa88949d73472c8e930543f0ce799bf\nnq:x:994:994\nnq-helper:x:993:993\n",
+        "store_and_accounts_after": "8a6bda951a84c7e5650c0d3808b847912fa88949d73472c8e930543f0ce799bf\nnq:x:994:994\nnq-helper:x:993:993\n",
+        "unchanged": true,
+        "manifest": "manifest-ok"
+      },
+      "admission_after_reinstall": {
+        "instance": "fs-roomy-n04b",
+        "exit": 0,
+        "activated": true,
+        "admission_id": "3d6fd9f3-42b8-4b17-a67e-e20c09877f77",
+        "output": null
+      },
+      "execute_after_reinstall": "explicitly_absent",
+      "nqd_after_reinstall": "start-exit=0\nactive\n"
+    },
+    {
+      "id": "N-05",
+      "title": "negative: modified failure-codes.json detected",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:46:55.617685Z",
+      "log": "cases/N-05.log",
+      "packaged_equals_compiled": false,
+      "helper_agrees": true,
+      "manifest_check": "./share/nq/profiles/failure-codes.json: FAILED\nmanifest-exit=1\nsha256sum: WARNING: 1 computed checksum did NOT match\n",
+      "restored": "manifest-ok",
+      "note": "assembler-time refusal covered by test_release_failure_atomicity.sh (not re-run here)"
+    },
+    {
+      "id": "N-06",
+      "title": "negative: wrong subject refused by config check",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:46:56.291928Z",
+      "log": "cases/N-06.log",
+      "config": "evidence/a-neg-wrong-subject.toml",
+      "exit": 1,
+      "message": "nq: profile validation failure: instance neg-wrong-subject binding refused at Profile/ScopeEscape: filesystem scope does not correlate with its request subject or bounds\n"
+    },
+    {
+      "id": "N-07",
+      "title": "negative: wrong profile/scope substitution refused",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:46:57.690702Z",
+      "log": "cases/N-07.log",
+      "v1_scope_under_v2": {
+        "config": "evidence/a-neg-v1-scope-under-v2.toml",
+        "exit": 1,
+        "message": "nq: profile validation failure: instance neg-v1-scope-under-v2 binding refused at Profile/ScopeEscape: systemd unit scope does not correlate with its request subject or bounds\n"
+      },
+      "v2_scope_under_v1": {
+        "config": "evidence/a-neg-v2-scope-under-v1.toml",
+        "exit": 1,
+        "message": "nq: profile validation failure: instance neg-v2-scope-under-v1 subject is outside profile namespace sha256:\n"
+      }
+    },
+    {
+      "id": "N-08",
+      "title": "negative: stale support at the NQ level",
+      "outcome": "NOT_EXERCISED",
+      "recorded_at": "2026-09-25T02:46:57.935681Z",
+      "log": "cases/N-08.log",
+      "reason": "no supported operator command in the installed CLI evaluates a stored report at a later instant: `diagnostics execute` collects and evaluates in one cut, and nqd evaluates only after a successful scheduled collection; the compiled `invalid_freshness` cannot_evaluate therefore has no NQ-level operator trigger in this release. Pulse staleness is outside the released scope.",
+      "cli_surface": "evidence/a-nq-help.txt"
+    },
+    {
+      "id": "N-09",
+      "title": "replay: qualify/export byte-identical across nqd restart",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:47:04.063369Z",
+      "log": "cases/N-09.log",
+      "artifact_id": "sha256:45e7ab39d032d2d0ba4fc9024933e61846d437692ee3cd941e3838e2e7d8a2a0",
+      "before": {
+        "qualify_exit": 0,
+        "qualify_sha256": "3de75f7bc01ddc62040996acb39ad42f9d4e0b4c3551d9f3d38da05dc1a562bb",
+        "export_exit": 0,
+        "export_sha256": "1d47c699fb83bcfc92ad38b18c0e255d298146210912e59597ae0c55c250af37"
+      },
+      "after": {
+        "qualify_exit": 0,
+        "qualify_sha256": "3de75f7bc01ddc62040996acb39ad42f9d4e0b4c3551d9f3d38da05dc1a562bb",
+        "export_exit": 0,
+        "export_sha256": "1d47c699fb83bcfc92ad38b18c0e255d298146210912e59597ae0c55c250af37"
+      },
+      "byte_identical": true,
+      "export_equals_execute_canonical": true,
+      "nqd_restart": "restart-exit=0\nactive\n"
+    },
+    {
+      "id": "N-10",
+      "title": "restart: store persists, new executions work, old artifacts unchanged",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:47:20.064902Z",
+      "log": "cases/N-10.log",
+      "cycle": "stop-exit=0\ninactive\nstart-exit=0\nactive\n",
+      "store_before": "total 1732\ndrwx------  5 nq   nq      4096 Sep 25 02:47 .\ndrwxr-xr-x 23 root root    4096 Sep 25 02:43 ..\ndrwx------  2 nq   nq      4096 Sep 25 02:46 admissions\ndrwx------  2 nq   nq      4096 Sep 25 02:43 backups\n-rw-r--r--  1 nq   nq   1712128 Sep 25 02:47 nq.db\n-rw-r--r--  1 nq   nq     32768 Sep 25 02:47 nq.db-shm\n-rw-r--r--  1 nq   nq         0 Sep 25 02:47 nq.db-wal\ndrwx------  2 nq   nq      4096 Sep 25 02:46 nq.db.fe01-6677.instance-locks\n-rw-------  1 nq   nq        23 Sep 25 02:46 nq.db.fe01-6677.nqd.lock\na012c49e82d24f4e1aba26c8e297a7eff4095592af264638875ffb713b0cf7b6  /var/lib/nq/nq.db\n",
+      "store_after": "total 1736\ndrwx------  5 nq   nq      4096 Sep 25 02:47 .\ndrwxr-xr-x 23 root root    4096 Sep 25 02:43 ..\ndrwx------  2 nq   nq      4096 Sep 25 02:46 admissions\ndrwx------  2 nq   nq      4096 Sep 25 02:43 backups\n-rw-r--r--  1 nq   nq   1716224 Sep 25 02:47 nq.db\n-rw-r--r--  1 nq   nq     32768 Sep 25 02:47 nq.db-shm\n-rw-r--r--  1 nq   nq         0 Sep 25 02:47 nq.db-wal\ndrwx------  2 nq   nq      4096 Sep 25 02:46 nq.db.fe01-6677.instance-locks\n-rw-------  1 nq   nq        23 Sep 25 02:47 nq.db.fe01-6677.nqd.lock\nstore-present\n",
+      "admission": {
+        "instance": "fs-roomy-n10",
+        "exit": 0,
+        "activated": true,
+        "admission_id": "d7d3a729-c044-4bee-811a-0f40fb0a4adb",
+        "output": null
+      },
+      "new_execution": "explicitly_absent",
+      "new_execution_artifact": {
+        "artifact_id": "sha256:18dbe719da4f9430cb52fbd84e3b9ba6aa307a647243c0f92cddf4065e905bd1",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:48d23e2e27fa47f591455c27a3d994b6409eb57a52dabf08d92607332d215636",
+          "id": "nq.host_filesystem_capacity",
+          "version": "1"
+        },
+        "subject": "host-filesystem:b3c2da0b34844c6aa6be9025b4e14646/3fed26e0-6669-43b8-8ae6-f87f7fa445f9",
+        "condition": "explicitly_absent",
+        "derivation": "completed",
+        "summary": "current complete counters place available space above 10% of non-reserved capacity",
+        "refusals": [],
+        "evidence": "evidence/a-fs-roomy-n10-after-nqd-restart.json",
+        "exit": 0
+      },
+      "nqd_journal_for_instance": "2026-09-25T02:46:03+0000 nq-rc-a nqd[2202]: 2026-09-25T02:46:03.025587Z  WARN collection retained without admitted report instance=fs-roomy-n10 governed_result={\"instance_id\":\"fs-roomy-n10\",\"result\":{\"outcome\":\"admission_refused\",\"refusal\":{\"boundary\":\"active_binding\",\"code\":\"missing_active_binding\",\"details\":{\"kind\":\"none\"},\"responsible_instance_id\":\"fs-roomy-n10\"}},\"schema\":\"nq.collection_outcome.v1\"}\n",
+      "earlier_artifacts_unchanged": {
+        "a:host-local:initial": true,
+        "a:fs-full-capacity:initial": true,
+        "a:fs-roomy-capacity:initial": true,
+        "a:fs-inodes-full:initial": true,
+        "a:fs-inodes-roomy:initial": true,
+        "a:unit-fixture:initial": true,
+        "a:unit-fail:initial": true,
+        "a:unit-alias:initial": true,
+        "a:unit-absent:initial": true,
+        "a:unit-machine:initial": true
+      }
+    },
+    {
+      "id": "N-11",
+      "title": "packaging: corrupted .deb",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:47:22.066165Z",
+      "log": "cases/N-11.log",
+      "sha256sum": "nq-ng-0.1.0-linux-amd64.tar.gz: OK\nnq-ng_0.1.0_amd64.deb: FAILED\nsums-exit=1\nsha256sum: WARNING: 1 computed checksum did NOT match\n",
+      "dpkg": "(Reading database ... 20921 files and directories currently installed.)\nPreparing to unpack .../nq-ng_0.1.0_amd64.deb ...\nUnpacking nq-ng (0.1.0) over (0.1.0) ...\ndpkg-exit=1\ndpkg-deb (subprocess): decompressing archive '/home/nqacceptor/neg-corrupt/nq-ng_0.1.0_amd64.deb' (size=12185184) member 'data.tar': zstd error: Restored data doesn't match checksum\ndpkg-deb: error: <decompress> subprocess returned error exit status 2\ndpkg: error processing archive /home/nqacceptor/neg-corrupt/nq-ng_0.1.0_amd64.deb (--install):\n cannot copy extracted data for './usr/share/nq/protocol/schemas/nq.evidence_report.v1.schema.json' to '/usr/share/nq/protocol/schemas/nq.evidence_report.v1.schema.json.dpkg-new': unexpected end of file or stream\nErrors were encountered while processing:\n /home/nqacceptor/neg-corrupt/nq-ng_0.1.0_amd64.deb\n",
+      "installed_after_attempt": {
+        "exit": 0,
+        "output": "Status: install ok installed\nVersion: 0.1.0\nmanifest-ok\n{\"schema\":\"nq.build_info.v1\",\"component\":\"nq\",\"version\":\"0.1.0\",\"debug_assertions\":false,\"helper_isolation_policy\":\"production_separate_identity_required\"}\n"
+      },
+      "repair": null,
+      "installed_after_repair": null,
+      "which": "dpkg -i refused",
+      "installed_intact_after_attempt": true
+    },
+    {
+      "id": "N-12",
+      "title": "packaging: missing artifact",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:47:22.340856Z",
+      "log": "cases/N-12.log",
+      "output": "nq-ng-0.1.0-linux-amd64.tar.gz: FAILED open or read\nnq-ng_0.1.0_amd64.deb: OK\nsums-exit=1\nsha256sum: nq-ng-0.1.0-linux-amd64.tar.gz: No such file or directory\nsha256sum: WARNING: 1 listed file could not be read\n"
+    },
+    {
+      "id": "N-13",
+      "title": "packaging: truncated .deb",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:47:23.840009Z",
+      "log": "cases/N-13.log",
+      "dpkg": "(Reading database ... 20921 files and directories currently installed.)\nPreparing to unpack .../nq-ng_0.1.0_amd64.deb ...\nUnpacking nq-ng (0.1.0) over (0.1.0) ...\ndpkg-exit=1\ndpkg-deb (subprocess): cannot copy archive member from '/home/nqacceptor/neg-partial/nq-ng_0.1.0_amd64.deb' to decompressor pipe: unexpected end of file or stream\ndpkg-deb: error: paste subprocess returned error exit status 2\ndpkg: error processing archive /home/nqacceptor/neg-partial/nq-ng_0.1.0_amd64.deb (--install):\n cannot copy extracted data for './usr/bin/nqd' to '/usr/bin/nqd.dpkg-new': unexpected end of file or stream\nErrors were encountered while processing:\n /home/nqacceptor/neg-partial/nq-ng_0.1.0_amd64.deb\n",
+      "installed_after_attempt": {
+        "exit": 0,
+        "output": "Status: install ok installed\nVersion: 0.1.0\nmanifest-ok\n{\"schema\":\"nq.build_info.v1\",\"component\":\"nq\",\"version\":\"0.1.0\",\"debug_assertions\":false,\"helper_isolation_policy\":\"production_separate_identity_required\"}\n"
+      },
+      "repair": null
+    },
+    {
+      "id": "N-14",
+      "title": "negative: /run/nq after nqd stop (RuntimeDirectory=nq) and the documented CLI wrapper",
+      "outcome": "FAIL",
+      "recorded_at": "2026-09-25T02:46:29.203464Z",
+      "log": "cases/N-14.log",
+      "after_nqd_stop": "inactive\nls: cannot access '/run/nq': No such file or directory\nls: cannot access '/run/nq/helpers': No such file or directory\nRuntimeDirectoryPreserve=no\nRuntimeDirectory=nq\n",
+      "wrapper_exit": 226,
+      "wrapper_output": "",
+      "config_check_direct_exit": 0,
+      "tmpfiles_restore": "tmpfiles-exit=0\ndrwxr-x--x 3 nq nq 60 Sep 25 02:46 /run/nq\ndrwx--x--x 2 nq nq 40 Sep 25 02:46 /run/nq/helpers\n",
+      "wrapper_after_restore": {
+        "exit": 0,
+        "output": "{\n  \"outcome\": \"tested\",\n  \"instance_id\": \"host-local\",\n  \"report_digest\": \"sha256:95b25e02016d1f0f9555175b3e9b66f54244914b91f0f61d50a21dae8150a6ea\",\n  \"report_status\": \"complete\"\n}\n"
+      },
+      "note": "systemd removes a RuntimeDirectory when the unit stops; OPERATIONS.md's nq_helper_command (ReadWritePaths=/run/nq) and helper_runtime_dir=/run/nq/helpers then depend on it existing; exit 226 is systemd EXIT_NAMESPACE"
+    },
+    {
+      "id": "B-01",
+      "title": "predecessor: install M3 package",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:47:30.856713Z",
+      "log": "cases/B-01.log",
+      "sha256sum": "nq-ng_0.1.0_amd64.deb: OK\nsums-exit=0\n",
+      "dpkg": "Selecting previously unselected package nq-ng.\n(Reading database ... 20807 files and directories currently installed.)\nPreparing to unpack .../nq-ng_0.1.0_amd64.deb ...\nUnpacking nq-ng (0.1.0) ...\nSetting up nq-ng (0.1.0) ...\ndpkg-exit=0\nCreating group 'nq' with GID 994.\nCreating user 'nq' (NQ-ng service account) with UID 994 and GID 994.\nCreating group 'nq-helper' with GID 993.\nCreating user 'nq-helper' (NQ-ng watcher account) with UID 993 and GID 993.\n",
+      "build_info_and_layout": "{\"schema\":\"nq.build_info.v1\",\"component\":\"nq\",\"version\":\"0.1.0\",\"debug_assertions\":false,\"helper_isolation_policy\":\"production_separate_identity_required\"}\nmanifest-ok\n[\n  {\n    \"digest\": \"sha256:e1d808429458639aaff4a7e7fc2f0145258b0ebe1c36a28dad8ee86d36581494\",\n    \"family\": \"conformance\",\n    \"id\": \"nq.conformance\",\n    \"title\": \"Protocol conformance echo\",\n    \"version\": 1\n  },\n  {\n    \"digest\": \"sha256:c8c10fed1cc5598d953b4defbc98e8c106fc59e035c249d43681698a5c7b4ff9\",\n    \"family\": \"host\",\n    \"id\": \"nq.host\",\n    \"title\": \"Local host state\",\n    \"version\": 1\n  },\n  {\n    \"digest\": \"sha256:85beec374d8c3a19dca3aafe892792237c7ed2a886a3ecbd6fce6245578c0d8d\",\n    \"family\": \"systemd_unit\",\n    \"id\": \"nq.systemd_unit\",\n    \"title\": \"Target-local systemd unit state\",\n    \"version\": 1\n  },\n  {\n    \"digest\": \"sha256:d277728a076d75d8bf5a5294635905b74f6b15b7a9d7a5274ea42a888eb68fae\",\n    \"family\": \"http_endpoint\",\n    \"id\": \"nq.http_endpoint\",\n    \"title\": \"Controller-vantage bounded HTTP endpoint\",\n    \"version\": 1\n  }\n]\ntotal 5500\ndrwxr-xr-x 2 root root    4096 Sep 25 02:47 .\ndrwxr-xr-x 3 root root    4096 Sep 25 02:47 ..\n-rwxr-xr-x 1 root root 1388472 Nov 14  2023 nq-host-helper\n-rwxr-xr-x 1 root root 4211512 Nov 14  2023 nq-operator-beta-helper\n-rwxr-xr-x 1 root root   20144 Nov 14  2023 nq_conformance_helper.py\n",
+      "predecessor_profiles": null
+    },
+    {
+      "id": "B-02",
+      "title": "predecessor: configure nq.host, init, admit, execute",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:47:34.350908Z",
+      "log": "cases/B-02.log",
+      "config": "evidence/b-nq.toml",
+      "init": {
+        "database": "/var/lib/nq/nq.db",
+        "initialized": true,
+        "schema_version": 5
+      },
+      "config_check_exit": 0,
+      "admission": {
+        "outcome": "activated",
+        "instance_id": "host-local",
+        "admission_id": "d0109b11-cc3b-4773-9010-2ec46a8bcd1e",
+        "binding_digest": "sha256:8d4a5ee279b906227deab07a5bd958c4cfecec92749fa14258b1267b7e932e6c",
+        "lock_path": "/var/lib/nq/admissions/host-local.json",
+        "previous_lock_archived": false
+      },
+      "artifact": {
+        "artifact_id": "sha256:6a8dbabbbd19a5b0f42ffeeeba7dd3781beb2fadada189191f0ba93361dc8ab4",
+        "schema": "nq.diagnostic_execution.v2",
+        "profile": {
+          "digest": "sha256:c8c10fed1cc5598d953b4defbc98e8c106fc59e035c249d43681698a5c7b4ff9",
+          "id": "nq.host",
+          "version": "1"
+        },
+        "subject": "host:nq-rc-b",
+        "condition": "explicitly_absent",
+        "derivation": "completed",
+        "summary": "current complete coverage places one-minute load below the detector threshold",
+        "refusals": [],
+        "evidence": "evidence/b-host-local-m3-initial.json",
+        "exit": 0
+      },
+      "export_sha256": "b0838498699487917104d83e9a52ea96782a727a11fa9ce92b4ee855e52652e2"
+    },
+    {
+      "id": "B-03",
+      "title": "predecessor: dpkg -i candidate over M3 (prerm/postinst)",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:47:38.525656Z",
+      "log": "cases/B-03.log",
+      "nqd_before": "start-exit=0\nactive\ndisabled\n",
+      "dpkg": "(Reading database ... 20913 files and directories currently installed.)\nPreparing to unpack .../nq-ng_0.1.0_amd64.deb ...\nUnpacking nq-ng (0.1.0) over (0.1.0) ...\nSetting up nq-ng (0.1.0) ...\ndpkg-exit=0\n",
+      "after": "inactive\ndisabled\nResult=success\nActiveState=inactive\n2026-09-25T02:47:33+0000 nq-rc-b nqd[838]:   \"path\": \"/etc/nq/nq.toml\",\n2026-09-25T02:47:33+0000 nq-rc-b nqd[838]:   \"valid\": true\n2026-09-25T02:47:33+0000 nq-rc-b nqd[838]: }\n2026-09-25T02:47:33+0000 nq-rc-b systemd[1]: Started nqd.service - NQ-ng local operational evidence service.\n2026-09-25T02:47:33+0000 nq-rc-b nqd[841]: 2026-09-25T02:47:33.929698Z  INFO no loopback console; Unix socket API only\n2026-09-25T02:47:33+0000 nq-rc-b nqd[841]: 2026-09-25T02:47:33.929780Z  INFO nqd started instances=3\n2026-09-25T02:47:33+0000 nq-rc-b nqd[841]: 2026-09-25T02:47:33.987035Z  WARN collection retained without admitted report instance=host-local-3 governed_result={\"instance_id\":\"host-local-3\",\"result\":{\"outcome\":\"admission_refused\",\"refusal\":{\"boundary\":\"active_binding\",\"code\":\"missing_active_binding\",\"details\":{\"kind\":\"none\"},\"responsible_instance_id\":\"host-local-3\"}},\"schema\":\"nq.collection_outcome.v1\"}\n2026-09-25T02:47:33+0000 nq-rc-b nqd[841]: 2026-09-25T02:47:33.994981Z  WARN collection retained without admitted report instance=host-local-2 governed_result={\"instance_id\":\"host-local-2\",\"result\":{\"outcome\":\"admission_refused\",\"refusal\":{\"boundary\":\"active_binding\",\"code\":\"missing_active_binding\",\"details\":{\"kind\":\"none\"},\"responsible_instance_id\":\"host-local-2\"}},\"schema\":\"nq.collection_outcome.v1\"}\n2026-09-25T02:47:34+0000 nq-rc-b nqd[841]: 2026-09-25T02:47:34.017824Z ERROR collection engine error instance=host-local error=storage invariant violated: evaluation trigger run fecefc34-78cf-414f-9b44-f57e7476718c uses evaluator artifact sha256:cf01dafbea9e126ad97d1d2399d1fe16652a060cd710018e852c0b1f178316b4 but its admission binds sha256:370c4fdff391886460a56747c9b894ba4bd53a2f37b796bfb7f7966d1229bd82\n2026-09-25T02:47:36+0000 nq-rc-b systemd[1]: Stopping nqd.service - NQ-ng local operational evidence service...\n2026-09-25T02:47:36+0000 nq-rc-b systemd[1]: nqd.service: Deactivated successfully.\n2026-09-25T02:47:36+0000 nq-rc-b systemd[1]: Stopped nqd.service - NQ-ng local operational evidence service.\n{\"schema\":\"nq.build_info.v1\",\"component\":\"nq\",\"version\":\"0.1.0\",\"debug_assertions\":false,\"helper_isolation_policy\":\"production_separate_identity_required\"}\nmanifest-ok\n/etc/nq 750 root:nq\n/etc/nq/nq.toml 640 root:nq\n/var/lib/nq 700 nq:nq\n/var/lib/nq/nq.db 644 nq:nq\n/run/nq/helpers 711 nq:nq\n8cc53512794b3b274c1ab6dfb000b6ffe1964bab647dbc6a81ee82a881ecd2c6  /var/lib/nq/nq.db\n",
+      "store_unchanged_by_install": true,
+      "note": "prerm upgrade must stop nqd and leave it inactive; postinst must not start or enable it"
+    },
+    {
+      "id": "B-04",
+      "title": "predecessor: store schema, old config, re-admission, new executions",
+      "outcome": "FAIL",
+      "recorded_at": "2026-09-25T02:47:46.492678Z",
+      "log": "cases/B-04.log",
+      "steps": {
+        "config_check_old_config_new_binary": {
+          "exit": 0,
+          "output": "{\n  \"config_digest\": \"sha256:6a304fd9b24eb3bc16912e1ab019f29129d062f188fd70562dd64d9e5f776112\",\n  \"path\": \"/etc/nq/nq.toml\",\n  \"valid\": true\n}\n"
+        },
+        "doctor_before_upgrade": {
+          "exit": 1,
+          "output": "nq: database schema version 5 is incompatible; this binary requires 13\n"
+        },
+        "watcher_test_before_upgrade": {
+          "exit": 1,
+          "output": "nq: database schema version 5 is incompatible; this binary requires 13\n"
+        },
+        "execute_fresh_instance_before_upgrade": {
+          "exit": 1,
+          "effective": "None/None",
+          "artifact": {
+            "condition": null,
+            "note": "no JSON artifact",
+            "evidence": "evidence/b-host-local-2-old-store-new-binary.json",
+            "exit": 1,
+            "stderr": "nq: database schema version 5 is incompatible; this binary requires 13\n",
+            "stdout": ""
+          }
+        },
+        "export_old_artifact_before_upgrade": {
+          "exit": 1,
+          "identical_to_m3_export": false,
+          "output_if_not_identical": "nq: database schema version 5 is incompatible; this binary requires 13\n"
+        },
+        "admin_upgrade_1": {
+          "exit": 0,
+          "output": "{\"backup\":\"/var/lib/nq/backups/nq-82257e310898475ba2ba963c0a00af1a90ddd92d91ff19577b5cbdfab5294f70.db\",\"backup_digest\":\"sha256:82257e310898475ba2ba963c0a00af1a90ddd92d91ff19577b5cbdfab5294f70\",\"from_schema_version\":5,\"historical_notification_delivery\":\"absent_not_synthesized\",\"historical_saved_checks\":\"absent_not_synthesized\",\"result\":\"migrated\",\"schema_version\":13}\nupgrade-exit=0\ntotal 620\ndrwx------ 2 nq nq   4096 Sep 25 02:47 .\ndrwx------ 5 nq nq   4096 Sep 25 02:47 ..\n-rw-r--r-- 1 nq nq  32768 Sep 25 02:47 .nq-upgrade-e668e7d6-09f4-486d-9b91-b142b9f88810.db-shm\n-rw-r--r-- 1 nq nq      0 Sep 25 02:47 .nq-upgrade-e668e7d6-09f4-486d-9b91-b142b9f88810.db-wal\n-rw-r--r-- 1 nq nq 561152 Sep 25 02:47 nq-82257e310898475ba2ba963c0a00af1a90ddd92d91ff19577b5cbdfab5294f70.db\n-rw-r--r-- 1 nq nq  32768 Sep 25 02:47 nq-82257e310898475ba2ba963c0a00af1a90ddd92d91ff19577b5cbdfab5294f70.db-shm\n-rw-r--r-- 1 nq nq      0 Sep 25 02:47 nq-82257e310898475ba2ba963c0a00af1a90ddd92d91ff19577b5cbdfab5294f70.db-wal\n"
+        },
+        "doctor_after_upgrade_1": {
+          "exit": 1,
+          "output": "nq: database schema version 12 is incompatible; this binary requires 13\n"
+        },
+        "admin_upgrade_2": {
+          "exit": 0,
+          "output": "{\"backup\":\"/var/lib/nq/backups/nq-e51a7720af01f4666edc5f5da44f0a87a5bb53bd07c295c699c6b3b704ddef1b.db\",\"backup_digest\":\"sha256:e51a7720af01f4666edc5f5da44f0a87a5bb53bd07c295c699c6b3b704ddef1b\",\"from_schema_version\":12,\"historical_local_successor_acquisitions\":\"absent_not_synthesized\",\"result\":\"migrated\",\"schema_version\":13}\nupgrade-exit=0\ntotal 1304\ndrwx------ 2 nq nq   4096 Sep 25 02:47 .\ndrwx------ 5 nq nq   4096 Sep 25 02:47 ..\n-rw-r--r-- 1 nq nq  32768 Sep 25 02:47 .nq-upgrade-4dcd1407-9756-4e39-8cc0-bbc35f98c719.db-shm\n-rw-r--r-- 1 nq nq      0 Sep 25 02:47 .nq-upgrade-4dcd1407-9756-4e39-8cc0-bbc35f98c719.db-wal\n-rw-r--r-- 1 nq nq  32768 Sep 25 02:47 .nq-upgrade-e668e7d6-09f4-486d-9b91-b142b9f88810.db-shm\n-rw-r--r-- 1 nq nq      0 Sep 25 02:47 .nq-upgrade-e668e7d6-09f4-486d-9b91-b142b9f88810.db-wal\n-rw-r--r-- 1 nq nq 561152 Sep 25 02:47 nq-82257e310898475ba2ba963c0a00af1a90ddd92d91ff19577b5cbdfab5294f70.db\n-rw-r--r-- 1 nq nq  32768 Sep 25 02:47 nq-82257e310898475ba2ba963c0a00af1a90ddd92d91ff19577b5cbdfab5294f70.db-shm\n-rw-r--r-- 1 nq nq      0 Sep 25 02:47 nq-82257e310898475ba2ba963c0a00af1a90ddd92d91ff19577b5cbdfab5294f70.db-wal\n-rw-r--r-- 1 nq nq 634880 Sep 25 02:47 nq-e51a7720af01f4666edc5f5da44f0a87a5bb53bd07c295c699c6b3b704ddef1b.db\n-rw-r--r-- 1 nq nq  32768 Sep 25 02:47 nq-e51a7720af01f4666edc5f5da44f0a87a5bb53bd07c295c699c6b3b704ddef1b.db-shm\n-rw-r--r-- 1 nq nq      0 Sep 25 02:47 nq-e51a7720af01f4666edc5f5da44f0a87a5bb53bd07c295c699c6b3b704ddef1b.db-wal\n"
+        },
+        "doctor_after_upgrade_2": {
+          "exit": 1,
+          "output": "{\"database\":\"healthy\",\"diagnostic_artifacts\":{\"commitments\":1,\"state\":\"corrupt\",\"supported_available\":1,\"supported_committed_unavailable\":0,\"unsupported_available\":0,\"unsupported_committed_unavailable\":0},\"healthy\":false,\"instances\":[{\"diagnostic\":\"binary drift for /usr/lib/nq/helpers/nq-host-helper: sha256\",\"instance_id\":\"host-local\",\"state\":\"failed\"},{\"diagnostic\":\"admission I/O at /var/lib/nq/admissions/host-local-2.json: No such file or directory (os error 2)\",\"instance_id\":\"host-local-2\",\"state\":\"failed\"},{\"diagnostic\":\"admission I/O at /var/lib/nq/admissions/host-local-3.json: No such file or directory (os error 2)\",\"instance_id\":\"host-local-3\",\"state\":\"failed\"}],\"profiles\":9}\nnq: engine invariant failed: local v2 diagnostic artifact sha256:6a8dbabbbd19a5b0f42ffeeeba7dd3781beb2fadada189191f0ba93361dc8ab4 substitutes its exact diagnostic semantic surface: limitations\n"
+        },
+        "export_old_artifact_after_upgrade": {
+          "exit": 1,
+          "identical_to_m3_export": false,
+          "output_if_not_identical": "nq: engine invariant failed: watcher run b3cc877e-792a-4622-a69c-beded14e6cee profile digest, semantic identity, or detector suite was substituted\n"
+        },
+        "watcher_test_host_local_after_upgrade": {
+          "exit": 1,
+          "output": "nq: engine invariant failed: local v2 diagnostic artifact sha256:6a8dbabbbd19a5b0f42ffeeeba7dd3781beb2fadada189191f0ba93361dc8ab4 substitutes its exact diagnostic semantic surface: limitations\n"
+        },
+        "watcher_rotate_host_local": {
+          "exit": 1,
+          "output": "nq: engine invariant failed: local v2 diagnostic artifact sha256:6a8dbabbbd19a5b0f42ffeeeba7dd3781beb2fadada189191f0ba93361dc8ab4 substitutes its exact diagnostic semantic surface: limitations\n"
+        },
+        "acquire_next_local_host_local_after_upgrade": {
+          "condition": null,
+          "note": "no JSON artifact",
+          "evidence": "evidence/b-host-local-after-upgrade-acquire.json",
+          "exit": 1,
+          "acquisition_id": "after-upgrade-001",
+          "stderr": "nq: engine invariant failed: local v2 diagnostic artifact sha256:6a8dbabbbd19a5b0f42ffeeeba7dd3781beb2fadada189191f0ba93361dc8ab4 substitutes its exact diagnostic semantic surface: limitations\n",
+          "effective": "None/None"
+        },
+        "admit_fresh_instance_after_upgrade": {
+          "instance": "host-local-2",
+          "exit": 1,
+          "activated": false,
+          "admission_id": null,
+          "output": "nq: engine invariant failed: local v2 diagnostic artifact sha256:6a8dbabbbd19a5b0f42ffeeeba7dd3781beb2fadada189191f0ba93361dc8ab4 substitutes its exact diagnostic semantic surface: limitations\n"
+        },
+        "execute_fresh_instance_after_upgrade": {
+          "exit": 1,
+          "effective": "None/None",
+          "artifact": {
+            "condition": null,
+            "note": "no JSON artifact",
+            "evidence": "evidence/b-host-local-2-after-upgrade.json",
+            "exit": 1,
+            "stderr": "nq: engine invariant failed: local v2 diagnostic artifact sha256:6a8dbabbbd19a5b0f42ffeeeba7dd3781beb2fadada189191f0ba93361dc8ab4 substitutes its exact diagnostic semantic surface: limitations\n",
+            "stdout": ""
+          }
+        },
+        "nqd_start_after_upgrade": {
+          "exit": 0,
+          "output": "start-exit=0\nactivating\n2026-09-25T02:47:42+0000 nq-rc-b nqd[1203]:   \"valid\": true\n2026-09-25T02:47:42+0000 nq-rc-b nqd[1203]: }\n2026-09-25T02:47:42+0000 nq-rc-b systemd[1]: Started nqd.service - NQ-ng local operational evidence service.\n2026-09-25T02:47:42+0000 nq-rc-b nqd[1206]: 2026-09-25T02:47:42.644656Z  INFO no loopback console; Unix socket API only\n2026-09-25T02:47:42+0000 nq-rc-b nqd[1206]: 2026-09-25T02:47:42.645029Z  INFO nqd started instances=3\n2026-09-25T02:47:42+0000 nq-rc-b nqd[1206]: nqd: daemon service failed: engine invariant failed: local v2 diagnostic artifact sha256:6a8dbabbbd19a5b0f42ffeeeba7dd3781beb2fadada189191f0ba93361dc8ab4 substitutes its exact diagnostic semantic surface: limitations\n2026-09-25T02:47:42+0000 nq-rc-b systemd[1]: nqd.service: Main process exited, code=exited, status=1/FAILURE\n2026-09-25T02:47:42+0000 nq-rc-b systemd[1]: nqd.service: Failed with result 'exit-code'.\n"
+        }
+      },
+      "re_admission_needed": true,
+      "re_admission_succeeded": false,
+      "successor_on_original_watcher": "None/None",
+      "final_new_execution": "None/None",
+      "note": "observed behaviour recorded step by step; refusals of the pre-upgrade store are expected fail-closed behaviour; a reported upgrade that leaves the store unusable is not"
+    },
+    {
+      "id": "B-05",
+      "title": "predecessor: roll back to M3 against the touched store",
+      "outcome": "PASS",
+      "recorded_at": "2026-09-25T02:47:52.824515Z",
+      "log": "cases/B-05.log",
+      "steps": {
+        "dpkg": "(Reading database ... 20921 files and directories currently installed.)\nPreparing to unpack .../nq-ng_0.1.0_amd64.deb ...\nUnpacking nq-ng (0.1.0) over (0.1.0) ...\nSetting up nq-ng (0.1.0) ...\ndpkg-exit=0\n",
+        "binary": "{\"schema\":\"nq.build_info.v1\",\"component\":\"nq\",\"version\":\"0.1.0\",\"debug_assertions\":false,\"helper_isolation_policy\":\"production_separate_identity_required\"}\nmanifest-ok\n",
+        "config_check": {
+          "exit": 0,
+          "output": "{\n  \"config_digest\": \"sha256:0e4b9eda8b47bda66f9a96e9df4c26c19a80043c5321fe2e36a17f85573c43fd\",\n  \"path\": \"/etc/nq/nq.toml\",\n  \"valid\": true\n}\n"
+        },
+        "export_old_artifact": {
+          "exit": 1,
+          "identical": false,
+          "output": "nq: database schema version 13 is incompatible; this binary requires 5\n"
+        },
+        "watcher_test": {
+          "exit": 1,
+          "output": "nq: database schema version 13 is incompatible; this binary requires 5\n"
+        },
+        "admit_fresh_instance": {
+          "instance": "host-local-3",
+          "exit": 1,
+          "activated": false,
+          "admission_id": null,
+          "output": "nq: database schema version 13 is incompatible; this binary requires 5\n"
+        },
+        "execute_fresh_instance": {
+          "exit": 1,
+          "effective": "None/None",
+          "artifact": {
+            "condition": null,
+            "note": "no JSON artifact",
+            "evidence": "evidence/b-host-local-3-rollback-old-binary.json",
+            "exit": 1,
+            "stderr": "nq: database schema version 13 is incompatible; this binary requires 5\n",
+            "stdout": ""
+          }
+        },
+        "doctor": {
+          "exit": 1,
+          "output": "nq: database schema version 13 is incompatible; this binary requires 5\n"
+        },
+        "nqd": "start-exit=0\nactivating\nResult=exit-code\nActiveState=activating\n2026-09-25T02:47:42+0000 nq-rc-b systemd[1]: nqd.service: Failed with result 'exit-code'.\n2026-09-25T02:47:45+0000 nq-rc-b systemd[1]: Stopped nqd.service - NQ-ng local operational evidence service.\n2026-09-25T02:47:48+0000 nq-rc-b systemd[1]: Starting nqd.service - NQ-ng local operational evidence service...\n2026-09-25T02:47:48+0000 nq-rc-b nqd[1408]: {\n2026-09-25T02:47:48+0000 nq-rc-b nqd[1408]:   \"config_digest\": \"sha256:0e4b9eda8b47bda66f9a96e9df4c26c19a80043c5321fe2e36a17f85573c43fd\",\n2026-09-25T02:47:48+0000 nq-rc-b nqd[1408]:   \"path\": \"/etc/nq/nq.toml\",\n2026-09-25T02:47:48+0000 nq-rc-b nqd[1408]:   \"valid\": true\n2026-09-25T02:47:48+0000 nq-rc-b nqd[1408]: }\n2026-09-25T02:47:48+0000 nq-rc-b systemd[1]: Started nqd.service - NQ-ng local operational evidence service.\n2026-09-25T02:47:48+0000 nq-rc-b nqd[1411]: nqd: database is absent or has an incompatible schema; run `nq init` or `nq admin upgrade`: database schema version 13 is incompatible; this binary requires 5\n2026-09-25T02:47:48+0000 nq-rc-b systemd[1]: nqd.service: Main process exited, code=exited, status=1/FAILURE\n2026-09-25T02:47:48+0000 nq-rc-b systemd[1]: nqd.service: Failed with result 'exit-code'.\n"
+      },
+      "silently_accepted_unknown_schema": false,
+      "note": "an explicit refusal of the newer store by the old binary is the expected result; silent acceptance is a defect"
+    }
+  ]
+}
