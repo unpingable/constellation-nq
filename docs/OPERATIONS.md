@@ -696,6 +696,16 @@ notification delivery, or saved-check results. Every backup is complete before
 the corresponding source write; failure leaves that transition's source
 transactionally unchanged.
 
+Store continuity across NQ builds is **not qualified**. A migrated store can
+still be refused when it is reopened: historical diagnostic artifacts are
+checked against the running build's compiled profile surface and
+`profile_semantic_id`, which change whenever profile or protocol sources change
+(constellation-nq#12). Until continuity is qualified, the supported procedure for
+moving to a different NQ build is: settle or record any in-flight work, take
+and verify a backup, export the artifacts you must keep with `nq diagnostics
+export`, then initialize a fresh store under the new build and re-admit every
+watcher. Keep the old backup together with the old package bytes for rollback.
+
 For a second observation from the same admitted local watcher, use the
 [bounded local-successor profile](LOCAL_SUCCESSOR.md). Do not initialize a
 different evidence owner or repeat initial-only diagnostics to imitate
