@@ -24,6 +24,10 @@ StateDirectoryMode=0700
 # supervisor refuses to prepare a private helper directory under any other mode.
 RuntimeDirectory=nq
 RuntimeDirectoryMode=0751
+# Keep /run/nq and /run/nq/helpers across stop: operator commands run through
+# the documented nq_helper_command wrapper (ReadWritePaths=/run/nq) while nqd
+# is stopped for admission, rotation, upgrade and restore.
+RuntimeDirectoryPreserve=yes
 
 ExecStartPre=+/usr/bin/install -d -o nq -g nq -m 0711 /run/nq/helpers
 # MANIFEST.sha256 is generated from the exact release stage with paths relative

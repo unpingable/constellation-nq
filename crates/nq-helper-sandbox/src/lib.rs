@@ -1243,6 +1243,7 @@ mod tests {
         let unit = include_str!("../../../packaging/systemd/nqd.service");
         assert!(unit.contains("User=nq\nGroup=nq\n"));
         assert!(unit.contains("NoNewPrivileges=yes"));
+        assert!(unit.contains("RuntimeDirectoryPreserve=yes\n"));
         let capabilities = "CAP_SETUID CAP_SETGID CAP_CHOWN CAP_KILL";
         assert!(unit.contains(&format!("CapabilityBoundingSet={capabilities}")));
         assert!(unit.contains(&format!("AmbientCapabilities={capabilities}")));
