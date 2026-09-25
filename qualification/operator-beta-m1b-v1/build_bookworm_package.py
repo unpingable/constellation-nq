@@ -43,6 +43,7 @@ BUILD_ENV = {
     "CARGO_TARGET_DIR": "/build",
     "HOME": "/tmp/nq-builder-home",
     "LC_ALL": "C.UTF-8",
+    "NQ_SOURCE_COMMIT": SOURCE_HEAD,
     "RUSTFLAGS": "--remap-path-prefix=/src=. --remap-path-prefix=/vendor=/cargo-vendor",
     "RUSTUP_TOOLCHAIN": "1.94.0",
     "SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH,

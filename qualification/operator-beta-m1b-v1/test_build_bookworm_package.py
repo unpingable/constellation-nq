@@ -41,6 +41,16 @@ class BuilderTests(unittest.TestCase):
         self.assertEqual(BUILDER.BUILD_ENV["CARGO_INCREMENTAL"], "0")
         self.assertEqual(BUILDER.BUILD_ENV["SOURCE_DATE_EPOCH"], "1700000000")
 
+    def test_build_records_the_pinned_source_commit_in_every_binary(self) -> None:
+        # The assembler refuses binaries without one shared 40-hex source
+        # commit, and the receipt records BUILD_ENV, so the pinned head is the
+        # commit each packaged binary reports.
+        self.assertRegex(BUILDER.SOURCE_HEAD, r"^[0-9a-f]{40}$")
+        self.assertEqual(BUILDER.BUILD_ENV["NQ_SOURCE_COMMIT"], BUILDER.SOURCE_HEAD)
+        command = BUILDER.build_command(pathlib.Path("/source"), pathlib.Path("/vendor-input"), pathlib.Path("/case"))
+        self.assertIn(f"NQ_SOURCE_COMMIT={BUILDER.SOURCE_HEAD}", command)
+        self.assertIn(f"NQ_SOURCE_COMMIT={BUILDER.SOURCE_HEAD}", BUILDER.normalized_build_command())
+
     def test_closed_receipt_refuses_identity_substitutions(self) -> None:
         receipt = {key: {} for key in BUILDER.RECEIPT_KEYS}
         for key in ("source", "builder", "binaries", "artifacts", "qualification"):
