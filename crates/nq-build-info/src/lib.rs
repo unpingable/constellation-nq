@@ -5,8 +5,17 @@ use std::io::{self, Write};
 
 use serde::Serialize;
 
+mod source_commit;
+
+pub use source_commit::{SOURCE_COMMIT_VARIABLE, parse_source_commit};
+
+include!(concat!(env!("OUT_DIR"), "/source_commit_generated.rs"));
+
 /// Stable schema identifier for the executable build probe.
-pub const BUILD_INFO_SCHEMA: &str = "nq.build_info.v1";
+///
+/// `v2` added `source_commit`; consumers that check the key set as a closed
+/// set must accept exactly the `v2` keys.
+pub const BUILD_INFO_SCHEMA: &str = "nq.build_info.v2";
 
 /// Build-time helper isolation policy represented by one executable.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -31,6 +40,10 @@ pub struct BuildInfo<'a> {
     pub debug_assertions: bool,
     /// Helper identity policy selected by this build profile.
     pub helper_isolation_policy: HelperIsolationPolicy,
+    /// Full git commit id the executable was built from, when release
+    /// automation recorded one through `NQ_SOURCE_COMMIT`; `null` for
+    /// ordinary development builds.
+    pub source_commit: Option<&'static str>,
 }
 
 impl<'a> BuildInfo<'a> {
@@ -49,6 +62,7 @@ impl<'a> BuildInfo<'a> {
             version,
             debug_assertions,
             helper_isolation_policy,
+            source_commit: SOURCE_COMMIT,
         }
     }
 }
@@ -94,5 +108,42 @@ mod tests {
         assert_eq!(decoded["component"], "fixture");
         assert_eq!(decoded["version"], "1.2.3");
         assert_eq!(decoded["debug_assertions"], cfg!(debug_assertions));
+        assert_eq!(decoded["source_commit"].as_str(), SOURCE_COMMIT);
+        assert_eq!(decoded.as_object().map(serde_json::Map::len), Some(6));
+    }
+
+    #[test]
+    fn version_string_carries_the_recorded_commit() {
+        match SOURCE_COMMIT {
+            Some(commit) => {
+                assert_eq!(parse_source_commit(Some(commit)), Ok(Some(commit)));
+                assert_eq!(
+                    VERSION_STRING,
+                    format!("{} ({commit})", env!("CARGO_PKG_VERSION"))
+                );
+            }
+            None => assert_eq!(VERSION_STRING, env!("CARGO_PKG_VERSION")),
+        }
+    }
+
+    #[test]
+    fn source_commit_accepts_only_a_full_lowercase_commit_id() {
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(parse_source_commit(None), Ok(None));
+        assert_eq!(parse_source_commit(Some("")), Ok(None));
+        assert_eq!(parse_source_commit(Some(commit)), Ok(Some(commit)));
+        for rejected in [
+            "0123456789abcdef0123456789abcdef0123456",
+            "0123456789abcdef0123456789abcdef012345678",
+            "0123456789ABCDEF0123456789abcdef01234567",
+            "0123456789abcdef0123456789abcdef0123456g",
+            " 0123456789abcdef0123456789abcdef01234567",
+            "0123456789abcdef0123456789abcdef01234567\n",
+            "HEAD",
+            "v0.1.0",
+        ] {
+            let error = parse_source_commit(Some(rejected)).expect_err(rejected);
+            assert!(error.contains(SOURCE_COMMIT_VARIABLE), "{error}");
+        }
     }
 }

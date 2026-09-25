@@ -17,7 +17,7 @@ fn helper_exposes_version_and_build_policy_without_reading_a_request() {
     assert!(output.stderr.is_empty());
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("machine-readable build information");
-    assert_eq!(value["schema"], "nq.build_info.v1");
+    assert_eq!(value["schema"], "nq.build_info.v2");
     assert_eq!(value["component"], "nq-host-helper");
     assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(value["debug_assertions"], cfg!(debug_assertions));
