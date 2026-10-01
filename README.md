@@ -134,3 +134,7 @@ developer-preview boundary, and
 older [docs/PLAN.md](docs/PLAN.md) is preserved as historical design material;
 where it conflicts with the north-star or sequencing record, those current
 records govern.
+
+## Beta work planning
+
+See the [current beta work plan](docs/BETA-WORK.md) for owned requirements, exclusions, dependencies and GitHub issues. Plan publication does not start implementation or transfer qualification.
