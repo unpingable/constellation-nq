@@ -41,25 +41,30 @@ pub struct Replay {
 }
 
 pub fn run(command: StageCommand, realization: bool) -> Result<()> {
-    let evaluator = identity(realization)?;
     match command {
         StageCommand::Evaluate(args) => {
             if realization {
+                let profile = read(&args.profile)?;
+                let evidence = read(&args.evidence)?;
+                let evaluator = identity(realization)?;
                 write(
                     &args.output,
                     &r::evaluate_campaign_stage_realization(
-                        &read(&args.profile)?,
-                        &read(&args.evidence)?,
+                        &profile,
+                        &evidence,
                         &evaluator,
                         args.evaluated_at_unix_ms,
                     ),
                 )
             } else {
+                let profile = read(&args.profile)?;
+                let evidence = read(&args.evidence)?;
+                let evaluator = identity(realization)?;
                 write(
                     &args.output,
                     &q::evaluate_campaign_stage_qualification(
-                        &read(&args.profile)?,
-                        &read(&args.evidence)?,
+                        &profile,
+                        &evidence,
                         &evaluator,
                         args.evaluated_at_unix_ms,
                     ),
@@ -68,33 +73,31 @@ pub fn run(command: StageCommand, realization: bool) -> Result<()> {
         }
         StageCommand::Replay(args) => {
             let matches = if realization {
+                let profile = read(&args.profile)?;
+                let evidence = read(&args.evidence)?;
                 let receipt: r::CampaignStageRealizationReceiptV2 = read(&args.receipt)?;
+                let evaluator = identity(realization)?;
                 check_identity(
                     &evaluator,
                     &receipt.evaluator_id,
                     &receipt.evaluator_version,
                     &receipt.evaluator_executable_sha256,
                 )?;
-                let replay = r::replay_campaign_stage_realization(
-                    &read(&args.profile)?,
-                    &read(&args.evidence)?,
-                    &receipt,
-                );
+                let replay = r::replay_campaign_stage_realization(&profile, &evidence, &receipt);
                 write(&args.output, &replay)?;
                 replay.matches
             } else {
+                let profile = read(&args.profile)?;
+                let evidence = read(&args.evidence)?;
                 let receipt: q::CampaignStageQualificationReceiptV1 = read(&args.receipt)?;
+                let evaluator = identity(realization)?;
                 check_identity(
                     &evaluator,
                     &receipt.evaluator_id,
                     &receipt.evaluator_version,
                     &receipt.evaluator_executable_sha256,
                 )?;
-                let replay = q::replay_campaign_stage_qualification(
-                    &read(&args.profile)?,
-                    &read(&args.evidence)?,
-                    &receipt,
-                );
+                let replay = q::replay_campaign_stage_qualification(&profile, &evidence, &receipt);
                 write(&args.output, &replay)?;
                 replay.matches
             };
