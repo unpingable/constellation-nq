@@ -3650,4 +3650,89 @@ mod tests {
         let document = CanonicalDocument::from_serializable(&malformed).unwrap();
         assert!(reopen_retained_intent(&document).is_err());
     }
+
+    #[tokio::test]
+    async fn stale_claim_is_an_unresolved_unknown_and_failures_list_newest_first() {
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let value = pagerduty_intent("trigger", "event-stale", "inspect");
+        let document = CanonicalDocument::from_serializable(&value).unwrap();
+        let (intent, pager) = parse_submitted(value).unwrap();
+        let payload = render_pagerduty(&intent, pager.as_ref().unwrap(), &document).unwrap();
+        let mut store = Store::open(&config.database_path).unwrap();
+        store
+            .retain_notification_delivery(
+                &NotificationInput {
+                    notification_id: "stale-claim".into(),
+                    idempotency_key: "event-stale:pagerduty:pd.ops".into(),
+                    finding_event_id: None,
+                    destination_kind: "pagerduty".into(),
+                    payload: payload.clone(),
+                    available_at: "2026-01-01T00:00:00+00:00".into(),
+                    max_attempts: 1,
+                    created_at: "2026-01-01T00:00:00+00:00".into(),
+                },
+                &NotificationDeliveryIntentInput {
+                    notification_id: "stale-claim".into(),
+                    stable_event_id: intent.stable_event_id.clone(),
+                    attention_kind: intent.attention_kind.clone(),
+                    attention_receipt_digest: None,
+                    attention_policy_id: intent.attention_policy_id.clone(),
+                    attention_policy_digest: intent.attention_policy_digest.clone(),
+                    transition_id: intent.transition_id.clone(),
+                    route_reference: intent.route_reference.clone(),
+                    destination_identity: intent.destination_identity.clone(),
+                    content_digest: payload.digest().to_owned(),
+                    intent: document,
+                    created_at: "2026-01-01T00:00:00+00:00".into(),
+                },
+            )
+            .unwrap();
+        store
+            .append_notification_delivery_event(&NotificationDeliveryEventInput {
+                notification_id: "stale-claim".into(),
+                event_number: 1,
+                occurred_at: "2026-01-01T00:00:01+00:00".into(),
+                outcome: "claimed".into(),
+                detail: CanonicalDocument::from_serializable(
+                    &json!({"route_reference":"pd.ops","transport":"pagerduty"}),
+                )
+                .unwrap(),
+            })
+            .unwrap();
+        drop(store);
+        assert_eq!(
+            inspect(&config, Some("stale-claim")).unwrap()[0]["delivery_state"],
+            "unknown"
+        );
+        let (component, value) = notification_detail(&config);
+        assert_eq!(component.state, nq_core::public::HealthState::Degraded);
+        assert_eq!(component.code, "delivery_failure_unresolved");
+        let route = &value["routes"]["pd.ops"];
+        assert_eq!(route["counts"]["unknown"], 1);
+        assert_eq!(route["counts"]["claimed_without_outcome"], 0);
+        assert_eq!(route["unresolved_failures"][0]["reason"], "claim_stale");
+        assert_eq!(route["unresolved_failures"][0]["outcome"], "unknown");
+
+        // Eleven more failed conditions, submitted in reverse alphabetical
+        // order: the listed ten are the newest, newest first.
+        for class in ["k", "j", "i", "h", "g", "f", "e", "d", "c", "b", "a"] {
+            let mut failed = pagerduty_intent("trigger", &format!("event-{class}"), "inspect");
+            failed["condition"]["target_class"] = json!(class);
+            submit_pd(&config, &root, failed, true, rate_limited()).await;
+        }
+        let (_, value) = notification_detail(&config);
+        let route = &value["routes"]["pd.ops"];
+        assert_eq!(route["unresolved_failure_count"], 12);
+        let listed = route["unresolved_failures"].as_array().unwrap();
+        assert_eq!(listed.len(), 10);
+        assert_eq!(
+            listed[0]["condition"],
+            "crow-lab:nq:nq-no-fresh-acquisition:a"
+        );
+        assert_eq!(
+            listed[9]["condition"],
+            "crow-lab:nq:nq-no-fresh-acquisition:j"
+        );
+    }
 }

@@ -4500,8 +4500,9 @@ pub struct NotificationRouteDeliverySummary {
     pub accepted: u64,
     pub newest_accepted_at: Option<String>,
     /// For each condition (the route, plus the v2 condition when present)
-    /// whose newest terminal outcome is a failure, that failure. A refusal
-    /// counts, except the deliberate network-disabled refusal.
+    /// whose newest terminal outcome is a failure, that failure, oldest
+    /// first. A refusal counts, except the deliberate network-disabled
+    /// refusal and the saved-check input refusals.
     pub unresolved: Vec<NotificationDeliveryFailure>,
 }
 
@@ -6231,8 +6232,17 @@ impl Store {
 
     /// Summarize retained delivery custody per route at read time. It reads
     /// the existing status view and every terminal event (no index; the cost
-    /// grows with retained deliveries) and records nothing.
-    pub fn notification_delivery_summary(&self) -> Result<NotificationDeliverySummary, StoreError> {
+    /// grows with retained deliveries) and records nothing. A claim without an
+    /// outcome made before `stale_before` is reported as an `unknown` failure
+    /// with reason `claim_stale`; a later one is in flight.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Counts, newest-per-condition and stale-claim folding share one read"
+    )]
+    pub fn notification_delivery_summary(
+        &self,
+        stale_before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<NotificationDeliverySummary, StoreError> {
         let mut summary = NotificationDeliverySummary::default();
         // Older supported stores, read before migration, have no delivery custody.
         let has_custody: bool = self.connection.query_row(
@@ -6278,7 +6288,8 @@ impl Store {
                   THEN json_extract(CAST(i.intent_json AS TEXT), '$.condition.site') || ':' || json_extract(CAST(i.intent_json AS TEXT), '$.condition.component') || ':' || json_extract(CAST(i.intent_json AS TEXT), '$.condition.rule') || COALESCE(':' || json_extract(CAST(i.intent_json AS TEXT), '$.condition.target_class'), '') END \
              FROM notification_delivery_events AS e JOIN notification_delivery_intents AS i ON i.notification_id = e.notification_id \
              WHERE e.outcome IN ('failed', 'unknown', 'accepted') \
-                OR (e.outcome = 'refused' AND json_extract(CAST(e.detail_json AS TEXT), '$.reason') IS NOT 'network_dispatch_not_explicitly_enabled') \
+                OR (e.outcome = 'refused' AND COALESCE(json_extract(CAST(e.detail_json AS TEXT), '$.reason'), '') NOT IN ('network_dispatch_not_explicitly_enabled', 'saved_check_attention_event_not_current', 'saved_check_attention_event_time_invalid')) \
+                OR (e.outcome = 'claimed' AND NOT EXISTS (SELECT 1 FROM notification_delivery_events AS t WHERE t.notification_id = e.notification_id AND t.event_number > e.event_number)) \
              ORDER BY e.occurred_at, e.rowid",
         )?;
         let rows = statement.query_map([], |row| {
@@ -6296,7 +6307,19 @@ impl Store {
         let mut newest: BTreeMap<(String, Option<String>), NotificationDeliveryFailure> =
             BTreeMap::new();
         for row in rows {
-            let (route, event) = row?;
+            let (route, mut event) = row?;
+            if event.outcome == "claimed" {
+                let stale = chrono::DateTime::parse_from_rfc3339(&event.occurred_at)
+                    .map_or(true, |claimed| claimed < stale_before);
+                if !stale {
+                    continue;
+                }
+                let counts = summary.routes.entry(route.clone()).or_default();
+                counts.claimed_without_outcome = counts.claimed_without_outcome.saturating_sub(1);
+                counts.unknown += 1;
+                event.outcome = "unknown".into();
+                event.detail_json = br#"{"reason":"claim_stale"}"#.to_vec();
+            }
             if event.outcome == "accepted" {
                 summary
                     .routes
@@ -6315,6 +6338,11 @@ impl Store {
                     .unresolved
                     .push(event);
             }
+        }
+        for counts in summary.routes.values_mut() {
+            counts
+                .unresolved
+                .sort_by(|left, right| left.occurred_at.cmp(&right.occurred_at));
         }
         Ok(summary)
     }

@@ -13,10 +13,17 @@ is in the [Monitor/Pulse source distribution](https://github.com/unpingable/cons
 This does not qualify a recurring deployment or human acknowledgment.
 
 Live destination delivery has been verified by hand-run operator-assertion
-intents, each with a person confirming receipt: Slack on 2026-10-01 (a
-disposable VM and the Linode observation host), Discord on 2026-10-02 (crow,
-released 0.2.0 binary), and PagerDuty on 2026-10-02 (a non-production
-service: trigger, repeated trigger on one dedup key, resolve). No component
+intents, each with a person confirming receipt:
+
+- Slack on 2026-10-01, on a disposable VM and on the Linode observation host.
+  Records: Cartography `audit/2026-10-01-observation-profile-vm-result.md` and
+  `audit/2026-10-01-linode-observation-profile-live.md`.
+- Discord on 2026-10-02, on crow with the released 0.2.0 binary.
+- PagerDuty on 2026-10-02, against a non-production service: trigger, repeated
+  trigger on one dedup key, resolve.
+
+The Discord and PagerDuty runs are recorded in Cartography
+`audit/2026-10-02-notification-sinks-live.md`. No component
 emits intents on its own, and acknowledgment is not implemented. Do not
 describe the adapters or retained outbox as a completed notification
 migration.
@@ -182,20 +189,31 @@ interrupted), `refused`, `failed`, `unknown` and `accepted` records, the time
 of the newest acceptance, and the unresolved failures. A failure is
 unresolved when it is the newest terminal outcome of its condition: the
 route, plus for a PagerDuty record its `site:component:rule[:target_class]`.
-A failure here is `failed`, `unknown`, or any refusal except the deliberate
-`network_dispatch_not_explicitly_enabled`, so a missing or malformed routing
-key counts. An acceptance on another route or for another condition does not
-resolve it. Each listed failure shows its id, condition, outcome, time and
-only the closed fields `reason`, `http_status` and `retry_class` (at most ten
-per route; the count is exact).
+A failure here is `failed`, `unknown`, a stale claim, or any refusal except
+three, so a missing or malformed routing key counts. The exceptions are the
+deliberate `network_dispatch_not_explicitly_enabled` and the saved-check
+refusals `saved_check_attention_event_not_current` and
+`saved_check_attention_event_time_invalid`. Those two refuse an owner decision
+that was stale or malformed when it reached NQ; they say nothing about whether
+the route can deliver, so they do not degrade it. They stay in the `refused`
+count and in `inspect`. An acceptance on another route or for another
+condition does not resolve a failure. Each listed failure shows its id,
+condition, outcome, time and only the closed fields `reason`, `http_status`
+and `retry_class`. At most ten are listed per route, newest first; the count
+is exact.
+
+A claim without an outcome is in flight for 120 seconds: the longest route
+timeout (60 s) plus a margin. After that no send can still be running, so the
+summary counts it as `unknown`, with reason `claim_stale`, and it can be an
+unresolved failure. It reads as `unknown` in `inspect` from the start and
+blocks rollover.
 
 The component is `degraded`/`delivery_failure_unresolved` when any
 unresolved failure exists, `healthy`/`delivery_in_flight` when a record is
-pending or claimed without an outcome, and otherwise
-`healthy`/`delivery_custody_current`. A claim without an outcome cannot be
-told apart from a send in progress, so it does not degrade the status; a
-record left that way stays in the counts, reads as `unknown` in `inspect`
-and blocks rollover. A store without delivery records still shows the row
+pending or has a claim younger than 120 seconds, and otherwise
+`healthy`/`delivery_custody_current`. A record that stays `pending` (retained
+but never claimed) does not degrade the status. It stays in the counts and
+blocks rollover. A store without delivery records still shows the row
 written by `nq init`. Destination free text, such as a PagerDuty error
 message, appears only in `notification inspect`.
 
@@ -212,7 +230,7 @@ no REST API token, acknowledgment, incident query or escalation management, so
 it works on a PagerDuty Free plan with an Events API v2 service integration.
 Live delivery was verified on 2026-10-02 against a non-production service
 (trigger, repeated trigger on one dedup key, resolve, with receipt confirmed in
-PagerDuty). The adapter's own tests use a loopback server.
+PagerDuty; Cartography `audit/2026-10-02-notification-sinks-live.md`). The adapter's own tests use a loopback server.
 
 ```toml
 [[notification_routes]]
@@ -323,6 +341,13 @@ refuses:
 - the record's own event id;
 - any record that is not the newest for its condition on its route. The
   error names the later record.
+
+The newest-only rule compares records with the same route reference. Two
+routes that point at the same PagerDuty service do not see each other's
+records, so configure one route per PagerDuty service. The check is also not
+atomic with the submission it precedes. If another submission for the same
+condition happens at the same moment, both can proceed; serialize manual
+recovery for a condition.
 
 It accepts `failed`, `unknown`, `refused` and `pending` records that are the
 newest for their condition.

@@ -103,7 +103,9 @@ the same alert and does not open another.
 `nq status export` shows `notification`/`outbox` as
 `delivery_failure_unresolved` when, on some route, the newest terminal outcome
 for a condition is a failure. Refusals count, so a missing or malformed key
-shows here, except the deliberate `network_dispatch_not_explicitly_enabled`.
+shows here. The exceptions are the deliberate
+`network_dispatch_not_explicitly_enabled` and the saved-check input refusals.
+A claim with no outcome after 120 seconds counts as `unknown` (`claim_stale`).
 The detail lists those failures per route with `reason`, `http_status` and
 `retry_class`. `notification inspect --notification-id ID` adds PagerDuty's
 message under `pagerduty.last_event.detail`.
@@ -128,7 +130,9 @@ NQ_PAGERDUTY_OPS_ROUTING_KEY="$(cat ~/pagerduty-routing-key)" \
 ```
 
 Resubmit only the newest record for a condition; NQ refuses older ones and
-names the later record. Resending an older trigger after a resolve would reopen
+names the later record. The rule is per route reference, so configure one
+route per PagerDuty service. The check is not atomic with the send: do not
+recover the same condition from two shells at once. Resending an older trigger after a resolve would reopen
 a cleared alert, and resending an older resolve after a new trigger would close
 the new alert. If a later record exists, decide from the condition's current
 state and submit a fresh trigger or resolve instead.

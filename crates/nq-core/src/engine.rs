@@ -10235,7 +10235,10 @@ fn project_notification_delivery_status(
     components: &mut Vec<ComponentStatusV3>,
 ) -> Result<(), EngineError> {
     const MAX_LISTED_FAILURES: usize = 10;
-    let summary = store.notification_delivery_summary()?;
+    // The longest route timeout (60 s) plus a margin: a claim older than this
+    // has no live send behind it.
+    const CLAIM_STALE_AFTER: Duration = Duration::seconds(120);
+    let summary = store.notification_delivery_summary(Utc::now() - CLAIM_STALE_AFTER)?;
     if summary.total() == 0 {
         return Ok(());
     }
@@ -10246,6 +10249,7 @@ fn project_notification_delivery_status(
         unresolved_total += counts.unresolved.len();
         in_flight += counts.pending + counts.claimed_without_outcome;
         let mut failures = Vec::new();
+        // Newest first.
         for failure in counts.unresolved.iter().rev().take(MAX_LISTED_FAILURES) {
             let detail: serde_json::Value =
                 serde_json::from_slice(&failure.detail_json).map_err(|_| {
