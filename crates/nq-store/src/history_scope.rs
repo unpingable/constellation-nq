@@ -819,7 +819,35 @@ pub(crate) fn write_watermark(
             path.display()
         )));
     }
+    remove_stale_temporaries(&path);
     Ok(watermark)
+}
+
+/// Remove temporary watermark files that a killed writer left behind. Only
+/// files older than ten minutes are removed, so a concurrent writer's file in
+/// flight is left alone; failures are ignored (the next write retries).
+fn remove_stale_temporaries(path: &Path) {
+    const STALE: std::time::Duration = std::time::Duration::from_secs(600);
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let mut prefix = name.to_os_string();
+    prefix.push(".tmp-");
+    let prefix = prefix.to_string_lossy().into_owned();
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= STALE);
+        if stale && entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Delta accessors for semantic history validation layered above the store.
