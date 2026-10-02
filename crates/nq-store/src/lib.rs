@@ -2120,6 +2120,17 @@ impl Store {
         Ok(())
     }
 
+    /// Rows this handle has not yet validated: those beyond the frontier its
+    /// open (or its own commits) proved, or every row for a handle that
+    /// validated nothing incrementally. Read paths that guard against rows
+    /// acquired since open use this scope.
+    fn since_open(&self) -> Scope<'_> {
+        self.validation
+            .store_validated
+            .as_ref()
+            .map_or(Scope::FULL, Scope::after)
+    }
+
     fn store_identity(&self) -> Result<Option<StoreIdentity>, StoreError> {
         let genesis: Vec<String> = self
             .connection
@@ -4112,7 +4123,7 @@ impl Store {
         validate_public_limit(limit)?;
         // Refuse rather than expose a partial or ambiguous history if the live
         // connection has acquired an invalid row since it was opened.
-        validate_refusal_invariants(&self.connection, Scope::FULL)?;
+        validate_refusal_invariants(&self.connection, self.since_open())?;
         let mut statement = self.connection.prepare(
             "SELECT submission.submission_id, submission.run_id, run.request_id,
                     run.instance_id, run.profile_id, run.profile_version,
@@ -4148,7 +4159,7 @@ impl Store {
         &self,
         refusal_id: &str,
     ) -> Result<Option<RejectedCustodyRow>, StoreError> {
-        validate_refusal_invariants(&self.connection, Scope::FULL)?;
+        validate_refusal_invariants(&self.connection, self.since_open())?;
         self.connection
             .query_row(
                 "SELECT submission.submission_id, submission.run_id, run.request_id,
@@ -5936,7 +5947,7 @@ impl Store {
 
     /// Return the highest committed store-wide evaluation sequence.
     pub fn latest_evaluation_sequence(&self) -> Result<i64, StoreError> {
-        validate_evaluation_revision_shape(&self.connection)?;
+        validate_evaluation_revision_shape(&self.connection, self.since_open())?;
         self.connection
             .query_row(
                 "SELECT COALESCE(MAX(evaluation_sequence), 0) FROM evaluation_runs",
@@ -5992,7 +6003,7 @@ impl Store {
                 "evaluation history snapshot bound is invalid".into(),
             ));
         }
-        validate_evaluation_revision_shape(&self.connection)?;
+        validate_evaluation_revision_shape(&self.connection, self.since_open())?;
         let mut statement = self.connection.prepare(
             "SELECT evaluation.evaluation_id, evaluation.trigger_run_id,
                     evaluation.detector_id, evaluation.detector_version,
@@ -7920,7 +7931,6 @@ fn validate_diagnostic_artifact_invariants(
     let artifacts = scope.affected(
         "commitment.artifact_id",
         "diagnostic_artifact_commitments",
-        "commitment",
         &[
             ("diagnostic_artifact_payloads", "artifact_id"),
             ("local_diagnostic_artifact_origins", "artifact_id"),
@@ -7940,16 +7950,17 @@ fn validate_diagnostic_artifact_import_history(
     let new_events = scope.new_rows("diagnostic_artifact_import_events", "event");
     // A receipt's correspondence changes when it is new or a new commitment
     // or import origin matches it.
-    let events = if scope.is_full() {
-        "1".to_owned()
-    } else {
-        format!(
-            "({new_events} OR event.artifact_id IN (SELECT child.artifact_id FROM diagnostic_artifact_commitments AS child WHERE {}) \
-             OR event.import_id IN (SELECT child.import_id FROM imported_diagnostic_artifact_origins AS child WHERE {}))",
+    let events = scope.affected_with(
+        "event.import_id",
+        "diagnostic_artifact_import_events",
+        &[("imported_diagnostic_artifact_origins", "import_id")],
+        &[format!(
+            "SELECT named.import_id FROM diagnostic_artifact_import_events AS named \
+             WHERE named.artifact_id IN (SELECT child.artifact_id FROM \
+             diagnostic_artifact_commitments AS child WHERE {})",
             scope.new_rows("diagnostic_artifact_commitments", "child"),
-            scope.new_rows("imported_diagnostic_artifact_origins", "child"),
-        )
-    };
+        )],
+    );
     let invalid_correspondence: Option<(String, String)> = connection
         .query_row(
             &format!(
@@ -8055,7 +8066,6 @@ fn validate_local_diagnostic_artifact_origin_modes(
     let run_only_origins = scope.affected(
         "local.run_id",
         "local_diagnostic_artifact_origins",
-        "local",
         &[("evaluation_runs", "trigger_run_id")],
     );
     let invalid_evaluated_local: Option<String> = connection
@@ -8534,7 +8544,6 @@ fn validate_admitted_report_associations_connection(
                 scope.affected(
                     "submission.submission_id",
                     "raw_submissions",
-                    "submission",
                     &[("admitted_reports", "submission_id")],
                 )
             ),
@@ -8905,22 +8914,19 @@ fn validate_local_successor_acquisition_invariants(
 ) -> Result<(), StoreError> {
     // An intent's obligations change when the intent or one of its events is
     // new, or when a new artifact origin or intake names its run.
-    let affected = scope.affected(
+    let affected = scope.affected_with(
         "intent.acquisition_id",
         "local_successor_acquisition_intents",
-        "intent",
         &[("local_successor_acquisition_events", "acquisition_id")],
-    );
-    let affected = if scope.is_full() {
-        affected
-    } else {
-        format!(
-            "({affected} OR intent.run_id IN (SELECT child.run_id FROM local_diagnostic_artifact_origins AS child WHERE {}) \
-             OR intent.run_id IN (SELECT child.run_id FROM local_watcher_provider_intakes AS child WHERE {}))",
+        &[format!(
+            "SELECT named.acquisition_id FROM local_successor_acquisition_intents AS named \
+             WHERE named.run_id IN (SELECT child.run_id FROM local_diagnostic_artifact_origins \
+             AS child WHERE {} UNION SELECT child.run_id FROM local_watcher_provider_intakes \
+             AS child WHERE {})",
             scope.new_rows("local_diagnostic_artifact_origins", "child"),
             scope.new_rows("local_watcher_provider_intakes", "child"),
-        )
-    };
+        )],
+    );
     let mut statement = connection.prepare(&format!(
         "SELECT acquisition_id, watcher_instance_id, watcher_semantic_digest, selection_digest, run_id, intake_id, intent_json, intent_digest FROM local_successor_acquisition_intents AS intent WHERE {affected} ORDER BY acquisition_id",
     ))?;
@@ -9014,7 +9020,6 @@ impl IntakeSelection<'_> {
             Self::Scope(scope) => scope.affected(
                 "run.run_id",
                 "watcher_runs",
-                "run",
                 &[
                     ("local_watcher_provider_intakes", "run_id"),
                     ("legacy_v3_watcher_run_intake_gaps", "run_id"),
@@ -9032,7 +9037,6 @@ impl IntakeSelection<'_> {
             Self::Scope(scope) => scope.affected(
                 "intake.intake_id",
                 "provider_intake_attempts",
-                "intake",
                 &[
                     ("local_watcher_provider_intakes", "intake_id"),
                     ("provider_intake_acknowledgments", "intake_id"),
@@ -9046,12 +9050,20 @@ impl IntakeSelection<'_> {
     /// itself, or a new run or protocol submission for its run.
     fn intake_correspondence(self) -> String {
         match self {
-            Self::Scope(scope) if !scope.is_full() => format!(
-                "({} OR local.run_id IN (SELECT run_id FROM watcher_runs AS child WHERE {}) \
-                 OR local.run_id IN (SELECT run_id FROM raw_submissions AS child WHERE {}))",
-                self.intakes(),
-                scope.new_rows("watcher_runs", "child"),
-                scope.new_rows("raw_submissions", "child"),
+            Self::Scope(scope) if !scope.is_full() => scope.affected_with(
+                "intake.intake_id",
+                "provider_intake_attempts",
+                &[
+                    ("local_watcher_provider_intakes", "intake_id"),
+                    ("provider_intake_acknowledgments", "intake_id"),
+                ],
+                &[format!(
+                    "SELECT origin.intake_id FROM local_watcher_provider_intakes AS origin \
+                     WHERE origin.run_id IN (SELECT child.run_id FROM watcher_runs AS child \
+                     WHERE {} UNION SELECT child.run_id FROM raw_submissions AS child WHERE {})",
+                    scope.new_rows("watcher_runs", "child"),
+                    scope.new_rows("raw_submissions", "child"),
+                )],
             ),
             Self::Scope(_) | Self::One(_) => self.intakes(),
         }
@@ -9415,7 +9427,6 @@ fn validate_refusal_invariants(
     let submissions = scope.affected(
         "submission.submission_id",
         "raw_submissions",
-        "submission",
         &[("refusals", "submission_id")],
     );
     let invalid_association: Option<String> = connection
@@ -9580,14 +9591,13 @@ fn validate_run_results(connection: &Connection, scope: Scope<'_>) -> Result<(),
              FROM status_events AS status
              JOIN watcher_runs AS run ON run.run_id = status.run_id
              WHERE status.run_id IS NOT NULL
-               AND ({} OR {runs})
+               AND {runs}
                AND (
                     status.component_kind <> 'instance'
                  OR status.component_id <> run.instance_id
                )
              ORDER BY status.run_id
-             LIMIT 1",
-                scope.new_rows("status_events", "status")
+             LIMIT 1"
             ),
             [],
             |row| row.get(0),
@@ -9632,24 +9642,20 @@ fn validate_run_results(connection: &Connection, scope: Scope<'_>) -> Result<(),
 /// Predicate over `run` selecting runs whose completed-result obligations the
 /// scope covers.
 fn run_result_scope(scope: Scope<'_>) -> String {
-    if scope.is_full() {
-        return "1".to_owned();
-    }
-    format!(
-        "({} OR run.run_id IN (SELECT submission.run_id FROM admitted_reports AS child \
-         JOIN raw_submissions AS submission ON submission.submission_id = child.submission_id \
-         WHERE {}))",
-        scope.affected(
-            "run.run_id",
-            "watcher_runs",
-            "run",
-            &[
-                ("raw_submissions", "run_id"),
-                ("status_events", "run_id"),
-                ("evaluation_runs", "trigger_run_id"),
-            ],
-        ),
-        scope.new_rows("admitted_reports", "child"),
+    scope.affected_with(
+        "run.run_id",
+        "watcher_runs",
+        &[
+            ("raw_submissions", "run_id"),
+            ("status_events", "run_id"),
+            ("evaluation_runs", "trigger_run_id"),
+        ],
+        &[format!(
+            "SELECT submission.run_id FROM admitted_reports AS child \
+             JOIN raw_submissions AS submission ON submission.submission_id = child.submission_id \
+             WHERE {}",
+            scope.new_rows("admitted_reports", "child"),
+        )],
     )
 }
 
@@ -10000,15 +10006,12 @@ fn validate_evaluation_refusal_invariants(
     connection: &Connection,
     scope: Scope<'_>,
 ) -> Result<(), StoreError> {
-    // Revision shape is an index-backed aggregate over evaluation lineages;
-    // it stays whole so contiguity is proven against the complete lineage.
-    validate_evaluation_revision_shape(connection)?;
+    validate_evaluation_revision_shape(connection, scope)?;
     // An evaluation's refusal/finding obligations change when it is new or a
     // new refusal, finding event, or evaluation watermark names it.
     let evaluations = scope.affected(
         "evaluation.evaluation_id",
         "evaluation_runs",
-        "evaluation",
         &[
             ("refusals", "evaluation_id"),
             ("finding_events", "evaluation_id"),
@@ -10192,19 +10195,30 @@ fn validate_evaluation_refusal_invariants(
     Ok(())
 }
 
-fn validate_evaluation_revision_shape(connection: &Connection) -> Result<(), StoreError> {
+fn validate_evaluation_revision_shape(
+    connection: &Connection,
+    scope: Scope<'_>,
+) -> Result<(), StoreError> {
+    // Per-row revision bounds read whole rows, so they cover only the scope;
+    // sequence and lineage contiguity below are index-only aggregates over
+    // the complete lineage.
     let invalid_revision: Option<(String, i64)> = connection
         .query_row(
-            "SELECT identity, revision FROM (
+            &format!(
+                "SELECT identity, revision FROM (
                  SELECT evaluation_id AS identity, evaluation_revision AS revision
-                 FROM evaluation_runs WHERE evaluation_revision <= 0
+                 FROM evaluation_runs AS evaluation WHERE {} AND evaluation_revision <= 0
                  UNION ALL
                  SELECT event_id AS identity, event_revision AS revision
-                 FROM finding_events WHERE event_revision <= 0
+                 FROM finding_events AS event WHERE {} AND event_revision <= 0
                  UNION ALL
                  SELECT event_id AS identity, evaluation_revision AS revision
-                 FROM finding_events WHERE evaluation_revision <= 0
+                 FROM finding_events AS event WHERE {} AND evaluation_revision <= 0
              ) ORDER BY identity LIMIT 1",
+                scope.new_rows("evaluation_runs", "evaluation"),
+                scope.new_rows("finding_events", "event"),
+                scope.new_rows("finding_events", "event"),
+            ),
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )

@@ -277,24 +277,43 @@ impl<'a> Scope<'a> {
     /// may have changed: the parent row is new, or a new row in one of the
     /// `children` tables names it through the given column. `1` for a full
     /// scope, so full validation runs the original unrestricted query.
+    ///
+    /// `key` is `alias.column` of the parent; the predicate is an `IN` over
+    /// a union of rowid-bounded subqueries so SQLite can drive the parent
+    /// from its key index instead of scanning it.
     pub(crate) fn affected(
         self,
         key: &str,
         parent_table: &str,
-        parent_alias: &str,
         children: &[(&str, &str)],
+    ) -> String {
+        self.affected_with(key, parent_table, children, &[])
+    }
+
+    /// [`Self::affected`] plus further subqueries, each yielding parent keys.
+    pub(crate) fn affected_with(
+        self,
+        key: &str,
+        parent_table: &str,
+        children: &[(&str, &str)],
+        extra: &[String],
     ) -> String {
         if self.is_full() {
             return "1".to_owned();
         }
-        let mut terms = vec![self.new_rows(parent_table, parent_alias)];
-        for (table, column) in children {
-            terms.push(format!(
-                "{key} IN (SELECT child.{column} FROM {table} AS child WHERE {})",
+        let column = key.rsplit('.').next().unwrap_or(key);
+        let mut keys = vec![format!(
+            "SELECT parent.{column} FROM {parent_table} AS parent WHERE {}",
+            self.new_rows(parent_table, "parent")
+        )];
+        for (table, child_column) in children {
+            keys.push(format!(
+                "SELECT child.{child_column} FROM {table} AS child WHERE {}",
                 self.new_rows(table, "child")
             ));
         }
-        format!("({})", terms.join(" OR "))
+        keys.extend(extra.iter().cloned());
+        format!("{key} IN ({})", keys.join(" UNION "))
     }
 }
 
@@ -591,7 +610,6 @@ impl crate::Store {
             scope.affected(
                 "report.report_id",
                 "admitted_reports",
-                "report",
                 &[
                     ("observations", "report_id"),
                     ("report_coverage", "report_id"),
@@ -642,7 +660,6 @@ impl crate::Store {
                 scope.affected(
                     "submission.submission_id",
                     "raw_submissions",
-                    "submission",
                     &[("refusals", "submission_id")],
                 )
             ))?
@@ -663,7 +680,6 @@ impl crate::Store {
             Scope::after(frontier).affected(
                 "commitment.artifact_id",
                 "diagnostic_artifact_commitments",
-                "commitment",
                 &[
                     ("diagnostic_artifact_payloads", "artifact_id"),
                     ("local_diagnostic_artifact_origins", "artifact_id"),
