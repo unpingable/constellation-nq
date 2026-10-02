@@ -43,9 +43,10 @@ observation family must continue to bind store origin, subject, vantage,
 configuration, evaluator identity and its own family coordinates explicitly.
 
 Each command validates only the history appended since the store's validation
-watermark and re-proves the replayed or qualified artifact's own closure; run
-`nq admin validate --full` once after installing a new binary so qualification
-does not fall back to validating the complete semantic history. See
+watermark and re-proves the replayed or qualified artifact's own closure. A
+store without a watermark is validated in full once, by its first engine open
+or by `nq admin validate --full`; on a large store run the latter explicitly
+first. See
 [Store validation](OPERATIONS.md#store-validation-and-the-validation-watermark).
 
 `qualify` establishes retained admission provenance, not current freshness or

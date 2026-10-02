@@ -640,16 +640,21 @@ When an open finds a watermark for this store, schema, and rule set, it:
    gains a new evaluation, status event, or submission is re-checked.
    Configuration-scale tables (descriptors, admissions, bindings, upgrade
    receipts) and the current-state projections are validated in full on every
-   open.
+   open. NQ's own write transactions check the same laws for the rows beyond
+   the frontier their handle has validated.
 
 Every engine open (`collect`, `diagnostics execute`, `acquire-next-local`,
 `replay-local-successor`, watcher actions, and the daemon's collection
 engine) then reopens the provider intakes and diagnostic artifacts beyond the
-frontier. If the watermark also certifies the semantic history, the open
-validates the remaining semantic planes (admitted reports, watcher runs,
-status events, rejected custody, evaluation/finding replay) beyond that
-frontier as well. A writable open then rewrites the watermark at the frontier
-it captured before validating. `replay-local-successor` additionally re-proves
+frontier, and the remaining semantic planes (admitted reports, watcher runs,
+status events, rejected custody, evaluation/finding replay) beyond the
+watermark's semantic frontier. Without an applicable watermark it validates
+all of them. It then rewrites the watermark at the frontier it captured
+before validating, certifying the semantic history only if every semantic
+plane validated; a semantic failure leaves the store uncertified without
+failing the open, and qualification and collection then validate semantic
+history in full, as before. Other writable commands never write a
+watermark. `replay-local-successor` additionally re-proves
 the replayed artifact's own closure (bytes, origin run, provider intake,
 evaluation, and status correspondence) even when the watermark covers it.
 
@@ -661,7 +666,10 @@ complete semantic history, as before.
 Full validation runs when no watermark exists, when it cannot be decoded, when
 it names another genesis, schema version, schema artifact, or rule set (such a
 watermark is ignored, never trusted), and on `init`, on every `admin upgrade`
-result, and on demand:
+result, and on demand. An existing store therefore has no watermark until its
+first engine open or explicit full validation; that first validation costs
+what every open cost before. On a large store, run it explicitly before
+relying on bounded callers:
 
 ```sh
 sudo -u nq nq --config /etc/nq/nq.toml --json admin validate --full
@@ -678,7 +686,7 @@ writes one.
 Absence of a watermark is never treated as validation. A watermark that
 belongs to this store but no longer matches its rows (a covered row was
 added, removed, or had its identity substituted) fails the open closed with
-`run nq admin validate --full to re-establish validation`; full validation
+"run `nq admin validate --full` to re-establish validation"; full validation
 ignores the watermark and records a new one only if the whole store
 validates.
 
@@ -692,12 +700,22 @@ Limits that bounded validation does not remove:
   reads that payload.
 - Page-level integrity (`quick_check`) and foreign-key checks run only during
   full validation; NQ's own writers enforce foreign keys.
-- The commitment digest and per-table counts are still read on every open.
-  They are index-only reads with a small linear cost (see the measurement in
-  the change that introduced the watermark), not a re-validation.
-- Collection still reads the instance's admitted-report evidence window and
-  current findings to evaluate; that evaluation input, unlike validation,
-  grows with retained history.
+- The commitment digest, per-table counts, current-state projections, and
+  evaluation-lineage aggregates are still read on every open. They are
+  index-driven reads with a small linear cost, not a re-validation. On the
+  reference machine a bounded `replay-local-successor` took 0.06 s, 0.08 s,
+  and 0.12 s, and a bounded `qualify` 0.04 s, 0.05 s, and 0.08 s, with 500,
+  2,000, and 5,000 retained acquisitions.
+- Full validation itself still grows faster than linearly with history: on
+  the reference machine it took 11 s, 94 s, and 492 s at those sizes, and the
+  first engine open of a store without a watermark costs about the same. The
+  per-run evaluation lookups it repeats are not indexed. Run it explicitly,
+  not under a caller's timeout, when a store is large, including after every
+  NQ upgrade, because the rule set is bound to the package version.
+- Each collection still decodes and re-checks every retained admitted report
+  of its instance to select the evaluation context (0.23 s, 0.56 s, and 1.25 s
+  per `acquire-next-local` at the sizes above). That evaluation input, unlike
+  open validation, grows with retained history.
 - `nqd` startup still validates the store and provider-intake history in
   full; `backup`, `restore`, `admin archive`, and archive verification keep
   their exhaustive validation.
