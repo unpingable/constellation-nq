@@ -836,6 +836,32 @@ impl crate::Store {
         }
     }
 
+    /// History rows beyond the applied watermark's frontier: what the next
+    /// engine open validates and records. O(rows beyond). `None` without an
+    /// applied watermark.
+    pub fn uncovered_history_rows(&self) -> Result<Option<i64>, StoreError> {
+        let Some(frontier) = self.validated_history_frontier() else {
+            return Ok(None);
+        };
+        let mut uncovered = 0i64;
+        for table in HISTORY_TABLES {
+            let beyond: i64 = self.connection.query_row(
+                &format!("SELECT COUNT(*) FROM {table} NOT INDEXED WHERE rowid > ?1"),
+                [frontier.max_rowid(table).unwrap_or(i64::MIN)],
+                |row| row.get(0),
+            )?;
+            uncovered = uncovered.saturating_add(beyond);
+        }
+        Ok(Some(uncovered))
+    }
+
+    /// The append frontier this handle captured before its open validated
+    /// history: the frontier a watermark recorded by this handle names.
+    #[must_use]
+    pub fn open_frontier(&self) -> Option<&HistoryFrontier> {
+        self.validation.open_frontier.as_ref()
+    }
+
     /// The frontier this handle's open proved validated, or `None` when the
     /// open validated history in full (so callers must too).
     #[must_use]
@@ -1094,27 +1120,5 @@ impl crate::Store {
             &self.run_evaluation_rowids(run_id)?,
             |row| row.get(0),
         )
-    }
-
-    /// Evaluation sequences, at or below `through_evaluation_sequence`, of the
-    /// latest finding event of each finding: the state a finding-lineage
-    /// replay holds after replaying evaluations through that sequence.
-    pub fn finding_lineage_heads_through(
-        &self,
-        through_evaluation_sequence: i64,
-    ) -> Result<Vec<i64>, StoreError> {
-        self.connection
-            .prepare(
-                "SELECT MAX(evaluation.evaluation_sequence)
-                 FROM finding_events AS event
-                 JOIN evaluation_runs AS evaluation
-                   ON evaluation.evaluation_id = event.evaluation_id
-                 WHERE evaluation.evaluation_sequence <= ?1
-                 GROUP BY event.finding_id
-                 ORDER BY 1",
-            )?
-            .query_map([through_evaluation_sequence], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
     }
 }

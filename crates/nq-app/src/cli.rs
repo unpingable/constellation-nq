@@ -2093,10 +2093,47 @@ fn print_collection_outcome(outcome: &nq_core::CollectionOutcome, json_output: b
     Ok(())
 }
 
+/// The validation watermark state a monitor can alert on: whether history
+/// validation is bounded, whether semantic history is certified, how old the
+/// certification is, and how much history the next engine open must cover.
+fn validation_watermark_value(store: &Store) -> Result<Value> {
+    let watermark = match store.open_validation() {
+        nq_store::OpenValidation::Full(reason) => {
+            return Ok(json!({
+                "state": match reason {
+                    nq_store::FullValidationReason::NoWatermark => "absent",
+                    nq_store::FullValidationReason::UnreadableWatermark => "unreadable",
+                    nq_store::FullValidationReason::InapplicableWatermark => "inapplicable",
+                    nq_store::FullValidationReason::Requested
+                    | nq_store::FullValidationReason::NoBackingFile => "not_applied",
+                },
+                "semantic_certified": false,
+            }));
+        }
+        nq_store::OpenValidation::SinceWatermark(watermark) => watermark,
+    };
+    let semantic_certified = watermark.semantic.is_some()
+        && watermark.engine_rules == nq_core::engine::engine_validation_rules();
+    let age_seconds = chrono::DateTime::parse_from_rfc3339(&watermark.validated_at)
+        .ok()
+        .map(|validated| {
+            (chrono::Utc::now() - validated.with_timezone(&chrono::Utc)).num_seconds()
+        });
+    Ok(json!({
+        "state": if semantic_certified { "certified" } else { "core_only" },
+        "semantic_certified": semantic_certified,
+        "validated_at": watermark.validated_at,
+        "age_seconds": age_seconds,
+        "uncovered_history_rows": store.uncovered_history_rows()?,
+        "commitment_digest": watermark.commitment_digest,
+    }))
+}
+
 fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
     let config = NqConfig::load(config_path)?;
     validate_compiled_profiles(&config)?;
     let store = Store::open_read_only(&config.database_path)?;
+    let validation_watermark = validation_watermark_value(&store)?;
     store.validate()?;
     nq_core::engine::validate_provider_intake_history(&store)?;
     let mut diagnostic_artifacts = diagnostic_artifact_custody_summary(&store)?;
@@ -2175,6 +2212,7 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
             },
             "profiles": all_profiles().len(),
             "instances": diagnostics,
+            "validation_watermark": validation_watermark,
         }),
         json_output,
     )?;

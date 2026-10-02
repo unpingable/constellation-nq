@@ -8322,9 +8322,11 @@ fn engine_semantic_state(
 /// watermark does not cover. The remaining semantic planes are validated
 /// beyond the watermark's semantic certification when it has one, and in
 /// full when the open found no applicable watermark, so the certification is
-/// established or advanced. A semantic failure withdraws the certification
-/// (qualification and collection then validate semantic history in full) and
-/// is reported on stderr; it does not fail the open, which never required
+/// established or advanced. A watermark that does not certify semantic
+/// history (an earlier failure withdrew it) gets a full attempt again. A
+/// semantic failure withdraws the certification (qualification and
+/// collection then validate semantic history in full), is reported on stderr
+/// and by `nq doctor`, and does not fail the open, which never required
 /// semantic history. A writable handle then records the watermark; a failure
 /// to write it is reported and leaves the previous watermark in place.
 fn validate_engine_open_history(store: &Store) -> Result<(), EngineError> {
@@ -8332,17 +8334,17 @@ fn validate_engine_open_history(store: &Store) -> Result<(), EngineError> {
     let semantic = match (engine_core_frontier(store), engine_semantic_state(store)) {
         (_, Some((frontier, state))) => validate_semantic_planes_since(store, frontier, state),
         (None, None) => validate_semantic_planes_in_full(store),
-        (Some(_), None) => Err(EngineError::Invariant(
-            "the validation watermark does not certify semantic history".into(),
-        )),
+        // Not certified (for example after an earlier failure): attempt
+        // the full certification again rather than leaving it withdrawn.
+        (Some(_), None) => validate_semantic_planes_in_full(store),
     };
     let certification = match semantic {
         Ok(state) => nq_store::SemanticCertification::Established(state),
         Err(error) => {
             eprintln!(
                 "nq: warning: semantic history is not certified ({error}); qualification, export, \
-                 inspection, and collection validate it in full until `nq admin validate --full` \
-                 succeeds"
+                 inspection, and collection validate it in full until an engine open or \
+                 `nq admin validate --full` certifies it"
             );
             nq_store::SemanticCertification::NotEstablished
         }
@@ -8481,7 +8483,12 @@ fn validate_semantic_planes_since(
     }
     // Status and rejected custody read their runs' evaluations, so the
     // evaluation history beyond the frontier is proven first.
-    let heads = validate_evaluation_refusal_history_since(store, frontier, state)?;
+    let heads = validate_evaluation_refusal_history_since(
+        store,
+        frontier,
+        state,
+        certified_replay_bound(store)?,
+    )?;
     store.validate_run_results_since(frontier)?;
     for run_id in store.watcher_run_ids_since(frontier)? {
         let run = store.watcher_run_outcome(&run_id)?.ok_or_else(|| {
@@ -8490,12 +8497,20 @@ fn validate_semantic_planes_since(
         reopen_run_resource_outcome(&run)?;
         validate_run_profile_identity(&run)?;
     }
+    // Status events read their runs' evaluations, which were replayed only
+    // through the open frontier; later events are validated by the next open.
+    let status_through = store
+        .open_frontier()
+        .and_then(|open| open.max_rowid("status_events"));
     let mut after_sequence = frontier.max_rowid("status_events");
     loop {
         let page = store.status_history_bounded(STATUS_PAGE_SIZE, after_sequence)?;
         let page_len = page.len();
         for row in page {
             after_sequence = Some(row.status_sequence);
+            if status_through.is_some_and(|through| row.status_sequence > through) {
+                continue;
+            }
             validate_status_event_record(store, row, EvaluationHistory::AlreadyValidated)?;
         }
         if page_len < STATUS_PAGE_SIZE as usize {
@@ -9528,18 +9543,34 @@ fn replay_evaluation_history_in_full(
         nq_store::MAX_PUBLIC_QUERY_ROWS,
         None,
         BTreeMap::new(),
-        store.latest_evaluation_sequence()?,
+        certified_replay_bound(store)?,
         |_, _| Ok(()),
     )
+}
+
+/// The last evaluation a certification may fold into its lineage heads: the
+/// one bounding the frontier this handle captured before validating (the
+/// frontier a recorded watermark names), so heads and frontier describe the
+/// same prefix even when a concurrent writer appends evaluations meanwhile.
+/// Those later evaluations are validated by the next open.
+fn certified_replay_bound(store: &Store) -> Result<i64, EngineError> {
+    match store.open_frontier() {
+        Some(frontier) => Ok(frontier.evaluation_sequence),
+        None => Ok(store.latest_evaluation_sequence()?),
+    }
 }
 
 /// The evaluation and finding history a new evaluation builds on: beyond the
 /// open's semantic certification when one applies, otherwise in full.
 fn validate_evaluation_history_before_evaluating(store: &Store) -> Result<(), EngineError> {
     match engine_semantic_state(store) {
-        Some((frontier, state)) => {
-            validate_evaluation_refusal_history_since(store, frontier, state).map(|_| ())
-        }
+        Some((frontier, state)) => validate_evaluation_refusal_history_since(
+            store,
+            frontier,
+            state,
+            store.latest_evaluation_sequence()?,
+        )
+        .map(|_| ()),
         None => validate_evaluation_refusal_history(store).map(|_| ()),
     }
 }
@@ -9551,6 +9582,7 @@ fn validate_evaluation_refusal_history_since(
     store: &Store,
     frontier: &nq_store::HistoryFrontier,
     state: &nq_store::SemanticState,
+    through_evaluation_sequence: i64,
 ) -> Result<BTreeMap<Vec<u8>, ReplayedFinding>, EngineError> {
     store.validate_evaluation_history_invariants_since(frontier)?;
     let (_, heads) = visit_evaluation_history_between(
@@ -9558,7 +9590,7 @@ fn validate_evaluation_refusal_history_since(
         nq_store::MAX_PUBLIC_QUERY_ROWS,
         Some(frontier.evaluation_sequence),
         replay_heads(state)?,
-        store.latest_evaluation_sequence()?,
+        through_evaluation_sequence.max(frontier.evaluation_sequence),
         |_, _| Ok(()),
     )?;
     Ok(heads)
@@ -17764,6 +17796,39 @@ sys.stdout.write("\n")
                 );
             }
         }
+    }
+
+    #[test]
+    fn withdrawn_semantic_certification_is_attempted_again_by_the_next_engine_open() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((config, watcher)) = successor_fixture(directory.path(), "watermark-recertify", 1)
+        else {
+            return;
+        };
+        full_validation_and_watermark(&config);
+        let mut withdrawn = read_watermark_file(&config);
+        assert!(withdrawn.semantic.is_some());
+        withdrawn.semantic = None;
+        withdrawn.commitment_digest = withdrawn.computed_commitment();
+        write_watermark_file(&config, &withdrawn);
+
+        // Without a certification, read-only consumers validate semantic
+        // history in full and report it.
+        let store = Store::open_read_only(&config.database_path).expect("read-only");
+        assert!(store.validated_semantic_state().is_none());
+        validate_semantic_history_since_open(&store).expect("full semantic validation");
+        drop(store);
+
+        // The next engine open certifies it again instead of staying withdrawn.
+        let engine = reopen_with_test_identity(&config).expect("engine open");
+        engine
+            .diagnostic_replay_local_successor(&watcher, "watermark-recertify-0")
+            .expect("replay");
+        drop(engine);
+        assert!(
+            read_watermark_file(&config).semantic.is_some(),
+            "semantic certification is re-established"
+        );
     }
 
     #[test]
