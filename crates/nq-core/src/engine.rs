@@ -17802,7 +17802,7 @@ sys.stdout.write("\n")
     }
 
     /// Deterministic work of the hot read paths, as `SQLite` virtual-machine
-    /// operations in [`nq_store::SQL_WORK_TICK`] units.
+    /// operations ([`nq_store::SQL_WORK_TICK`] is one operation).
     #[derive(Clone, Copy, Debug)]
     struct HotPathWork {
         /// Read-only open plus `qualify` of an artifact one acquisition
@@ -17856,21 +17856,38 @@ sys.stdout.write("\n")
     /// that does: counting the evaluations of its run reads the unindexed
     /// `evaluation_runs.trigger_run_id` (see docs/OPERATIONS.md); it is
     /// reported, not bounded.
-    fn assert_uncovered_work_flat(small: HotPathWork, large: HotPathWork, label: &str) {
-        eprintln!("{label}: sql work ticks {small:?} -> {large:?}");
+    /// The work of validating an artifact beyond the watermark must be
+    /// exactly equal however much history the watermark covers: any per-open
+    /// term proportional to retained history adds operations and fails this.
+    /// The closure of an already covered artifact keeps one documented term
+    /// that does grow (counting its run's evaluations reads the unindexed
+    /// `evaluation_runs.trigger_run_id`); its slope is reported, not bounded.
+    fn assert_uncovered_work_flat(
+        small: HotPathWork,
+        large: HotPathWork,
+        retained: (u64, u64),
+        label: &str,
+    ) {
+        eprintln!("{label}: SQLite VM operations {small:?} -> {large:?}");
+        let extra = retained.1.saturating_sub(retained.0).max(1);
         eprintln!(
-            "{label}: covered-artifact qualify {} -> {} ticks (documented evaluation-table term)",
-            small.qualify_covered, large.qualify_covered
+            "{label}: covered-artifact qualify {} -> {} operations, {:.1} per retained \
+             acquisition (documented evaluation-table term)",
+            small.qualify_covered,
+            large.qualify_covered,
+            f64::from(
+                u32::try_from(large.qualify_covered.saturating_sub(small.qualify_covered))
+                    .unwrap_or(u32::MAX)
+            ) / f64::from(u32::try_from(extra).unwrap_or(u32::MAX))
         );
-        for (path, small, large) in [
-            ("qualify", small.qualify_uncovered, large.qualify_uncovered),
-            ("replay", small.replay_uncovered, large.replay_uncovered),
-        ] {
-            assert!(
-                large * 100 <= small * 102 + 200,
-                "{label}: {path} work grew from {small} to {large} ticks with covered history"
-            );
-        }
+        assert_eq!(
+            large.qualify_uncovered, small.qualify_uncovered,
+            "{label}: qualify of a new artifact must not depend on covered history"
+        );
+        assert_eq!(
+            large.replay_uncovered, small.replay_uncovered,
+            "{label}: replay of a new artifact must not depend on covered history"
+        );
     }
 
     #[test]
@@ -17891,7 +17908,7 @@ sys.stdout.write("\n")
         full_validation_and_watermark(&large_config);
         let small = measure_hot_path_work(&small_config, &small_watcher, "work-small-newest");
         let large = measure_hot_path_work(&large_config, &large_watcher, "work-large-newest");
-        assert_uncovered_work_flat(small, large, "4 -> 25 retained acquisitions");
+        assert_uncovered_work_flat(small, large, (4, 25), "4 -> 25 retained acquisitions");
     }
 
     /// The same work measure, plus wall time, at `NQ_SCALING_N` (default
@@ -17966,6 +17983,10 @@ sys.stdout.write("\n")
         assert_uncovered_work_flat(
             small_work,
             total_work,
+            (
+                u64::try_from(small + 1).unwrap_or(u64::MAX),
+                u64::try_from(total + 2).unwrap_or(u64::MAX),
+            ),
             &format!("{} -> {} retained acquisitions", small + 1, total + 2),
         );
     }

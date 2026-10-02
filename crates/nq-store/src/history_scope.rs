@@ -94,8 +94,9 @@ thread_local! {
     static SQL_WORK: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
-/// SQLite virtual-machine operations between two work-counter ticks.
-pub const SQL_WORK_TICK: i32 = 64;
+/// SQLite virtual-machine operations between two work-counter ticks: every
+/// operation is counted, so a test can assert exact equality.
+pub const SQL_WORK_TICK: i32 = 1;
 
 /// Deterministic measure of the SQL work a thread performs: start counting
 /// before opening a store, and every connection opened afterwards on this
