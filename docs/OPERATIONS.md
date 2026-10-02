@@ -1,6 +1,6 @@
 # NQ operations: current scope and historical runbook
 
-The current source has SQLite schema v12, including retained saved-check,
+The current source has SQLite schema v13, including retained saved-check,
 maintenance-declaration, and notification-delivery custody. The small supported
 starting path is the credential-free local saved-check example in
 [`SAVED_CHECKS.md`](SAVED_CHECKS.md). Notification delivery is documented in
@@ -137,7 +137,7 @@ These commands do not initialize NQ. The Debian package also deliberately
 leaves `nqd` stopped and disabled.
 
 To read which build is deployed, ask the installed binary rather than the
-package name: `nq --version` prints `nq 0.2.0 (<commit>)` (and `nqd --version` prints `nqd 0.2.0 (<commit>)`),
+package name: `nq --version` prints `nq 0.2.1 (<commit>)` (and `nqd --version` prints `nqd 0.2.1 (<commit>)`),
 where `<commit>` is the full git commit id release automation recorded at
 compile time through `NQ_SOURCE_COMMIT`; `nq --build-info` prints the same
 commit as `source_commit` in a one-line JSON document
@@ -146,7 +146,7 @@ policy, without reading any configuration. Every binary in a release carries
 the same commit because the assembler refuses a cohort whose commits differ or
 are absent, and the qualification package receipt binds that commit through the
 recorded build environment. A development build without `NQ_SOURCE_COMMIT`
-prints `nq 0.2.0` and `"source_commit":null`, and is not packageable.
+prints `nq 0.2.1` and `"source_commit":null`, and is not packageable.
 
 At every service start under the intact packaged unit, systemd runs the
 installed inner-manifest check from `/usr` before `config check`. Missing or
@@ -513,7 +513,10 @@ sudo -u nq nq --config /etc/nq/nq.toml \
 ```
 
 `qualify` is the narrow NQ-NG → Nightshift admission-provenance boundary. It
-exhaustively reopens the store's semantic history and emits one
+reopens the store's semantic history beyond the validation watermark (all of
+it when the watermark certifies none; see
+[Store validation](#store-validation-and-the-validation-watermark)),
+re-proves the qualified artifact's own closure, and emits one
 `nq.diagnostic_admission_provenance.v1` only for a locally produced v2
 artifact. The carrier binds exact canonical bytes, the store-genesis source,
 run/evaluation origin, provider intake, raw-byte and admission-context
@@ -617,6 +620,200 @@ sudo systemctl start nqd.service
 Repeat admission for every new or changed instance. If a step fails, keep the
 daemon stopped and retain both the candidate and admission history for review.
 
+## Store validation and the validation watermark
+
+Every open refuses an unsupported schema version, a foreign application ID,
+mismatched schema metadata, a stale schema artifact digest, a missing required
+object, or a schema-fingerprint difference (which also proves that every
+append-only trigger is present). These checks cost O(schema) and run on every
+open, read-only or writable.
+
+### The watermark
+
+History validation is bounded by a *validation watermark*: the sidecar
+`<database>.validation-watermark.json` (for the packaged layout,
+`/var/lib/nq/nq.db.validation-watermark.json`, mode `0600`). It is written only
+after a validation succeeds and records:
+
+- the store's genesis identity, schema version, and schema artifact digest;
+- the store rule set (`VALIDATION_RULES`, bound to the `nq-store` package
+  version) and the engine rule set (the `nq-core` package version and a digest
+  of the compiled profile catalog);
+- for every append-only history table, the highest validated rowid, the number
+  of rows at or below it, a SHA-256 hash chain over the complete stored
+  encoding of each of those rows in rowid order (the rowid and every column
+  value, payload bytes included), and the digest of the bounding row;
+- when the complete semantic history is also certified, the finding-lineage
+  replay state at the frontier;
+- a commitment digest over all of the above, which every open recomputes from
+  the file, so an accidentally or partly edited watermark is refused.
+
+The commitment is store-specific and detects accidents; it is not an
+authenticator. It is an unkeyed SHA-256 that anyone able to write
+`/var/lib/nq` can recompute, so a coherent reseal of the database and the
+watermark together passes an ordinary open, and the recorded lineage heads are
+trusted as written rather than re-derived from the database on open. History
+that an operation consumes does not depend on it: the referenced closure is
+re-proven from the stored bytes, and full validation applies every law to
+every row. Pinning the commitment outside the host is tracked separately.
+
+NQ's writers only append, so the rows above a table's bound are the rows
+appended since the watermark was recorded. An ordinary open does not prove
+that nothing changed at or below the bound: it reads only each bounding row.
+Chains are extended only over newly validated rows, so recording a watermark
+costs O(new rows).
+
+### What each open validates
+
+With an applicable watermark (this store's genesis, this schema, these rule
+sets), an open:
+
+1. proves that each table's bounding row is present with its recorded encoding
+   (one point read per table). Removing or rewriting a bounding row (a
+   truncated table tail, a rolled-back database, a watermark from a later
+   state of the store) refuses the open. A row inserted, removed, or rewritten
+   at or below the bound elsewhere in a table is not seen by an ordinary open;
+   it is refused when an operation references it and by full validation;
+2. validates only rows beyond the frontier, with the same store laws full
+   validation applies (stored digests, provider-intake custody and run
+   correspondence, local-successor phases, refusals, run results and
+   evaluation closures, evaluation/finding linkage, evaluation sequence and
+   lineage contiguity, diagnostic-artifact origins and provenance, report
+   associations, status sequences, current-state pointers). Each check
+   selects a row when it is new or when a new row names it, so an old run that
+   gains a new evaluation, status event, or submission is re-checked.
+   Configuration-scale tables (descriptors, admissions, bindings, upgrade
+   receipts) are validated in full on every open.
+
+It does not re-read covered rows that no operation references. Untouched
+historical row contents are not continuously reread: a referenced row is
+re-proven before use, and whole-store latent corruption is found by explicit
+full validation, which should be scheduled periodically.
+
+Every engine open (`collect`, `diagnostics execute`, `acquire-next-local`,
+`replay-local-successor`, watcher actions, and the daemon's collection engine)
+then reopens the provider intakes and diagnostic artifacts beyond the frontier
+and the remaining semantic planes (admitted reports, watcher runs, status
+events, rejected custody, evaluation and finding replay) beyond the semantic
+certification, resuming the finding-lineage replay from the recorded state.
+Without an applicable watermark, when the watermark was certified under other
+engine rules, or when it does not certify semantic history (an earlier failure
+withdrew it), it validates them in full and certifies them again. A writable
+engine open then extends the watermark to the frontier it captured before
+validating; the recorded lineage heads are replayed only through that same
+frontier, so a writer appending concurrently cannot make them disagree, and
+its rows are validated by the next open. Other writable commands never write a
+watermark, and read-only opens never do.
+
+Operations that use history re-prove what they reference, whether or not the
+watermark covers it:
+
+- `replay-local-successor`, `diagnostics qualify`, `diagnostics export`, and
+  `diagnostics inspect` validate the history beyond the watermark and then the
+  named artifact's own closure: its bytes, origin run, provider intake,
+  evaluation, and status correspondence;
+- collection re-verifies the digest of every admitted report it evaluates,
+  so an edited covered report is refused rather than evaluated.
+
+`admin validate --full` remains the one explicit whole-store operation.
+
+### Full validation
+
+Full validation runs when no watermark exists, when it cannot be decoded, when
+it was written for another schema or store rule set, on `init`, on every
+`admin upgrade` result, and on demand:
+
+```sh
+sudo -u nq nq --config /etc/nq/nq.toml --json admin validate --full
+```
+
+It adds SQLite `quick_check` and `foreign_key_check`, revalidates every
+history row and the complete semantic history, recomputes every table's chain
+from the stored rows, and refuses if any row certified by the existing
+watermark was added, removed, or rewritten since. On success it records a new
+watermark and prints its commitment digest. An existing store has no
+watermark until its first engine open or explicit full validation; that first
+validation costs a full validation.
+
+### Refusals and warnings
+
+- A watermark written for another store (another genesis) refuses every open
+  and is never overwritten. Confirm which database belongs at the path, move
+  the watermark aside, and open again.
+- A changed bounding row, or an edited watermark, refuses the open with
+  "run `nq admin validate --full`". Full validation then refuses if certified
+  rows are missing or changed. If the database was deliberately restored or
+  rolled back, move the watermark aside first; the next open validates in
+  full. A power loss can also produce this state: commits are durable at WAL
+  `synchronous=NORMAL`, so the last commits before a power loss may be lost
+  while a watermark that already covers them survives.
+- A semantic-history failure on an engine open withdraws the semantic
+  certification and prints a warning; the open proceeds because it never
+  required semantic history. Qualification, export, inspection, and
+  collection then validate semantic history in full until an engine open or
+  full validation certifies it again; every engine open retries.
+- A watermark that cannot be written (for example a full or read-only
+  directory) prints a warning; the open proceeds and the next open validates
+  the same history again. Temporary files carry a unique name and are removed
+  on failure; files left by a killed writer are removed by the next successful
+  write once they are ten minutes old.
+
+`nq --json doctor` reports the state under `validation_watermark`: `state`
+(`certified`, `core_only`, `absent`, `unreadable`, `inapplicable`),
+`semantic_certified`, `validated_at`, `age_seconds`, `uncovered_history_rows`
+(what the next engine open must validate), and `commitment_digest`. Alert on a
+state other than `certified`, or on an age or uncovered count that keeps
+growing. The qualification carrier deliberately does not carry this state: its
+content identity must be the same on every replay of the same artifact.
+
+### Remaining linear costs
+
+The following still grow with retained history; every other part of an open
+is bounded by the new rows, the referenced closure, and the schema:
+
+- The closure of an artifact the watermark already covers counts and reads
+  the evaluations of its run. `evaluation_runs.trigger_run_id` is not indexed
+  in schema 13, so the first such lookup in a process scans the evaluation
+  table once to index evaluations by run. Reopening a covered evaluation
+  likewise joins `refusals` and `finding_events` on their unindexed
+  `evaluation_id`, O(refusals + finding events). This is the Monitor order:
+  `acquire-next-local`, then `replay-local-successor` (which records the
+  watermark), then `qualify` and `export` of an artifact that is now covered.
+  Measured: about 9 SQLite virtual-machine operations per retained
+  acquisition, and on the reference machine 16 ms to 27 ms for such a `qualify`
+  between 500 and 5,000 retained acquisitions (roughly 0.25 s at 100,000).
+  Indexing these columns needs a schema change.
+- Each collection still decodes and re-checks every retained admitted report
+  of its instance to select its evaluation context. That is evaluation input,
+  not open validation; on the reference machine one `acquire-next-local` took
+  about 0.2 s, 0.6 s, and 2.1 to 2.6 s with 500, 2,000, and 5,000 retained
+  acquisitions, about 0.45 ms per retained report. At that slope an
+  acquisition reaches a 60-second bound at roughly 100,000 retained
+  acquisitions, about 70 to 80 days at one acquisition per minute. Before a
+  store approaches that size, archive it (`nq admin archive`) and initialize a
+  new store.
+- Full validation is linear in history apart from those lookups: about 7 s,
+  27 s, and 81 s at those sizes, and 3.5 s on a 208-acquisition production
+  store copy.
+
+The `hot_path_work_does_not_grow_with_covered_history` test counts every
+SQLite virtual-machine operation and asserts that a read-only open plus
+`qualify`, and an engine open plus `replay-local-successor`, of an artifact
+beyond the watermark take exactly the same number of operations however much
+history the watermark covers; any per-open scan of covered history fails it.
+Keys are random and a keyed lookup whose key is the last in its index ends one
+operation early, so the test restores each certified store between 16 trials
+and compares the maxima, which are exact. The same equality held at 151 against 1,502 and at 501 against 5,002 retained
+acquisitions. Wall times on the reference machine were 0.03 to 0.06 s for a
+bounded `qualify` and 0.07 to 0.12 s for a bounded replay at 500 to 5,000
+retained acquisitions; on the 208-acquisition production store copy,
+`qualify`, `export`, and `inspect` took 0.03 s and a replay 0.10 s, against
+93 s, 92 s, and 60 s for NQ 0.2.0 on the same copy.
+
+`nqd` startup still validates the store and provider-intake history in full;
+`backup`, `restore`, `admin archive`, and archive verification keep their
+exhaustive validation.
+
 ## Backup
 
 Use the CLI, not a filesystem copy of a live WAL database. The current command
@@ -647,7 +844,8 @@ startup both succeed:
 ```sh
 sudo systemctl stop nqd.service
 sudo install -d -o nq -g nq -m 0700 /var/lib/nq/restore-quarantine
-sudo sh -c 'for p in /var/lib/nq/nq.db /var/lib/nq/nq.db-wal /var/lib/nq/nq.db-shm; do
+sudo sh -c 'for p in /var/lib/nq/nq.db /var/lib/nq/nq.db-wal /var/lib/nq/nq.db-shm \
+    /var/lib/nq/nq.db.validation-watermark.json; do
   if test -e "$p"; then mv -- "$p" /var/lib/nq/restore-quarantine/; fi
 done'
 sudo -u nq nq --config /etc/nq/nq.toml restore \
@@ -658,6 +856,9 @@ sudo systemctl start nqd.service
 
 If validation fails, leave `nqd` stopped. Move the failed restored file aside
 and restore the quarantined database and matching sidecars as one set.
+`restore` removes a validation watermark left beside the absent destination,
+so the first open of the restored database validates it in full; run
+`admin validate --full` afterwards to certify its semantic history again.
 
 ## Cold archive and historical reopen
 
@@ -805,7 +1006,7 @@ cargo build --release --locked
 python3 profiles/verify_catalog.py target/release/nq \
   --helper target/release/nq-host-resource-helper
 SOURCE_DATE_EPOCH=0 scripts/build-release-bundle.sh \
-  0.2.0 amd64 target/release profiles dist
+  0.2.1 amd64 target/release profiles dist
 (cd dist && sha256sum --check SHA256SUMS)
 ```
 
@@ -849,7 +1050,7 @@ failure boundaries without touching `dist/`:
 
 ```sh
 scripts/test_release_reproducibility.sh \
-  0.2.0 amd64 target/release profiles
+  0.2.1 amd64 target/release profiles
 scripts/test_release_failure_atomicity.sh \
-  0.2.0 amd64 target/release profiles
+  0.2.1 amd64 target/release profiles
 ```

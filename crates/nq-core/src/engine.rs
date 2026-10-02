@@ -2245,8 +2245,7 @@ impl CollectionEngine {
     pub fn open(config: &NqConfig) -> Result<Self, EngineError> {
         validate_compiled_config(config)?;
         let store = Store::open(&config.database_path)?;
-        validate_provider_intake_history(&store)?;
-        validate_diagnostic_artifact_history(&store)?;
+        validate_engine_open_history(&store)?;
         Ok(Self {
             config: config.clone(),
             store,
@@ -2291,8 +2290,7 @@ impl CollectionEngine {
             )));
         }
         let store = Store::open(&config.database_path)?;
-        validate_provider_intake_history(&store)?;
-        validate_diagnostic_artifact_history(&store)?;
+        validate_engine_open_history(&store)?;
         let mut engine = Self {
             config: config.clone(),
             store,
@@ -2316,8 +2314,7 @@ impl CollectionEngine {
     ) -> Result<Self, EngineError> {
         validate_compiled_config(config)?;
         let store = Store::open(&config.database_path)?;
-        validate_provider_intake_history(&store)?;
-        validate_diagnostic_artifact_history(&store)?;
+        validate_engine_open_history(&store)?;
         Ok(Self {
             config: config.clone(),
             store,
@@ -2685,6 +2682,11 @@ impl CollectionEngine {
                         "completed local successor lacks diagnostic artifact".into(),
                     )
                 })?;
+            validate_diagnostic_artifact_closure(
+                &self.store,
+                &artifact,
+                &mut DiagnosticArtifactHistoryVerification::default(),
+            )?;
             return reopen_diagnostic_artifact(&self.store, &artifact);
         }
         let execution = self.collect_internal(watcher, true, Some(acquisition_id))?;
@@ -2731,6 +2733,11 @@ impl CollectionEngine {
             .ok_or_else(|| {
                 EngineError::Invariant("completed local successor lacks diagnostic artifact".into())
             })?;
+        validate_diagnostic_artifact_closure(
+            &self.store,
+            &artifact,
+            &mut DiagnosticArtifactHistoryVerification::default(),
+        )?;
         reopen_diagnostic_artifact(&self.store, &artifact)
     }
 
@@ -3235,7 +3242,7 @@ impl CollectionEngine {
                             protocol_outcome: "valid_report".into(),
                             disposition: SubmissionDisposition::Admitted(stored_report),
                         };
-                        validate_evaluation_refusal_history(&self.store)?;
+                        validate_evaluation_history_before_evaluating(&self.store)?;
                         let evaluator_artifact_digest = self
                             .require_evaluator_identity()?
                             .artifact_digest()
@@ -4074,7 +4081,7 @@ impl CollectionEngine {
         let snapshot = self
             .store
             .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
-        validate_evaluation_refusal_history(&self.store)?;
+        validate_evaluation_history_before_evaluating(&self.store)?;
         let current_findings = self.store.finding_snapshots()?;
         let evaluator_artifact_digest = self
             .require_evaluator_identity()?
@@ -4170,7 +4177,7 @@ pub fn qualify_diagnostic_admission(
     store: &Store,
     artifact_id: &Sha256Digest,
 ) -> Result<DiagnosticAdmissionProvenanceV1, EngineError> {
-    validate_semantic_history(store)?;
+    validate_semantic_history_since_open(store)?;
     let DiagnosticArtifactLookup::Found(access) =
         store.diagnostic_artifact(artifact_id, SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS)?
     else {
@@ -4186,6 +4193,13 @@ pub fn qualify_diagnostic_admission(
             "diagnostic artifact {artifact_id} uses an unsupported contract"
         )));
     }
+    // The qualified artifact's own closure is re-proven even when a
+    // validation watermark covers it.
+    validate_diagnostic_artifact_commitment(
+        store,
+        &access.commitment,
+        &mut DiagnosticArtifactHistoryVerification::default(),
+    )?;
     let document = match access.byte_state {
         DiagnosticArtifactByteState::VerifiedAvailable { canonical_bytes } => canonical_bytes,
         DiagnosticArtifactByteState::CommittedUnavailable => {
@@ -4357,7 +4371,7 @@ fn parse_digest(field: &str, value: &str) -> Result<Sha256Digest, EngineError> {
 }
 
 /// Exact historical diagnostic-artifact reopening counts.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DiagnosticArtifactHistoryVerification {
     /// Total immutable commitments visited.
     pub commitments: usize,
@@ -4399,175 +4413,228 @@ pub fn validate_diagnostic_artifact_history(
         let page_len = commitments.len();
         for commitment in commitments {
             after = Some(commitment.artifact_sequence);
-            let DiagnosticArtifactLookup::Found(access) = store.diagnostic_artifact(
-                &commitment.artifact_id,
-                SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS,
-            )?
-            else {
-                return Err(EngineError::Invariant(format!(
-                    "diagnostic artifact index lost commitment {}",
-                    commitment.artifact_id
-                )));
-            };
-            match (access.schema_support, access.byte_state) {
-                (
-                    DiagnosticArtifactSchemaSupport::Supported,
-                    DiagnosticArtifactByteState::VerifiedAvailable { .. },
-                ) => {
-                    let artifact = reopen_diagnostic_artifact(store, &commitment.artifact_id)?;
-                    if let DiagnosticArtifactOrigin::Local {
-                        run_id,
-                        evaluation_id,
-                        completed_at,
-                    } = &commitment.origin
-                    {
-                        let SupportedDiagnosticExecution::V2(local_v2_artifact) = &artifact else {
-                            return Err(EngineError::DiagnosticUnsupported(format!(
-                                "local diagnostic artifact {} uses frozen v1, whose local semantic correspondence was never retained",
-                                commitment.artifact_id
-                            )));
-                        };
-                        if artifact.run_id().as_str() != run_id {
-                            return Err(EngineError::Invariant(format!(
-                                "local diagnostic artifact {} claims run {} but its durable origin names {run_id}",
-                                commitment.artifact_id,
-                                artifact.run_id().as_str()
-                            )));
-                        }
-                        if timestamp(local_v2_artifact.completed_at) != *completed_at {
-                            return Err(EngineError::Invariant(format!(
-                                "local diagnostic artifact {} substitutes its exact completion time",
-                                commitment.artifact_id
-                            )));
-                        }
-                        let run = store.watcher_run_outcome(run_id)?.ok_or_else(|| {
-                            EngineError::Invariant(format!(
-                                "local diagnostic artifact {} origin run {run_id} is missing",
-                                commitment.artifact_id
-                            ))
-                        })?;
-                        if artifact.request_id().as_str() != run.request_id
-                            || artifact.profile().id != run.profile_id
-                            || artifact.profile().version != run.profile_version
-                            || artifact.profile().digest.as_str() != run.profile_digest
-                        {
-                            return Err(EngineError::Invariant(format!(
-                                "local diagnostic artifact {} substitutes its request or profile origin",
-                                commitment.artifact_id
-                            )));
-                        }
-                        let local_v2_context =
-                            validate_local_v2_provider_correspondence(store, &artifact, &run)?;
-                        if let Some(evaluation_id) = evaluation_id {
-                            let admitted =
+            validate_diagnostic_artifact_commitment(store, &commitment, &mut verification)?;
+        }
+        if page_len < nq_store::MAX_PUBLIC_QUERY_ROWS as usize {
+            return Ok(verification);
+        }
+    }
+}
+
+/// Validate one committed diagnostic artifact: byte verification, and for a
+/// supported local v2 artifact its exact run, provider-intake, evaluation,
+/// and status correspondence. Counts it into `verification`.
+#[allow(clippy::too_many_lines)]
+fn validate_diagnostic_artifact_commitment(
+    store: &Store,
+    commitment: &nq_store::DiagnosticArtifactCommitment,
+    verification: &mut DiagnosticArtifactHistoryVerification,
+) -> Result<(), EngineError> {
+    let DiagnosticArtifactLookup::Found(access) = store.diagnostic_artifact(
+        &commitment.artifact_id,
+        SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS,
+    )?
+    else {
+        return Err(EngineError::Invariant(format!(
+            "diagnostic artifact index lost commitment {}",
+            commitment.artifact_id
+        )));
+    };
+    match (access.schema_support, access.byte_state) {
+        (
+            DiagnosticArtifactSchemaSupport::Supported,
+            DiagnosticArtifactByteState::VerifiedAvailable { .. },
+        ) => {
+            let artifact = reopen_diagnostic_artifact(store, &commitment.artifact_id)?;
+            if let DiagnosticArtifactOrigin::Local {
+                run_id,
+                evaluation_id,
+                completed_at,
+            } = &commitment.origin
+            {
+                let SupportedDiagnosticExecution::V2(local_v2_artifact) = &artifact else {
+                    return Err(EngineError::DiagnosticUnsupported(format!(
+                        "local diagnostic artifact {} uses frozen v1, whose local semantic correspondence was never retained",
+                        commitment.artifact_id
+                    )));
+                };
+                if artifact.run_id().as_str() != run_id {
+                    return Err(EngineError::Invariant(format!(
+                        "local diagnostic artifact {} claims run {} but its durable origin names {run_id}",
+                        commitment.artifact_id,
+                        artifact.run_id().as_str()
+                    )));
+                }
+                if timestamp(local_v2_artifact.completed_at) != *completed_at {
+                    return Err(EngineError::Invariant(format!(
+                        "local diagnostic artifact {} substitutes its exact completion time",
+                        commitment.artifact_id
+                    )));
+                }
+                let run = store.watcher_run_outcome(run_id)?.ok_or_else(|| {
+                    EngineError::Invariant(format!(
+                        "local diagnostic artifact {} origin run {run_id} is missing",
+                        commitment.artifact_id
+                    ))
+                })?;
+                if artifact.request_id().as_str() != run.request_id
+                    || artifact.profile().id != run.profile_id
+                    || artifact.profile().version != run.profile_version
+                    || artifact.profile().digest.as_str() != run.profile_digest
+                {
+                    return Err(EngineError::Invariant(format!(
+                        "local diagnostic artifact {} substitutes its request or profile origin",
+                        commitment.artifact_id
+                    )));
+                }
+                let local_v2_context =
+                    validate_local_v2_provider_correspondence(store, &artifact, &run)?;
+                if let Some(evaluation_id) = evaluation_id {
+                    let admitted =
                                 store.admitted_collection_for_run(run_id)?.ok_or_else(|| {
                                     EngineError::Invariant(format!(
                                         "local diagnostic artifact {} origin run {run_id} is not one admitted collection",
                                         commitment.artifact_id
                                     ))
                                 })?;
-                            if admitted.evaluations != 1 {
-                                return Err(EngineError::Invariant(format!(
-                                    "local diagnostic artifact {} requires exactly one origin evaluation; durable run {run_id} has {}",
-                                    commitment.artifact_id, admitted.evaluations
-                                )));
-                            }
-                            let evaluation =
+                    if admitted.evaluations != 1 {
+                        return Err(EngineError::Invariant(format!(
+                            "local diagnostic artifact {} requires exactly one origin evaluation; durable run {run_id} has {}",
+                            commitment.artifact_id, admitted.evaluations
+                        )));
+                    }
+                    let evaluation =
                                 store.evaluation_origin(evaluation_id)?.ok_or_else(|| {
                                     EngineError::Invariant(format!(
                                         "local diagnostic artifact {} origin evaluation {evaluation_id} is missing",
                                         commitment.artifact_id
                                     ))
                                 })?;
-                            if evaluation.trigger_run_id.as_deref() != Some(run_id.as_str()) {
-                                return Err(EngineError::Invariant(format!(
-                                    "local diagnostic artifact {} origin evaluation {evaluation_id} does not belong to run {run_id}",
-                                    commitment.artifact_id
-                                )));
-                            }
-                            let envelope = reopen_exact_evaluation(store, &evaluation)?;
-                            validate_evaluated_diagnostic_correspondence(
-                                store,
-                                &artifact,
-                                &run,
-                                &local_v2_context,
-                                &envelope,
-                            )?;
-                        } else {
-                            validate_run_only_diagnostic_correspondence(
-                                store,
-                                &artifact,
-                                run_id,
-                                &local_v2_context,
-                            )?;
-                        }
+                    if evaluation.trigger_run_id.as_deref() != Some(run_id.as_str()) {
+                        return Err(EngineError::Invariant(format!(
+                            "local diagnostic artifact {} origin evaluation {evaluation_id} does not belong to run {run_id}",
+                            commitment.artifact_id
+                        )));
                     }
-                    verification.supported_available = verification
-                        .supported_available
-                        .checked_add(1)
-                        .ok_or_else(|| {
-                            EngineError::Invariant(
-                                "diagnostic artifact verification count overflowed".into(),
-                            )
-                        })?;
-                }
-                (
-                    DiagnosticArtifactSchemaSupport::Supported,
-                    DiagnosticArtifactByteState::CommittedUnavailable,
-                ) => {
-                    verification.supported_committed_unavailable = verification
-                        .supported_committed_unavailable
-                        .checked_add(1)
-                        .ok_or_else(|| {
-                            EngineError::Invariant(
-                                "diagnostic artifact verification count overflowed".into(),
-                            )
-                        })?;
-                }
-                (
-                    DiagnosticArtifactSchemaSupport::Unsupported { .. },
-                    DiagnosticArtifactByteState::VerifiedAvailable { .. },
-                ) => {
-                    verification.unsupported_available = verification
-                        .unsupported_available
-                        .checked_add(1)
-                        .ok_or_else(|| {
-                            EngineError::Invariant(
-                                "diagnostic artifact verification count overflowed".into(),
-                            )
-                        })?;
-                }
-                (
-                    DiagnosticArtifactSchemaSupport::Unsupported { .. },
-                    DiagnosticArtifactByteState::CommittedUnavailable,
-                ) => {
-                    verification.unsupported_committed_unavailable = verification
-                        .unsupported_committed_unavailable
-                        .checked_add(1)
-                        .ok_or_else(|| {
-                            EngineError::Invariant(
-                                "diagnostic artifact verification count overflowed".into(),
-                            )
-                        })?;
-                }
-                (_, DiagnosticArtifactByteState::Corrupt { reason }) => {
-                    return Err(EngineError::Invariant(format!(
-                        "diagnostic artifact {} failed byte verification: {reason}",
-                        commitment.artifact_id
-                    )));
+                    let envelope = reopen_exact_evaluation(store, &evaluation)?;
+                    validate_evaluated_diagnostic_correspondence(
+                        store,
+                        &artifact,
+                        &run,
+                        &local_v2_context,
+                        &envelope,
+                    )?;
+                } else {
+                    validate_run_only_diagnostic_correspondence(
+                        store,
+                        &artifact,
+                        run_id,
+                        &local_v2_context,
+                    )?;
                 }
             }
-            verification.commitments =
-                verification.commitments.checked_add(1).ok_or_else(|| {
+            verification.supported_available = verification
+                .supported_available
+                .checked_add(1)
+                .ok_or_else(|| {
                     EngineError::Invariant(
                         "diagnostic artifact verification count overflowed".into(),
                     )
                 })?;
         }
-        if page_len < nq_store::MAX_PUBLIC_QUERY_ROWS as usize {
-            return Ok(verification);
+        (
+            DiagnosticArtifactSchemaSupport::Supported,
+            DiagnosticArtifactByteState::CommittedUnavailable,
+        ) => {
+            verification.supported_committed_unavailable = verification
+                .supported_committed_unavailable
+                .checked_add(1)
+                .ok_or_else(|| {
+                    EngineError::Invariant(
+                        "diagnostic artifact verification count overflowed".into(),
+                    )
+                })?;
+        }
+        (
+            DiagnosticArtifactSchemaSupport::Unsupported { .. },
+            DiagnosticArtifactByteState::VerifiedAvailable { .. },
+        ) => {
+            verification.unsupported_available = verification
+                .unsupported_available
+                .checked_add(1)
+                .ok_or_else(|| {
+                    EngineError::Invariant(
+                        "diagnostic artifact verification count overflowed".into(),
+                    )
+                })?;
+        }
+        (
+            DiagnosticArtifactSchemaSupport::Unsupported { .. },
+            DiagnosticArtifactByteState::CommittedUnavailable,
+        ) => {
+            verification.unsupported_committed_unavailable = verification
+                .unsupported_committed_unavailable
+                .checked_add(1)
+                .ok_or_else(|| {
+                    EngineError::Invariant(
+                        "diagnostic artifact verification count overflowed".into(),
+                    )
+                })?;
+        }
+        (_, DiagnosticArtifactByteState::Corrupt { reason }) => {
+            return Err(EngineError::Invariant(format!(
+                "diagnostic artifact {} failed byte verification: {reason}",
+                commitment.artifact_id
+            )));
         }
     }
+    verification.commitments = verification.commitments.checked_add(1).ok_or_else(|| {
+        EngineError::Invariant("diagnostic artifact verification count overflowed".into())
+    })?;
+    Ok(())
+}
+
+/// Diagnostic-artifact history beyond `frontier`: each artifact whose
+/// commitment, payload, or origin is not covered.
+///
+/// # Errors
+///
+/// As [`validate_diagnostic_artifact_history`], for the uncovered artifacts.
+pub fn validate_diagnostic_artifact_history_since(
+    store: &Store,
+    frontier: &nq_store::HistoryFrontier,
+) -> Result<DiagnosticArtifactHistoryVerification, EngineError> {
+    let mut verification = DiagnosticArtifactHistoryVerification {
+        commitments: 0,
+        supported_available: 0,
+        supported_committed_unavailable: 0,
+        unsupported_available: 0,
+        unsupported_committed_unavailable: 0,
+    };
+    for artifact_id in store.diagnostic_artifact_ids_since(frontier)? {
+        let artifact_id = Sha256Digest::parse(artifact_id).map_err(|error| {
+            EngineError::Invariant(format!("diagnostic artifact identity: {error}"))
+        })?;
+        validate_diagnostic_artifact_closure(store, &artifact_id, &mut verification)?;
+    }
+    Ok(verification)
+}
+
+/// Validate one artifact named by identity (the closure a replay or
+/// qualification depends on), whether or not a watermark covers it.
+fn validate_diagnostic_artifact_closure(
+    store: &Store,
+    artifact_id: &Sha256Digest,
+    verification: &mut DiagnosticArtifactHistoryVerification,
+) -> Result<(), EngineError> {
+    let DiagnosticArtifactLookup::Found(access) =
+        store.diagnostic_artifact(artifact_id, SUPPORTED_DIAGNOSTIC_EXECUTION_SCHEMAS)?
+    else {
+        return Err(EngineError::Invariant(format!(
+            "diagnostic artifact {artifact_id} is not committed"
+        )));
+    };
+    validate_diagnostic_artifact_commitment(store, &access.commitment, verification)
 }
 
 struct LocalV2HistoryContext {
@@ -8198,6 +8265,303 @@ pub fn backup_store(store: &Store, destination: &Path) -> Result<(), EngineError
     Ok(())
 }
 
+/// Identity of the semantic validation rules above the store: this engine
+/// version and a digest of the compiled profile catalog. A watermark records
+/// it; when it differs, the history above the store is validated in full
+/// again (store-level checks are bound separately by
+/// [`nq_store::VALIDATION_RULES`]).
+#[must_use]
+pub fn engine_validation_rules() -> &'static str {
+    static RULES: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let mut catalog = Vec::new();
+        for module in nq_profiles::all_profiles() {
+            let descriptor = module.descriptor();
+            let digest = descriptor.digest().map_or_else(
+                |error| format!("invalid:{error}"),
+                |digest| digest.as_str().to_owned(),
+            );
+            catalog.push(format!(
+                "{}\0{}\0{digest}",
+                descriptor.profile.id, descriptor.profile.version
+            ));
+        }
+        catalog.sort();
+        format!(
+            "nq-core/{}/engine-rules.1/catalog:{}",
+            env!("CARGO_PKG_VERSION"),
+            nq_protocol::sha256_bytes(catalog.join("\n").as_bytes()).as_str()
+        )
+    });
+    RULES.as_str()
+}
+
+/// The applied watermark when it was certified under this engine's rules.
+fn engine_watermark(store: &Store) -> Option<&nq_store::ValidationWatermark> {
+    store
+        .applied_watermark()
+        .filter(|watermark| watermark.engine_rules == engine_validation_rules())
+}
+
+fn engine_core_frontier(store: &Store) -> Option<&nq_store::HistoryFrontier> {
+    engine_watermark(store).map(|watermark| &watermark.frontier)
+}
+
+fn engine_semantic_state(
+    store: &Store,
+) -> Option<(&nq_store::HistoryFrontier, &nq_store::SemanticState)> {
+    engine_watermark(store).and_then(|watermark| {
+        watermark
+            .semantic
+            .as_ref()
+            .map(|state| (&watermark.frontier, state))
+    })
+}
+
+/// What every engine open validates: store validation (done by the open),
+/// then the provider-intake and diagnostic-artifact history the open's
+/// watermark does not cover. The remaining semantic planes are validated
+/// beyond the watermark's semantic certification when it has one, and in
+/// full when the open found no applicable watermark, so the certification is
+/// established or advanced. A watermark that does not certify semantic
+/// history (an earlier failure withdrew it) gets a full attempt again. A
+/// semantic failure withdraws the certification (qualification and
+/// collection then validate semantic history in full), is reported on stderr
+/// and by `nq doctor`, and does not fail the open, which never required
+/// semantic history. A writable handle then records the watermark; a failure
+/// to write it is reported and leaves the previous watermark in place.
+fn validate_engine_open_history(store: &Store) -> Result<(), EngineError> {
+    validate_core_history_since_open(store)?;
+    let semantic = match engine_semantic_state(store) {
+        Some((frontier, state)) => validate_semantic_planes_since(store, frontier, state),
+        // No watermark, or one whose semantic certification was withdrawn
+        // by an earlier failure: attempt the full certification again
+        // rather than leaving it withdrawn.
+        None => validate_semantic_planes_in_full(store),
+    };
+    let certification = match semantic {
+        Ok(state) => nq_store::SemanticCertification::Established(state),
+        Err(error) => {
+            eprintln!(
+                "nq: warning: semantic history is not certified ({error}); qualification, export, \
+                 inspection, and collection validate it in full until an engine open or \
+                 `nq admin validate --full` certifies it"
+            );
+            nq_store::SemanticCertification::NotEstablished
+        }
+    };
+    match store.record_validation_watermark(certification, engine_validation_rules()) {
+        Ok(_) => Ok(()),
+        Err(nq_store::StoreError::WatermarkWrite(message)) => {
+            eprintln!(
+                "nq: warning: {message}; this validation is not recorded and the next open \
+                 validates the same history again"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Provider-intake and diagnostic-artifact history not covered by the
+/// store's validation watermark (all of it when the store opened in full or
+/// the watermark was certified under other engine rules).
+///
+/// # Errors
+///
+/// As [`validate_provider_intake_history`] and
+/// [`validate_diagnostic_artifact_history`] for the uncovered rows.
+pub fn validate_core_history_since_open(store: &Store) -> Result<(), EngineError> {
+    if let Some(frontier) = engine_core_frontier(store) {
+        validate_provider_intake_history_since(store, frontier)?;
+        validate_diagnostic_artifact_history_since(store, frontier)?;
+    } else {
+        validate_provider_intake_history(store)?;
+        validate_diagnostic_artifact_history(store)?;
+    }
+    Ok(())
+}
+
+/// The complete semantic chain of [`validate_semantic_history`], validating
+/// only rows its open's watermark does not certify: the core history beyond
+/// the core frontier and every other plane beyond the semantic
+/// certification. With no applicable certification this is exactly the
+/// exhaustive validation.
+///
+/// # Errors
+///
+/// As [`validate_semantic_history`] for the uncovered rows.
+pub fn validate_semantic_history_since_open(store: &Store) -> Result<(), EngineError> {
+    validate_core_history_since_open(store)?;
+    if let Some((frontier, state)) = engine_semantic_state(store) {
+        validate_semantic_planes_since(store, frontier, state)?;
+    } else {
+        validate_semantic_planes_in_full(store)?;
+    }
+    Ok(())
+}
+
+/// Validate one referenced diagnostic artifact's own closure (bytes, origin
+/// run, provider intake, evaluation, and status correspondence) whether or
+/// not a validation watermark covers it.
+///
+/// # Errors
+///
+/// Returns when the artifact is not committed or any closure binding fails.
+pub fn validate_referenced_diagnostic_artifact(
+    store: &Store,
+    artifact_id: &Sha256Digest,
+) -> Result<(), EngineError> {
+    validate_diagnostic_artifact_closure(
+        store,
+        artifact_id,
+        &mut DiagnosticArtifactHistoryVerification::default(),
+    )
+}
+
+/// Every semantic plane other than provider intake and diagnostic artifacts,
+/// in full; returns the finding-lineage replay state at the end of history.
+fn validate_semantic_planes_in_full(store: &Store) -> Result<nq_store::SemanticState, EngineError> {
+    // The evaluation history is replayed once, first; status and rejected
+    // custody then read their runs' evaluations without replaying it again.
+    let (_, heads) = replay_evaluation_history_in_full(store)?;
+    validate_admitted_report_history(store)?;
+    validate_watcher_run_history(store)?;
+    validate_status_history_v2_with_page_size(store, 256, EvaluationHistory::AlreadyValidated)?;
+    validate_rejected_custody_history_with_page_size(
+        store,
+        nq_store::MAX_PUBLIC_QUERY_ROWS,
+        EvaluationHistory::AlreadyValidated,
+    )?;
+    Ok(semantic_state(&heads))
+}
+
+/// Validate every history row of a store opened with
+/// [`Store::open_validating_fully`] and record a watermark certifying the
+/// complete semantic history through the open's frontier. Refuses when rows
+/// certified by an earlier watermark of this store changed.
+///
+/// # Errors
+///
+/// As [`validate_semantic_history`], or when the watermark cannot be written.
+pub fn validate_fully_and_record(
+    store: &Store,
+) -> Result<
+    (
+        DiagnosticArtifactHistoryVerification,
+        Option<nq_store::ValidationWatermark>,
+    ),
+    EngineError,
+> {
+    if store.validated_history_frontier().is_some() {
+        return Err(EngineError::Invariant(
+            "full validation requires a store opened without a watermark".into(),
+        ));
+    }
+    let state = validate_semantic_planes_in_full(store)?;
+    validate_provider_intake_history(store)?;
+    let verification = validate_diagnostic_artifact_history(store)?;
+    // `None` when the handle cannot record (read-only, or no sole genesis).
+    let watermark = store.record_validation_watermark(
+        nq_store::SemanticCertification::Established(state),
+        engine_validation_rules(),
+    )?;
+    Ok((verification, watermark))
+}
+
+/// Every semantic plane other than provider intake and diagnostic artifacts,
+/// for rows beyond `frontier`; returns the finding-lineage replay state at
+/// the end of history.
+fn validate_semantic_planes_since(
+    store: &Store,
+    frontier: &nq_store::HistoryFrontier,
+    state: &nq_store::SemanticState,
+) -> Result<nq_store::SemanticState, EngineError> {
+    const STATUS_PAGE_SIZE: u32 = 256;
+    store.validate_admitted_report_associations_since(frontier)?;
+    for report_id in store.admitted_report_ids_since(frontier)? {
+        validate_admitted_report_record(store, &report_id)?;
+    }
+    // Status and rejected custody read their runs' evaluations, so the
+    // evaluation history beyond the frontier is proven first.
+    let heads = validate_evaluation_refusal_history_since(
+        store,
+        frontier,
+        state,
+        certified_replay_bound(store)?,
+    )?;
+    store.validate_run_results_since(frontier)?;
+    for run_id in store.watcher_run_ids_since(frontier)? {
+        let run = store.watcher_run_outcome(&run_id)?.ok_or_else(|| {
+            EngineError::Invariant(format!("watcher run {run_id} cannot be reopened"))
+        })?;
+        reopen_run_resource_outcome(&run)?;
+        validate_run_profile_identity(&run)?;
+    }
+    // Status events read their runs' evaluations, which were replayed only
+    // through the open frontier; later events are validated by the next open.
+    let status_through = store
+        .open_frontier()
+        .and_then(|open| open.max_rowid("status_events"));
+    let mut after_sequence = frontier.max_rowid("status_events");
+    loop {
+        let page = store.status_history_bounded(STATUS_PAGE_SIZE, after_sequence)?;
+        let page_len = page.len();
+        for row in page {
+            after_sequence = Some(row.status_sequence);
+            if status_through.is_some_and(|through| row.status_sequence > through) {
+                continue;
+            }
+            validate_status_event_record(store, row, EvaluationHistory::AlreadyValidated)?;
+        }
+        if page_len < STATUS_PAGE_SIZE as usize {
+            break;
+        }
+    }
+    for row in store.rejected_custody_since(frontier)? {
+        rejected_custody_from_row(store, row, EvaluationHistory::AlreadyValidated)?;
+    }
+    Ok(semantic_state(&heads))
+}
+
+fn semantic_state(heads: &BTreeMap<Vec<u8>, ReplayedFinding>) -> nq_store::SemanticState {
+    nq_store::SemanticState {
+        lineage_heads: heads
+            .iter()
+            .map(|(lineage, head)| nq_store::LineageHead {
+                lineage: hex::encode(lineage),
+                finding_id: head.finding_id.clone(),
+                event_revision: head.event_revision,
+                condition_state: head.condition_state.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn replay_heads(
+    state: &nq_store::SemanticState,
+) -> Result<BTreeMap<Vec<u8>, ReplayedFinding>, EngineError> {
+    state
+        .lineage_heads
+        .iter()
+        .map(|head| {
+            let lineage = hex::decode(&head.lineage).map_err(|error| {
+                EngineError::Invariant(format!(
+                    "validation watermark lineage head {} is not hex: {error}",
+                    head.lineage
+                ))
+            })?;
+            Ok((
+                lineage,
+                ReplayedFinding {
+                    finding_id: head.finding_id.clone(),
+                    event_revision: head.event_revision,
+                    condition_state: head.condition_state.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
 /// Exhaustively reopen the complete persisted semantic chain.
 ///
 /// This is the shared fail-closed boundary for operations that may disclose or
@@ -8216,11 +8580,7 @@ pub fn backup_store(store: &Store, destination: &Path) -> Result<(), EngineError
 pub fn validate_semantic_history(
     store: &Store,
 ) -> Result<DiagnosticArtifactHistoryVerification, EngineError> {
-    validate_admitted_report_history(store)?;
-    validate_watcher_run_history(store)?;
-    validate_status_history_v2(store)?;
-    validate_rejected_custody_history(store)?;
-    validate_evaluation_refusal_history(store)?;
+    validate_semantic_planes_in_full(store)?;
     validate_provider_intake_history(store)?;
     validate_diagnostic_artifact_history(store)
 }
@@ -8264,33 +8624,7 @@ pub fn validate_provider_intake_history(
             break;
         }
         for row in &page {
-            let raw = store
-                .provider_intake_raw_bytes(&row.intake_id)?
-                .ok_or_else(|| {
-                    EngineError::Invariant(format!(
-                        "provider intake {} lacks exact raw custody",
-                        row.intake_id
-                    ))
-                })?;
-            let record = ProviderIntakeRecordV1::reopen_store_row(row, &raw)?;
-            let (acknowledgment, canonical_result) = store
-                .provider_intake_acknowledgment(&row.idempotency_key)?
-                .ok_or_else(|| {
-                    EngineError::Invariant(format!(
-                        "provider intake {} lacks a durable acknowledgment",
-                        row.intake_id
-                    ))
-                })?;
-            if acknowledgment != row.acknowledgment
-                || acknowledgment.canonical_result_digest != canonical_result.digest()
-            {
-                return Err(EngineError::Invariant(format!(
-                    "provider intake {} acknowledgment does not bind its canonical result",
-                    row.intake_id
-                )));
-            }
-            let outcome = decode_collection_outcome(canonical_result.as_bytes())?;
-            validate_provider_downstream_correspondence(&record, &outcome)?;
+            validate_provider_intake_record(store, row)?;
             provider_intakes = provider_intakes.checked_add(1).ok_or_else(|| {
                 EngineError::Invariant("provider-intake history count overflowed".into())
             })?;
@@ -8315,33 +8649,7 @@ pub fn validate_provider_intake_history(
             break;
         }
         for gap in &page {
-            let detail =
-                nq_store::CanonicalDocument::from_canonical_bytes(gap.detail_json.clone())?;
-            let expected_detail = nq_store::CanonicalDocument::from_serializable(&json!({
-                "schema": "nq.legacy_provider_intake_gap.v1",
-                "source_schema_version": 3,
-                "source_schema_artifact_digest": nq_store::SCHEMA_V3_ARTIFACT_DIGEST,
-                "limitation": "schema v3 did not preserve a versioned provider intake or exact outer raw capture for every acquisition",
-                "provider_intake_synthesized": false,
-                "acknowledgment_synthesized": false,
-            }))?;
-            let migrated_at = DateTime::parse_from_rfc3339(&gap.migrated_at).map_err(|error| {
-                EngineError::Invariant(format!(
-                    "legacy provider-intake gap {} migration time is not RFC3339: {error}",
-                    gap.run_id
-                ))
-            })?;
-            if gap.source_schema_version != 3
-                || gap.source_schema_artifact_digest != nq_store::SCHEMA_V3_ARTIFACT_DIGEST
-                || gap.limitation_code != "provider_intake_not_recorded"
-                || detail != expected_detail
-                || migrated_at.offset().local_minus_utc() != 0
-            {
-                return Err(EngineError::Invariant(format!(
-                    "legacy provider-intake gap {} substitutes or invents historical evidence",
-                    gap.run_id
-                )));
-            }
+            validate_legacy_provider_intake_gap(gap)?;
             legacy_gaps = legacy_gaps.checked_add(1).ok_or_else(|| {
                 EngineError::Invariant("legacy provider-intake gap count overflowed".into())
             })?;
@@ -8357,6 +8665,102 @@ pub fn validate_provider_intake_history(
         acknowledgments,
         legacy_gaps,
     })
+}
+
+/// Reopen one provider intake through its raw interpretation, durable
+/// acknowledgment, and canonical result.
+fn validate_provider_intake_record(
+    store: &Store,
+    row: &nq_store::ProviderIntakeRow,
+) -> Result<(), EngineError> {
+    let raw = store
+        .provider_intake_raw_bytes(&row.intake_id)?
+        .ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "provider intake {} lacks exact raw custody",
+                row.intake_id
+            ))
+        })?;
+    let record = ProviderIntakeRecordV1::reopen_store_row(row, &raw)?;
+    let (acknowledgment, canonical_result) = store
+        .provider_intake_acknowledgment(&row.idempotency_key)?
+        .ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "provider intake {} lacks a durable acknowledgment",
+                row.intake_id
+            ))
+        })?;
+    if acknowledgment != row.acknowledgment
+        || acknowledgment.canonical_result_digest != canonical_result.digest()
+    {
+        return Err(EngineError::Invariant(format!(
+            "provider intake {} acknowledgment does not bind its canonical result",
+            row.intake_id
+        )));
+    }
+    let outcome = decode_collection_outcome(canonical_result.as_bytes())?;
+    validate_provider_downstream_correspondence(&record, &outcome)?;
+    Ok(())
+}
+
+/// Prove one explicit schema-v3 intake gap invents no historical evidence.
+fn validate_legacy_provider_intake_gap(
+    gap: &nq_store::LegacyProviderIntakeGapRow,
+) -> Result<(), EngineError> {
+    let detail = nq_store::CanonicalDocument::from_canonical_bytes(gap.detail_json.clone())?;
+    let expected_detail = nq_store::CanonicalDocument::from_serializable(&json!({
+        "schema": "nq.legacy_provider_intake_gap.v1",
+        "source_schema_version": 3,
+        "source_schema_artifact_digest": nq_store::SCHEMA_V3_ARTIFACT_DIGEST,
+        "limitation": "schema v3 did not preserve a versioned provider intake or exact outer raw capture for every acquisition",
+        "provider_intake_synthesized": false,
+        "acknowledgment_synthesized": false,
+    }))?;
+    let migrated_at = DateTime::parse_from_rfc3339(&gap.migrated_at).map_err(|error| {
+        EngineError::Invariant(format!(
+            "legacy provider-intake gap {} migration time is not RFC3339: {error}",
+            gap.run_id
+        ))
+    })?;
+    if gap.source_schema_version != 3
+        || gap.source_schema_artifact_digest != nq_store::SCHEMA_V3_ARTIFACT_DIGEST
+        || gap.limitation_code != "provider_intake_not_recorded"
+        || detail != expected_detail
+        || migrated_at.offset().local_minus_utc() != 0
+    {
+        return Err(EngineError::Invariant(format!(
+            "legacy provider-intake gap {} substitutes or invents historical evidence",
+            gap.run_id
+        )));
+    }
+    Ok(())
+}
+
+/// Provider-intake history beyond `frontier`: the store-wide laws for new
+/// rows, then each intake whose custody or correspondence is not covered.
+///
+/// # Errors
+///
+/// As [`validate_provider_intake_history`], for the uncovered rows.
+pub fn validate_provider_intake_history_since(
+    store: &Store,
+    frontier: &nq_store::HistoryFrontier,
+) -> Result<usize, EngineError> {
+    store.validate_provider_intake_history_invariants_since(frontier)?;
+    let mut validated = 0usize;
+    for intake_id in store.provider_intake_ids_since(frontier)? {
+        let row = store.provider_intake(&intake_id)?.ok_or_else(|| {
+            EngineError::Invariant(format!("provider intake {intake_id} cannot be reopened"))
+        })?;
+        validate_provider_intake_record(store, &row)?;
+        validated = validated.checked_add(1).ok_or_else(|| {
+            EngineError::Invariant("provider-intake history count overflowed".into())
+        })?;
+    }
+    for gap in store.legacy_provider_intake_gaps_since(frontier)? {
+        validate_legacy_provider_intake_gap(&gap)?;
+    }
+    Ok(validated)
 }
 
 /// Prove that the exact pre-admission provider interpretation is the source
@@ -8620,24 +9024,7 @@ fn validate_admitted_report_history_with_page_size(
         let page_len = page.len();
         for report_id in page {
             after_report_id = Some(report_id.clone());
-            let snapshot = store
-                .verify_admitted_snapshot(&report_id)
-                .map_err(|error| {
-                    EngineError::Invariant(format!(
-                        "admitted report {report_id} failed historical reopening: {error}"
-                    ))
-                })?;
-            let typed: ValidatedReport = serde_json::from_slice(&snapshot.validated_report_json)
-                .map_err(|error| {
-                    EngineError::Invariant(format!(
-                        "admitted report {report_id} is not the strict owned validated-report schema: {error}"
-                    ))
-                })?;
-            if canonical(&typed)?.as_bytes() != snapshot.validated_report_json {
-                return Err(EngineError::Invariant(format!(
-                    "admitted report {report_id} validated judgment is not exact canonical typed bytes"
-                )));
-            }
+            validate_admitted_report_record(store, &report_id)?;
             validated = validated.checked_add(1).ok_or_else(|| {
                 EngineError::Invariant("admitted report history count overflowed".into())
             })?;
@@ -8646,6 +9033,27 @@ fn validate_admitted_report_history_with_page_size(
             return Ok(validated);
         }
     }
+}
+
+/// Reopen one admitted report's snapshot and strict typed judgment.
+fn validate_admitted_report_record(store: &Store, report_id: &str) -> Result<(), EngineError> {
+    let snapshot = store.verify_admitted_snapshot(report_id).map_err(|error| {
+        EngineError::Invariant(format!(
+            "admitted report {report_id} failed historical reopening: {error}"
+        ))
+    })?;
+    let typed: ValidatedReport = serde_json::from_slice(&snapshot.validated_report_json)
+        .map_err(|error| {
+            EngineError::Invariant(format!(
+                "admitted report {report_id} is not the strict owned validated-report schema: {error}"
+            ))
+        })?;
+    if canonical(&typed)?.as_bytes() != snapshot.validated_report_json {
+        return Err(EngineError::Invariant(format!(
+            "admitted report {report_id} validated judgment is not exact canonical typed bytes"
+        )));
+    }
+    Ok(())
 }
 
 /// Convert stable SQL finding rows into the exact public DTO.
@@ -8967,12 +9375,20 @@ pub fn evaluation_history_bounded(
 /// canonical collection, status-projection, or linked-refusal contract.
 pub fn validate_status_history_v2(store: &Store) -> Result<usize, EngineError> {
     const PAGE_SIZE: u32 = 256;
-    validate_status_history_v2_with_page_size(store, PAGE_SIZE)
+    // Admitted instance statuses read their run's evaluations; the
+    // evaluation history is proven once, when the first one needs it.
+    let evaluations_validated = std::cell::Cell::new(false);
+    validate_status_history_v2_with_page_size(
+        store,
+        PAGE_SIZE,
+        EvaluationHistory::OncePerTraversal(&evaluations_validated),
+    )
 }
 
 fn validate_status_history_v2_with_page_size(
     store: &Store,
     page_size: u32,
+    evaluations: EvaluationHistory<'_>,
 ) -> Result<usize, EngineError> {
     validate_watcher_run_history_with_page_size(store, page_size)?;
     let mut after_sequence = None;
@@ -8985,33 +9401,7 @@ fn validate_status_history_v2_with_page_size(
         let page_len = page.len();
         for row in page {
             after_sequence = Some(row.status_sequence);
-            let component = status_component_v2(
-                store,
-                &row.component_kind,
-                row.component_id,
-                &row.state,
-                row.code,
-                &row.detail_json,
-                &row.observed_at,
-            )?;
-            match &component.detail {
-                ComponentStatusDetailV2::Collection { result }
-                    if row.run_id.as_deref() != result.run_id.as_deref() =>
-                {
-                    return Err(EngineError::Invariant(format!(
-                        "status event {} lost its atomic collection-run association",
-                        row.status_event_id
-                    )));
-                }
-                ComponentStatusDetailV2::Diagnostic { .. } if row.run_id.is_some() => {
-                    return Err(EngineError::Invariant(format!(
-                        "status event {} links a run outside the collection-result contract",
-                        row.status_event_id
-                    )));
-                }
-                ComponentStatusDetailV2::Collection { .. }
-                | ComponentStatusDetailV2::Diagnostic { .. } => {}
-            }
+            validate_status_event_record(store, row, evaluations)?;
             validated = validated.checked_add(1).ok_or_else(|| {
                 EngineError::Invariant("status history event count overflowed".into())
             })?;
@@ -9020,6 +9410,44 @@ fn validate_status_history_v2_with_page_size(
             return Ok(validated);
         }
     }
+}
+
+/// Reopen one status event under the v2 component contract and its atomic
+/// collection-run association.
+fn validate_status_event_record(
+    store: &Store,
+    row: nq_store::StatusEventRow,
+    evaluations: EvaluationHistory<'_>,
+) -> Result<(), EngineError> {
+    let component = status_component_v2(
+        store,
+        &row.component_kind,
+        row.component_id,
+        &row.state,
+        row.code,
+        &row.detail_json,
+        &row.observed_at,
+        evaluations,
+    )?;
+    match &component.detail {
+        ComponentStatusDetailV2::Collection { result }
+            if row.run_id.as_deref() != result.run_id.as_deref() =>
+        {
+            return Err(EngineError::Invariant(format!(
+                "status event {} lost its atomic collection-run association",
+                row.status_event_id
+            )));
+        }
+        ComponentStatusDetailV2::Diagnostic { .. } if row.run_id.is_some() => {
+            return Err(EngineError::Invariant(format!(
+                "status event {} links a run outside the collection-result contract",
+                row.status_event_id
+            )));
+        }
+        ComponentStatusDetailV2::Collection { .. } | ComponentStatusDetailV2::Diagnostic { .. } => {
+        }
+    }
+    Ok(())
 }
 
 /// Exhaustively reopen every watcher run under the strict resource-outcome
@@ -9085,7 +9513,7 @@ fn visit_evaluation_history_through<F>(
     store: &Store,
     page_size: u32,
     through_evaluation_sequence: i64,
-    mut visit: F,
+    visit: F,
 ) -> Result<usize, EngineError>
 where
     F: FnMut(
@@ -9094,8 +9522,95 @@ where
     ) -> Result<(), EngineError>,
 {
     store.validate_evaluation_history_invariants()?;
-    let mut after_evaluation_sequence = None;
-    let mut replay = BTreeMap::new();
+    visit_evaluation_history_between(
+        store,
+        page_size,
+        None,
+        BTreeMap::new(),
+        through_evaluation_sequence,
+        visit,
+    )
+    .map(|(reopened, _)| reopened)
+}
+
+/// The complete evaluation history replay; returns the count and the
+/// finding-lineage state at the end of history.
+fn replay_evaluation_history_in_full(
+    store: &Store,
+) -> Result<(usize, BTreeMap<Vec<u8>, ReplayedFinding>), EngineError> {
+    store.validate_evaluation_history_invariants()?;
+    visit_evaluation_history_between(
+        store,
+        nq_store::MAX_PUBLIC_QUERY_ROWS,
+        None,
+        BTreeMap::new(),
+        certified_replay_bound(store)?,
+        |_, _| Ok(()),
+    )
+}
+
+/// The last evaluation a certification may fold into its lineage heads: the
+/// one bounding the frontier this handle captured before validating (the
+/// frontier a recorded watermark names), so heads and frontier describe the
+/// same prefix even when a concurrent writer appends evaluations meanwhile.
+/// Those later evaluations are validated by the next open.
+fn certified_replay_bound(store: &Store) -> Result<i64, EngineError> {
+    match store.open_frontier() {
+        Some(frontier) => Ok(frontier.evaluation_sequence),
+        None => Ok(store.latest_evaluation_sequence()?),
+    }
+}
+
+/// The evaluation and finding history a new evaluation builds on: beyond the
+/// open's semantic certification when one applies, otherwise in full.
+fn validate_evaluation_history_before_evaluating(store: &Store) -> Result<(), EngineError> {
+    match engine_semantic_state(store) {
+        Some((frontier, state)) => validate_evaluation_refusal_history_since(
+            store,
+            frontier,
+            state,
+            store.latest_evaluation_sequence()?,
+        )
+        .map(|_| ()),
+        None => validate_evaluation_refusal_history(store).map(|_| ()),
+    }
+}
+
+/// Evaluation history beyond `frontier`: the store-wide laws for new rows,
+/// then each evaluation after the frontier's sequence, replayed from the
+/// finding-lineage state the certification recorded at the frontier.
+fn validate_evaluation_refusal_history_since(
+    store: &Store,
+    frontier: &nq_store::HistoryFrontier,
+    state: &nq_store::SemanticState,
+    through_evaluation_sequence: i64,
+) -> Result<BTreeMap<Vec<u8>, ReplayedFinding>, EngineError> {
+    store.validate_evaluation_history_invariants_since(frontier)?;
+    let (_, heads) = visit_evaluation_history_between(
+        store,
+        nq_store::MAX_PUBLIC_QUERY_ROWS,
+        Some(frontier.evaluation_sequence),
+        replay_heads(state)?,
+        through_evaluation_sequence.max(frontier.evaluation_sequence),
+        |_, _| Ok(()),
+    )?;
+    Ok(heads)
+}
+
+fn visit_evaluation_history_between<F>(
+    store: &Store,
+    page_size: u32,
+    mut after_evaluation_sequence: Option<i64>,
+    mut replay: BTreeMap<Vec<u8>, ReplayedFinding>,
+    through_evaluation_sequence: i64,
+    mut visit: F,
+) -> Result<(usize, BTreeMap<Vec<u8>, ReplayedFinding>), EngineError>
+where
+    F: FnMut(
+        nq_store::EvaluationRefusalHistoryRow,
+        EvaluationEnvelopeV2,
+    ) -> Result<(), EngineError>,
+{
     let mut reopened = 0usize;
     loop {
         let page = store.evaluation_refusal_history_bounded(
@@ -9104,7 +9619,7 @@ where
             through_evaluation_sequence,
         )?;
         if page.is_empty() {
-            return Ok(reopened);
+            return Ok((reopened, replay));
         }
         let page_len = page.len();
         for row in page {
@@ -9117,7 +9632,7 @@ where
             })?;
         }
         if page_len < page_size as usize {
-            return Ok(reopened);
+            return Ok((reopened, replay));
         }
     }
 }
@@ -9973,7 +10488,7 @@ pub fn rejected_custody_snapshot_bounded(
     let records = store
         .rejected_custody_bounded(limit, after_submission_id)?
         .into_iter()
-        .map(|row| rejected_custody_from_row(store, row))
+        .map(|row| rejected_custody_from_row(store, row, EvaluationHistory::AlreadyValidated))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(RejectedCustodySnapshotV1 {
         schema: REJECTED_CUSTODY_SCHEMA.into(),
@@ -9992,12 +10507,18 @@ pub fn rejected_custody_snapshot_bounded(
 /// Returns when paging fails or any row cannot prove exact canonical refusal,
 /// projection, instance, run, or profile association.
 pub fn validate_rejected_custody_history(store: &Store) -> Result<usize, EngineError> {
-    validate_rejected_custody_history_with_page_size(store, nq_store::MAX_PUBLIC_QUERY_ROWS)
+    let evaluations_validated = std::cell::Cell::new(false);
+    validate_rejected_custody_history_with_page_size(
+        store,
+        nq_store::MAX_PUBLIC_QUERY_ROWS,
+        EvaluationHistory::OncePerTraversal(&evaluations_validated),
+    )
 }
 
 fn validate_rejected_custody_history_with_page_size(
     store: &Store,
     page_size: u32,
+    evaluations: EvaluationHistory<'_>,
 ) -> Result<usize, EngineError> {
     let mut after_submission_id: Option<String> = None;
     let mut validated = 0usize;
@@ -10009,7 +10530,7 @@ fn validate_rejected_custody_history_with_page_size(
         let page_len = page.len();
         for row in page {
             after_submission_id = Some(row.submission_id.clone());
-            rejected_custody_from_row(store, row)?;
+            rejected_custody_from_row(store, row, evaluations)?;
             validated = validated.checked_add(1).ok_or_else(|| {
                 EngineError::Invariant("rejected custody count overflowed".into())
             })?;
@@ -10221,6 +10742,7 @@ fn status_from_row_v2(
         row.code,
         &row.detail_json,
         &row.observed_at,
+        EvaluationHistory::ValidateNow,
     )
 }
 
@@ -10396,6 +10918,20 @@ fn evaluation_status_projection(envelope: &EvaluationEnvelopeV2) -> (HealthState
     }
 }
 
+/// Whether a collection-run check must itself prove the evaluation history,
+/// or its caller proves it once for the whole traversal.
+#[derive(Clone, Copy, Debug)]
+enum EvaluationHistory<'a> {
+    /// Replay and validate the evaluation history before using it.
+    ValidateNow,
+    /// Validate it the first time any check of this traversal needs it.
+    OncePerTraversal(&'a std::cell::Cell<bool>),
+    /// The caller validated the evaluation history covering every
+    /// evaluation this check reads.
+    AlreadyValidated,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn status_component_v2(
     store: &Store,
     component_kind: &str,
@@ -10404,6 +10940,7 @@ fn status_component_v2(
     code: String,
     detail_json: &str,
     observed_at: &str,
+    evaluations: EvaluationHistory<'_>,
 ) -> Result<ComponentStatusV2, EngineError> {
     let kind = parse_component_kind(component_kind)?;
     if kind == ComponentKind::Evaluation {
@@ -10430,7 +10967,7 @@ fn status_component_v2(
                 projection.state, projection.code
             )));
         }
-        validate_collection_run(store, &result)?;
+        validate_collection_run(store, &result, evaluations)?;
         if let CollectionResult::Rejected { refusal } = &result.result {
             let run_id = result.run_id.as_deref().ok_or_else(|| {
                 EngineError::Invariant(format!(
@@ -10445,7 +10982,7 @@ fn status_component_v2(
                         component_id, refusal.refusal_id
                     ))
                 })?;
-            let custody = rejected_custody_from_row(store, custody_row)?;
+            let custody = rejected_custody_from_row(store, custody_row, evaluations)?;
             if custody.run_id != run_id
                 || custody.instance_id != result.instance_id
                 || custody.refusal != *refusal
@@ -10474,7 +11011,11 @@ fn status_component_v2(
 }
 
 #[allow(clippy::too_many_lines)]
-fn validate_collection_run(store: &Store, result: &CollectionOutcome) -> Result<(), EngineError> {
+fn validate_collection_run(
+    store: &Store,
+    result: &CollectionOutcome,
+    evaluations_checked: EvaluationHistory<'_>,
+) -> Result<(), EngineError> {
     let Some(run_id) = result.run_id.as_deref() else {
         return Ok(());
     };
@@ -10521,33 +11062,25 @@ fn validate_collection_run(store: &Store, result: &CollectionOutcome) -> Result<
                 "admitted collection result for run {run_id} substitutes its report or evaluation projections"
             )));
         }
-        validate_evaluation_refusal_history(store)?;
+        match evaluations_checked {
+            EvaluationHistory::ValidateNow => {
+                validate_evaluation_refusal_history(store)?;
+            }
+            EvaluationHistory::OncePerTraversal(validated) if !validated.get() => {
+                validate_evaluation_refusal_history(store)?;
+                validated.set(true);
+            }
+            EvaluationHistory::OncePerTraversal(_) | EvaluationHistory::AlreadyValidated => {}
+        }
+        // Only this run's evaluations, in append order: the rows the whole
+        // traversal filtered to, read directly instead of paging every
+        // evaluation once per run.
         let mut persisted = Vec::new();
-        let through = store.latest_evaluation_sequence()?;
-        let mut after = None;
-        loop {
-            let page = store.evaluation_refusal_history_bounded(
-                nq_store::MAX_PUBLIC_QUERY_ROWS,
-                after,
-                through,
-            )?;
-            if page.is_empty() {
-                break;
-            }
-            let page_len = page.len();
-            for row in page {
-                after = Some(row.evaluation_sequence);
-                if row.trigger_run_id.as_deref() == Some(run_id) {
-                    let document = CanonicalDocument::from_canonical_bytes(row.detail_json)?;
-                    let envelope: EvaluationEnvelopeV2 =
-                        serde_json::from_slice(document.as_bytes())
-                            .map_err(|error| EngineError::Invariant(error.to_string()))?;
-                    persisted.push(envelope);
-                }
-            }
-            if page_len < nq_store::MAX_PUBLIC_QUERY_ROWS as usize {
-                break;
-            }
+        for detail_json in store.evaluation_details_for_run(run_id)? {
+            let document = CanonicalDocument::from_canonical_bytes(detail_json)?;
+            let envelope: EvaluationEnvelopeV2 = serde_json::from_slice(document.as_bytes())
+                .map_err(|error| EngineError::Invariant(error.to_string()))?;
+            persisted.push(envelope);
         }
         if evaluations.as_slice() != persisted.as_slice() {
             return Err(EngineError::Invariant(format!(
@@ -10713,6 +11246,7 @@ fn reopen_run_resource_outcome(
 fn rejected_custody_from_row(
     store: &Store,
     row: nq_store::RejectedCustodyRow,
+    evaluations: EvaluationHistory<'_>,
 ) -> Result<RejectedCustodyV1, EngineError> {
     let document = CanonicalDocument::from_canonical_bytes(row.detail_json.clone())?;
     let refusal: GovernedRefusal =
@@ -10776,6 +11310,7 @@ fn rejected_custody_from_row(
     validate_collection_run(
         store,
         &CollectionOutcome::rejected(row.instance_id.clone(), row.run_id.clone(), refusal.clone()),
+        evaluations,
     )?;
     Ok(RejectedCustodyV1 {
         submission_id: row.submission_id,
@@ -15707,7 +16242,7 @@ sys.stdout.write("\n")
             })
             .expect("store hostile late status");
         assert!(matches!(
-            validate_status_history_v2_with_page_size(&store, 1),
+            validate_status_history_v2_with_page_size(&store, 1, EvaluationHistory::ValidateNow),
             Err(EngineError::Invariant(message))
                 if message.contains("not a valid versioned collection result")
         ));
@@ -15945,7 +16480,8 @@ sys.stdout.write("\n")
                 2
             );
             assert_eq!(
-                validate_status_history_v2_with_page_size(store, 1).expect("one-row status pages"),
+                validate_status_history_v2_with_page_size(store, 1, EvaluationHistory::ValidateNow)
+                    .expect("one-row status pages"),
                 2
             );
             assert_eq!(
@@ -15953,8 +16489,12 @@ sys.stdout.write("\n")
                 2
             );
             assert_eq!(
-                validate_rejected_custody_history_with_page_size(store, 1)
-                    .expect("one-row custody pages"),
+                validate_rejected_custody_history_with_page_size(
+                    store,
+                    1,
+                    EvaluationHistory::ValidateNow
+                )
+                .expect("one-row custody pages"),
                 2
             );
         };
@@ -16945,6 +17485,747 @@ sys.stdout.write("\n")
             engine
                 .diagnostic_acquire_successor_local(&watcher, pending_id)
                 .is_err()
+        );
+    }
+
+    /// Mutate an append-only table the way an out-of-band writer would: drop
+    /// its immutability triggers, apply `sql`, and recreate the triggers with
+    /// their exact text so the schema fingerprint is unchanged.
+    fn mutate_bypassing_triggers(database: &Path, table: &str, sql: &str) {
+        let connection = rusqlite::Connection::open(database).expect("raw connection");
+        connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .expect("out-of-band writers need not enforce foreign keys");
+        let triggers: Vec<(String, String)> = connection
+            .prepare("SELECT name, sql FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = ?1")
+            .expect("trigger query")
+            .query_map([table], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("triggers")
+            .collect::<Result<_, _>>()
+            .expect("trigger rows");
+        for (name, _) in &triggers {
+            connection
+                .execute_batch(&format!("DROP TRIGGER {name}"))
+                .expect("drop trigger");
+        }
+        let changed = connection.execute(sql, []).expect("out-of-band mutation");
+        assert_eq!(changed, 1, "mutation `{sql}` must change exactly one row");
+        for (_, sql) in &triggers {
+            connection.execute_batch(sql).expect("recreate trigger");
+        }
+    }
+
+    fn successor_fixture(
+        root: &Path,
+        genesis: &str,
+        successors: usize,
+    ) -> Option<(NqConfig, WatcherConfig)> {
+        let (mut engine, watcher, _mode) =
+            admitted_host_diagnostic_fixture(root, genesis, b"watermark-evaluator")?;
+        engine
+            .diagnostic_execute(&watcher)
+            .expect("initial diagnostic");
+        for index in 0..successors {
+            engine
+                .diagnostic_acquire_successor_local(&watcher, &format!("{genesis}-{index}"))
+                .expect("successor");
+        }
+        Some((engine.config.clone(), watcher))
+    }
+
+    fn reopen_with_test_identity(config: &NqConfig) -> Result<CollectionEngine, EngineError> {
+        CollectionEngine::open_with_evaluator_identity(
+            config,
+            Ok(EvaluatorRuntimeIdentity::for_test(
+                nq_protocol::sha256_bytes(b"watermark-evaluator"),
+            )),
+        )
+    }
+
+    fn full_validation_and_watermark(config: &NqConfig) {
+        let store = Store::open_validating_fully(&config.database_path).expect("full open");
+        validate_fully_and_record(&store).expect("full validation records a watermark");
+    }
+
+    #[test]
+    fn validation_watermark_bounds_open_work_to_rows_beyond_it() {
+        for (label, history) in [("small", 2usize), ("larger", 8usize)] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let genesis = format!("watermark-bound-{label}");
+            let Some((config, watcher)) = successor_fixture(directory.path(), &genesis, history)
+            else {
+                return;
+            };
+            let watermark = nq_store::watermark_path(&config.database_path);
+            fs::remove_file(&watermark).ok();
+
+            // Absence is never treated as validated.
+            let store = Store::open(&config.database_path).expect("open without watermark");
+            assert_eq!(
+                store.open_validation(),
+                &nq_store::OpenValidation::Full(nq_store::FullValidationReason::NoWatermark)
+            );
+            assert!(store.validated_history_frontier().is_none());
+            drop(store);
+
+            full_validation_and_watermark(&config);
+            let store = Store::open(&config.database_path).expect("open since watermark");
+            let frontier = store
+                .validated_history_frontier()
+                .expect("full validation recorded a watermark")
+                .clone();
+            assert!(store.validated_semantic_state().is_some());
+            assert!(
+                store
+                    .diagnostic_artifact_ids_since(&frontier)
+                    .expect("delta")
+                    .is_empty()
+            );
+            assert!(
+                store
+                    .provider_intake_ids_since(&frontier)
+                    .expect("delta")
+                    .is_empty()
+            );
+            drop(store);
+
+            // An engine open validates only the uncovered rows and advances
+            // both certifications to its open frontier.
+            let mut engine = reopen_with_test_identity(&config).expect("engine since watermark");
+            for index in 0..2 {
+                engine
+                    .diagnostic_acquire_successor_local(
+                        &watcher,
+                        &format!("{genesis}-late-{index}"),
+                    )
+                    .expect("late successor");
+            }
+            drop(engine);
+            let store = Store::open(&config.database_path).expect("reopen");
+            let frontier = store
+                .validated_history_frontier()
+                .expect("advanced")
+                .clone();
+            assert!(
+                store.validated_semantic_state().is_some(),
+                "{label}: semantic advances"
+            );
+            assert_eq!(
+                store
+                    .diagnostic_artifact_ids_since(&frontier)
+                    .expect("delta")
+                    .len(),
+                2,
+                "{label}: only the two artifacts appended after the last open are uncovered"
+            );
+            assert_eq!(
+                store
+                    .provider_intake_ids_since(&frontier)
+                    .expect("delta")
+                    .len(),
+                2,
+                "{label}: only the two intakes appended after the last open are uncovered"
+            );
+            validate_semantic_history_since_open(&store).expect("bounded semantic validation");
+        }
+    }
+
+    fn read_watermark_file(config: &NqConfig) -> nq_store::ValidationWatermark {
+        serde_json::from_slice(
+            &fs::read(nq_store::watermark_path(&config.database_path)).expect("read watermark"),
+        )
+        .expect("decode watermark")
+    }
+
+    fn write_watermark_file(config: &NqConfig, watermark: &nq_store::ValidationWatermark) {
+        fs::write(
+            nq_store::watermark_path(&config.database_path),
+            serde_json::to_vec(watermark).expect("encode watermark"),
+        )
+        .expect("write watermark");
+    }
+
+    #[test]
+    fn validation_watermark_refuses_another_store_and_ignores_another_schema_or_rule_set() {
+        let first = tempfile::tempdir().expect("temporary directory");
+        let second = tempfile::tempdir().expect("temporary directory");
+        let Some((first_config, _)) = successor_fixture(first.path(), "watermark-first", 1) else {
+            return;
+        };
+        let Some((second_config, _)) = successor_fixture(second.path(), "watermark-second", 1)
+        else {
+            return;
+        };
+        full_validation_and_watermark(&first_config);
+        let first_watermark = nq_store::watermark_path(&first_config.database_path);
+        let second_watermark = nq_store::watermark_path(&second_config.database_path);
+        let reason = |config: &NqConfig| match Store::open(&config.database_path)
+            .expect("open falls back to full validation")
+            .open_validation()
+        {
+            nq_store::OpenValidation::Full(reason) => *reason,
+            nq_store::OpenValidation::SinceWatermark(_) => {
+                panic!("an inapplicable watermark must not bound validation")
+            }
+        };
+
+        // Another store's watermark is refused by every open, and an engine
+        // open never overwrites it.
+        fs::copy(&first_watermark, &second_watermark).expect("copy watermark");
+        let foreign = fs::read(&second_watermark).expect("foreign bytes");
+        for open in [
+            Store::open(&second_config.database_path).err(),
+            Store::open_read_only(&second_config.database_path).err(),
+        ] {
+            let error = open.expect("a foreign watermark refuses the open");
+            assert!(
+                error
+                    .to_string()
+                    .contains("was written for store genesis watermark-first"),
+                "{error}"
+            );
+        }
+        assert!(reopen_with_test_identity(&second_config).is_err());
+        assert_eq!(fs::read(&second_watermark).expect("still foreign"), foreign);
+        fs::remove_file(&second_watermark).expect("operator moves it aside");
+        assert_eq!(
+            reason(&second_config),
+            nq_store::FullValidationReason::NoWatermark
+        );
+
+        let original = read_watermark_file(&first_config);
+        let reseal = |change: &dyn Fn(&mut nq_store::ValidationWatermark)| {
+            let mut variant = original.clone();
+            change(&mut variant);
+            variant.commitment_digest = variant.computed_commitment();
+            write_watermark_file(&first_config, &variant);
+        };
+        // Another schema artifact, schema version, or store rule set: ignored.
+        reseal(&|watermark| {
+            watermark.schema_artifact_digest =
+                nq_protocol::sha256_bytes(b"another schema").into_string();
+        });
+        assert_eq!(
+            reason(&first_config),
+            nq_store::FullValidationReason::InapplicableWatermark
+        );
+        reseal(&|watermark| watermark.schema_version = nq_store::SCHEMA_VERSION + 1);
+        assert_eq!(
+            reason(&first_config),
+            nq_store::FullValidationReason::InapplicableWatermark
+        );
+        reseal(&|watermark| watermark.validation_rules = "nq-store/0.0.0/rules.0".into());
+        assert_eq!(
+            reason(&first_config),
+            nq_store::FullValidationReason::InapplicableWatermark
+        );
+        // An edit that does not reseal the commitment is refused.
+        let mut edited = original.clone();
+        edited.frontier.evaluation_sequence += 1;
+        write_watermark_file(&first_config, &edited);
+        let error = Store::open(&first_config.database_path)
+            .err()
+            .expect("an edited watermark refuses");
+        assert!(error.to_string().contains("was edited"), "{error}");
+        // Other engine rules: the store prefix stays bounded, the history
+        // above the store is validated in full and recertified.
+        reseal(&|watermark| watermark.engine_rules = "nq-core/0.0.0/engine-rules.0".into());
+        let store = Store::open(&first_config.database_path).expect("store rules still apply");
+        assert!(store.applied_watermark().is_some());
+        assert!(engine_core_frontier(&store).is_none());
+        drop(store);
+        drop(reopen_with_test_identity(&first_config).expect("engine open recertifies"));
+        let recertified = read_watermark_file(&first_config);
+        assert_eq!(recertified.engine_rules, engine_validation_rules());
+        assert!(recertified.semantic.is_some());
+        // Undecodable or absent: full validation.
+        fs::write(&first_watermark, b"{").expect("write garbage");
+        assert_eq!(
+            reason(&first_config),
+            nq_store::FullValidationReason::UnreadableWatermark
+        );
+        fs::remove_file(&first_watermark).expect("remove");
+        assert_eq!(
+            reason(&first_config),
+            nq_store::FullValidationReason::NoWatermark
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn validation_watermark_refuses_changed_boundaries_and_full_validation_refuses_changed_prefix()
+    {
+        // A row beyond the watermark is validated on every open.
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((config, watcher)) = successor_fixture(directory.path(), "watermark-tamper", 2)
+        else {
+            return;
+        };
+        full_validation_and_watermark(&config);
+        let database = config.database_path.clone();
+        let mut engine = reopen_with_test_identity(&config).expect("engine");
+        engine
+            .diagnostic_acquire_successor_local(&watcher, "watermark-tamper-beyond")
+            .expect("successor beyond the watermark");
+        drop(engine);
+        mutate_bypassing_triggers(
+            &database,
+            "raw_submissions",
+            "UPDATE raw_submissions SET raw_bytes = CAST('{}' AS BLOB)
+             WHERE rowid = (SELECT MAX(rowid) FROM raw_submissions)",
+        );
+        let error = Store::open(&database)
+            .err()
+            .expect("tampering beyond is refused");
+        assert!(error.to_string().contains("hash to"), "{error}");
+
+        // Rewriting or removing a covered row that bounds the frontier
+        // (truncation, rollback, a watermark ahead of the store) refuses.
+        for (genesis, table, sql) in [
+            (
+                "watermark-boundary-rewrite",
+                "diagnostic_artifact_payloads",
+                "UPDATE diagnostic_artifact_payloads SET canonical_bytes = CAST('{}' AS BLOB)
+                 WHERE rowid = (SELECT MAX(rowid) FROM diagnostic_artifact_payloads)",
+            ),
+            (
+                "watermark-boundary-truncate",
+                "evaluation_watermarks",
+                "DELETE FROM evaluation_watermarks
+                 WHERE rowid = (SELECT MAX(rowid) FROM evaluation_watermarks)",
+            ),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let Some((config, _)) = successor_fixture(directory.path(), genesis, 2) else {
+                return;
+            };
+            full_validation_and_watermark(&config);
+            mutate_bypassing_triggers(&config.database_path, table, sql);
+            for error in [
+                Store::open(&config.database_path).err(),
+                Store::open_read_only(&config.database_path).err(),
+            ] {
+                let error = error.expect("a changed boundary refuses");
+                assert!(
+                    error.to_string().contains(&format!(
+                        "history table {table} no longer matches its validation watermark"
+                    )),
+                    "{error}"
+                );
+            }
+        }
+
+        // An untouched covered row is not re-read by an ordinary open. It is
+        // re-proven when an operation references it, and explicit full
+        // validation refuses any change since the certified prefix.
+        for (genesis, table, sql, replay_id, expected) in [
+            (
+                "watermark-inner-payload",
+                "diagnostic_artifact_payloads",
+                "UPDATE diagnostic_artifact_payloads SET canonical_bytes = CAST('{}' AS BLOB)
+                 WHERE rowid = (SELECT MIN(rowid) FROM diagnostic_artifact_payloads
+                                WHERE artifact_id IN (SELECT artifact_id
+                                                      FROM local_diagnostic_artifact_origins
+                                                      WHERE run_id IN (SELECT run_id
+                                                      FROM local_successor_acquisition_intents
+                                                      WHERE acquisition_id = 'watermark-inner-payload-0')))",
+                Some("watermark-inner-payload-0"),
+                "byte verification",
+            ),
+            (
+                "watermark-inner-rewrite",
+                "status_events",
+                "UPDATE status_events SET observed_at = '2001-01-01T00:00:00.000Z'
+                 WHERE status_sequence = (SELECT MIN(status_sequence) FROM status_events)",
+                None,
+                "changed at or below the frontier certified",
+            ),
+            (
+                "watermark-inner-delete",
+                "evaluation_watermarks",
+                "DELETE FROM evaluation_watermarks
+                 WHERE rowid = (SELECT MIN(rowid) FROM evaluation_watermarks)",
+                None,
+                "refused by full validation",
+            ),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let Some((config, watcher)) = successor_fixture(directory.path(), genesis, 2) else {
+                return;
+            };
+            full_validation_and_watermark(&config);
+            let before = read_watermark_file(&config);
+            mutate_bypassing_triggers(&config.database_path, table, sql);
+            let store = Store::open(&config.database_path)
+                .expect("an untouched covered row is not re-read by an ordinary open");
+            assert!(store.applied_watermark().is_some());
+            drop(store);
+            if let Some(replay_id) = replay_id {
+                let engine = reopen_with_test_identity(&config).expect("engine open");
+                let error = engine
+                    .diagnostic_replay_local_successor(&watcher, replay_id)
+                    .expect_err("a referenced closure re-reads its rows");
+                assert!(error.to_string().contains(expected), "{error}");
+                drop(engine);
+            }
+            let full = Store::open_validating_fully(&config.database_path)
+                .map_err(EngineError::from)
+                .and_then(|store| validate_fully_and_record(&store).map(|_| ()));
+            let error = full.expect_err("full validation refuses a changed prefix");
+            // A rewritten payload fails its own byte or provenance check; a
+            // coherent identity substitution or a removed row passes those and
+            // is caught by the certified content chain.
+            assert!(
+                expected != "changed at or below the frontier certified"
+                    || error.to_string().contains(expected),
+                "{genesis}: {error}"
+            );
+            if replay_id.is_none() {
+                assert_eq!(
+                    read_watermark_file(&config).frontier,
+                    before.frontier,
+                    "a refused full validation leaves the watermark"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn withdrawn_semantic_certification_is_attempted_again_by_the_next_engine_open() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((config, watcher)) = successor_fixture(directory.path(), "watermark-recertify", 1)
+        else {
+            return;
+        };
+        full_validation_and_watermark(&config);
+        let mut withdrawn = read_watermark_file(&config);
+        assert!(withdrawn.semantic.is_some());
+        withdrawn.semantic = None;
+        withdrawn.commitment_digest = withdrawn.computed_commitment();
+        write_watermark_file(&config, &withdrawn);
+
+        // Without a certification, read-only consumers validate semantic
+        // history in full and report it.
+        let store = Store::open_read_only(&config.database_path).expect("read-only");
+        assert!(store.validated_semantic_state().is_none());
+        validate_semantic_history_since_open(&store).expect("full semantic validation");
+        drop(store);
+
+        // The next engine open certifies it again instead of staying withdrawn.
+        let engine = reopen_with_test_identity(&config).expect("engine open");
+        engine
+            .diagnostic_replay_local_successor(&watcher, "watermark-recertify-0")
+            .expect("replay");
+        drop(engine);
+        assert!(
+            read_watermark_file(&config).semantic.is_some(),
+            "semantic certification is re-established"
+        );
+    }
+
+    #[test]
+    fn validation_watermark_write_failure_is_reported_without_failing_the_open() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((config, watcher)) = successor_fixture(directory.path(), "watermark-write", 1)
+        else {
+            return;
+        };
+        let watermark = nq_store::watermark_path(&config.database_path);
+        let established = read_watermark_file(&config);
+        assert!(
+            established.semantic.is_some(),
+            "the first engine open of a store without a watermark validates in full and \
+             establishes the semantic certification"
+        );
+        fs::remove_file(&watermark).expect("remove");
+        fs::create_dir(&watermark).expect("make the watermark path unwritable");
+        let engine = reopen_with_test_identity(&config).expect("an unwritable watermark warns");
+        engine
+            .diagnostic_replay_local_successor(&watcher, "watermark-write-0")
+            .expect("replay");
+        drop(engine);
+        assert!(watermark.is_dir(), "nothing replaced the unwritable path");
+        let leftovers = fs::read_dir(directory.path())
+            .expect("list")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0, "a failed write leaves no temporary file");
+        fs::remove_dir(&watermark).expect("restore");
+        // Read-only opens never write one.
+        let store = Store::open_read_only(&config.database_path).expect("read-only");
+        drop(store);
+        assert!(!watermark.exists());
+    }
+
+    /// Deterministic work of the hot read paths, as `SQLite` virtual-machine
+    /// operations ([`nq_store::SQL_WORK_TICK`] is one operation).
+    #[derive(Clone, Copy, Debug)]
+    struct HotPathWork {
+        /// Read-only open plus `qualify` of an artifact one acquisition
+        /// beyond the watermark.
+        qualify_uncovered: u64,
+        /// Engine open plus `replay-local-successor` of that artifact (the
+        /// open records the watermark).
+        replay_uncovered: u64,
+        /// Read-only open plus `qualify` of the same, now covered, artifact:
+        /// the Monitor order after a replay.
+        qualify_covered: u64,
+    }
+
+    /// Acquire one artifact beyond the current watermark, then measure the
+    /// hot paths that read it.
+    fn measure_hot_path_work(
+        config: &NqConfig,
+        watcher: &WatcherConfig,
+        acquisition_id: &str,
+    ) -> HotPathWork {
+        let mut engine = reopen_with_test_identity(config).expect("engine");
+        let artifact = engine
+            .diagnostic_acquire_successor_local(watcher, acquisition_id)
+            .expect("one acquisition beyond the watermark");
+        drop(engine);
+        let artifact_id = artifact.artifact_id().as_digest().clone();
+        let qualify = || {
+            nq_store::start_sql_work_count();
+            let store = Store::open_read_only(&config.database_path).expect("read-only open");
+            qualify_diagnostic_admission(&store, &artifact_id).expect("qualify");
+            drop(store);
+            nq_store::stop_sql_work_count().expect("counting")
+        };
+        let qualify_uncovered = qualify();
+        nq_store::start_sql_work_count();
+        let engine = reopen_with_test_identity(config).expect("engine open");
+        engine
+            .diagnostic_replay_local_successor(watcher, acquisition_id)
+            .expect("replay");
+        drop(engine);
+        let replay_uncovered = nq_store::stop_sql_work_count().expect("counting");
+        HotPathWork {
+            qualify_uncovered,
+            replay_uncovered,
+            qualify_covered: qualify(),
+        }
+    }
+
+    /// The work of validating an artifact beyond the watermark must be
+    /// exactly equal however much history the watermark covers: any per-open
+    /// term proportional to retained history adds operations and fails this.
+    /// The closure of an already covered artifact keeps one documented term
+    /// that does grow (counting its run's evaluations reads the unindexed
+    /// `evaluation_runs.trigger_run_id`); its slope is reported, not bounded.
+    fn assert_uncovered_work_flat(
+        small: HotPathWork,
+        large: HotPathWork,
+        retained: (u64, u64),
+        label: &str,
+    ) {
+        eprintln!("{label}: SQLite VM operations {small:?} -> {large:?}");
+        let extra = retained.1.saturating_sub(retained.0).max(1);
+        eprintln!(
+            "{label}: covered-artifact qualify {} -> {} operations, {:.1} per retained \
+             acquisition (documented evaluation-table term)",
+            small.qualify_covered,
+            large.qualify_covered,
+            f64::from(
+                u32::try_from(large.qualify_covered.saturating_sub(small.qualify_covered))
+                    .unwrap_or(u32::MAX)
+            ) / f64::from(u32::try_from(extra).unwrap_or(u32::MAX))
+        );
+        assert_eq!(
+            large.qualify_uncovered, small.qualify_uncovered,
+            "{label}: qualify of a new artifact must not depend on covered history"
+        );
+        assert_eq!(
+            large.replay_uncovered, small.replay_uncovered,
+            "{label}: replay of a new artifact must not depend on covered history"
+        );
+    }
+
+    /// Independent trials per store size. A keyed lookup whose key is the
+    /// last entry of its index ends one virtual-machine operation early, and
+    /// keys are random, so one trial can come in a few operations under the
+    /// path's work; the maximum over trials is that work exactly. A trial
+    /// reaches it about half the time on the small store (17 of 36 measured),
+    /// so missing it in every trial is about one in 25,000.
+    const WORK_TRIALS: usize = 16;
+
+    /// The store's own files (database, journal, and watermark sidecar),
+    /// which are all a trial changes; the admitted helper keeps its identity.
+    fn store_files(config: &NqConfig) -> Vec<PathBuf> {
+        let root = config.database_path.parent().expect("store directory");
+        let name = config
+            .database_path
+            .file_name()
+            .expect("database name")
+            .to_string_lossy()
+            .into_owned();
+        let mut files = fs::read_dir(root)
+            .expect("read store directory")
+            .map(|entry| entry.expect("store entry").path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .file_name()
+                        .is_some_and(|file| file.to_string_lossy().starts_with(&name))
+            })
+            .collect::<Vec<_>>();
+        files.sort();
+        files
+    }
+
+    /// Run [`measure_hot_path_work`] from the same certified store
+    /// `WORK_TRIALS` times, restoring the store files between trials, and
+    /// keep the maximum of each measure.
+    fn measure_hot_path_work_exactly(
+        config: &NqConfig,
+        watcher: &WatcherConfig,
+        acquisition_id: &str,
+    ) -> HotPathWork {
+        let root = config.database_path.parent().expect("store directory");
+        let snapshot = tempfile::tempdir().expect("snapshot directory");
+        let saved = store_files(config);
+        for file in &saved {
+            fs::copy(file, snapshot.path().join(file.file_name().expect("name")))
+                .expect("snapshot store file");
+        }
+        let mut trials = Vec::with_capacity(WORK_TRIALS);
+        for _ in 0..WORK_TRIALS {
+            for file in store_files(config) {
+                fs::remove_file(file).expect("clear store file");
+            }
+            for file in &saved {
+                let name = file.file_name().expect("name");
+                fs::copy(snapshot.path().join(name), root.join(name)).expect("restore store file");
+            }
+            trials.push(measure_hot_path_work(config, watcher, acquisition_id));
+        }
+        eprintln!(
+            "{acquisition_id}: qualify_uncovered over trials {:?}",
+            trials
+                .iter()
+                .map(|work| work.qualify_uncovered)
+                .collect::<Vec<_>>()
+        );
+        HotPathWork {
+            qualify_uncovered: trials
+                .iter()
+                .map(|work| work.qualify_uncovered)
+                .max()
+                .unwrap_or(0),
+            replay_uncovered: trials
+                .iter()
+                .map(|work| work.replay_uncovered)
+                .max()
+                .unwrap_or(0),
+            qualify_covered: trials
+                .iter()
+                .map(|work| work.qualify_covered)
+                .max()
+                .unwrap_or(0),
+        }
+    }
+
+    #[test]
+    fn hot_path_work_does_not_grow_with_covered_history() {
+        let small_dir = tempfile::tempdir().expect("temporary directory");
+        let large_dir = tempfile::tempdir().expect("temporary directory");
+        let Some((small_config, small_watcher)) =
+            successor_fixture(small_dir.path(), "work-small", 3)
+        else {
+            return;
+        };
+        let Some((large_config, large_watcher)) =
+            successor_fixture(large_dir.path(), "work-large", 24)
+        else {
+            return;
+        };
+        full_validation_and_watermark(&small_config);
+        full_validation_and_watermark(&large_config);
+        let small =
+            measure_hot_path_work_exactly(&small_config, &small_watcher, "work-small-newest");
+        let large =
+            measure_hot_path_work_exactly(&large_config, &large_watcher, "work-large-newest");
+        assert_uncovered_work_flat(small, large, (4, 25), "4 -> 25 retained acquisitions");
+    }
+
+    /// The same work measure, plus wall time, at `NQ_SCALING_N` (default
+    /// 2000) retained acquisitions against a tenth of that, built through the
+    /// real acquisition path. Ignored by default because building takes
+    /// minutes: `cargo test -p nq-core --release --lib open_cost_is_bounded --
+    /// --ignored --nocapture`.
+    #[test]
+    #[ignore = "builds thousands of real acquisitions; run explicitly"]
+    fn open_cost_is_bounded_by_history_beyond_the_watermark() {
+        let total: usize = std::env::var("NQ_SCALING_N")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2000);
+        let small = total / 10;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((config, watcher)) = successor_fixture(directory.path(), "scaling-open", 0) else {
+            return;
+        };
+        full_validation_and_watermark(&config);
+        let mut built = 0usize;
+        let mut build_to = |target: usize| {
+            let mut engine = reopen_with_test_identity(&config).expect("engine");
+            while built < target {
+                // Reopen as the CLI would, so each delta stays small.
+                if built % 50 == 49 {
+                    drop(engine);
+                    engine = reopen_with_test_identity(&config).expect("engine");
+                }
+                engine
+                    .diagnostic_acquire_successor_local(&watcher, &format!("scaling-{built:06}"))
+                    .expect("successor");
+                built += 1;
+            }
+        };
+        let wall = |acquisition: &str| {
+            let started = Instant::now();
+            let engine = reopen_with_test_identity(&config).expect("engine open");
+            let artifact = engine
+                .diagnostic_replay_local_successor(&watcher, acquisition)
+                .expect("replay");
+            drop(engine);
+            let replay = started.elapsed().as_secs_f64();
+            let started = Instant::now();
+            let store = Store::open_read_only(&config.database_path).expect("read-only open");
+            qualify_diagnostic_admission(&store, artifact.artifact_id().as_digest())
+                .expect("qualify");
+            (replay, started.elapsed().as_secs_f64())
+        };
+        build_to(small);
+        let small_work = measure_hot_path_work_exactly(&config, &watcher, "scaling-small-probe");
+        let small_wall = wall("scaling-small-probe");
+        build_to(total);
+        let total_work = measure_hot_path_work_exactly(&config, &watcher, "scaling-total-probe");
+        let total_wall = wall("scaling-total-probe");
+        eprintln!(
+            "wall (covered artifact) replay {:.4}s -> {:.4}s, qualify {:.4}s -> {:.4}s",
+            small_wall.0, total_wall.0, small_wall.1, total_wall.1
+        );
+        let store = Store::open(&config.database_path).expect("open");
+        let frontier = store
+            .validated_history_frontier()
+            .expect("watermark")
+            .clone();
+        assert!(
+            store
+                .diagnostic_artifact_ids_since(&frontier)
+                .expect("delta")
+                .is_empty()
+        );
+        drop(store);
+        assert_uncovered_work_flat(
+            small_work,
+            total_work,
+            (
+                u64::try_from(small + 1).unwrap_or(u64::MAX),
+                u64::try_from(total + 2).unwrap_or(u64::MAX),
+            ),
+            &format!("{} -> {} retained acquisitions", small + 1, total + 2),
         );
     }
 }

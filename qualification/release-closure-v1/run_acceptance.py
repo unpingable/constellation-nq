@@ -48,7 +48,7 @@ DEFAULT_PREDECESSOR = pathlib.Path(
     "/data/git/.campaign-artifacts/operator-beta-completion-20260908/m3-nq-package-001"
 )
 DEFAULT_STATE = pathlib.Path("/home/jbeck/.local/state/release-closure-20260925")
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 PACKAGE = f"nq-ng_{VERSION}_amd64.deb"
 TARBALL = f"nq-ng-{VERSION}-linux-amd64.tar.gz"
 PREDECESSOR_PACKAGE = "nq-ng_0.1.0_amd64.deb"

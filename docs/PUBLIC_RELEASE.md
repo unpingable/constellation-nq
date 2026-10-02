@@ -1,5 +1,16 @@
 # Constellation NQ source and integration guide
 
+## NQ 0.2.1 source candidate
+
+The source tree is version 0.2.1, an unreleased candidate. It bounds store
+validation by a store-specific, content-bound validation watermark so that
+replay, qualification, export, and inspection no longer revalidate the whole
+retained history on every invocation; see
+[Store validation](OPERATIONS.md#store-validation-and-the-validation-watermark).
+Untouched historical rows are re-read only by `nq admin validate --full`, which
+an operator should schedule periodically. No 0.2.1 package or tag exists
+until the release owner publishes one; the published release is 0.2.0 below.
+
 ## NQ 0.2.0 component package
 
 NQ 0.2.0 is a release of the NQ component alone. The GitHub Release
@@ -141,7 +152,7 @@ python3 -B helpers/python-conformance/test_helper.py
 cargo build --workspace
 target/debug/nq protocol check
 python3 -B profiles/verify_catalog.py target/debug/nq
-python3 -B scripts/verify_protocol_assets.py protocol target/debug/nq 0.2.0
+python3 -B scripts/verify_protocol_assets.py protocol target/debug/nq 0.2.1
 ```
 
 Before publishing a package, additionally run the existing reproducibility and
