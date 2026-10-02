@@ -17628,6 +17628,7 @@ sys.stdout.write("\n")
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn validation_watermark_refuses_changed_boundaries_and_full_validation_refuses_changed_prefix()
     {
         // A row beyond the watermark is validated on every open.
@@ -17739,15 +17740,14 @@ sys.stdout.write("\n")
                 let engine = reopen_with_test_identity(&config).expect("engine open");
                 let error = engine
                     .diagnostic_replay_local_successor(&watcher, replay_id)
-                    .err()
-                    .expect("a referenced closure re-reads its rows");
+                    .expect_err("a referenced closure re-reads its rows");
                 assert!(error.to_string().contains(expected), "{error}");
                 drop(engine);
             }
             let full = Store::open_validating_fully(&config.database_path)
                 .map_err(EngineError::from)
                 .and_then(|store| validate_fully_and_record(&store).map(|_| ()));
-            let error = full.err().expect("full validation refuses a changed prefix");
+            let error = full.expect_err("full validation refuses a changed prefix");
             // A rewritten payload fails its own byte or provenance check; a
             // coherent identity substitution or a removed row passes those and
             // is caught by the certified content chain.
@@ -17801,7 +17801,7 @@ sys.stdout.write("\n")
         assert!(!watermark.exists());
     }
 
-    /// Deterministic work of the hot read paths, as SQLite virtual-machine
+    /// Deterministic work of the hot read paths, as `SQLite` virtual-machine
     /// operations in [`nq_store::SQL_WORK_TICK`] units.
     #[derive(Clone, Copy, Debug)]
     struct HotPathWork {
@@ -17858,6 +17858,10 @@ sys.stdout.write("\n")
     /// reported, not bounded.
     fn assert_uncovered_work_flat(small: HotPathWork, large: HotPathWork, label: &str) {
         eprintln!("{label}: sql work ticks {small:?} -> {large:?}");
+        eprintln!(
+            "{label}: covered-artifact qualify {} -> {} ticks (documented evaluation-table term)",
+            small.qualify_covered, large.qualify_covered
+        );
         for (path, small, large) in [
             ("qualify", small.qualify_uncovered, large.qualify_uncovered),
             ("replay", small.replay_uncovered, large.replay_uncovered),

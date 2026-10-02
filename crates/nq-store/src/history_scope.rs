@@ -113,6 +113,7 @@ pub fn sql_work_count() -> Option<u64> {
 }
 
 /// Stop counting and return the ticks counted.
+#[must_use]
 pub fn stop_sql_work_count() -> Option<u64> {
     SQL_WORK.with(|work| work.replace(None))
 }
