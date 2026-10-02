@@ -8267,21 +8267,28 @@ pub fn backup_store(store: &Store, destination: &Path) -> Result<(), EngineError
 
 /// What every engine open validates: store validation (done by the open),
 /// then the provider-intake and diagnostic-artifact history the open's
-/// watermark does not cover. When the watermark also certifies the complete
-/// semantic history, its uncovered rows are validated too so the
-/// certification advances; a failure there withdraws the certification
-/// (qualification then validates semantic history in full) without failing
-/// the open, which never required semantic history. A writable handle then
-/// records the advanced watermark.
+/// watermark does not cover. The remaining semantic planes are validated
+/// beyond the watermark's semantic frontier when it certifies one, and in
+/// full when the open found no applicable watermark, so the certification is
+/// established or advanced. A semantic failure withdraws the certification
+/// (qualification and collection then validate semantic history in full)
+/// without failing the open, which never required semantic history. A
+/// writable handle then records the watermark.
 fn validate_engine_open_history(store: &Store) -> Result<(), EngineError> {
     validate_core_history_since_open(store)?;
-    let semantic = match store.validated_semantic_frontier() {
-        Some(frontier) if validate_semantic_planes_since(store, frontier).is_ok() => {
-            nq_store::SemanticCertification::Established
-        }
-        Some(_) | None => nq_store::SemanticCertification::NotEstablished,
+    let semantic = match (
+        store.validated_history_frontier(),
+        store.validated_semantic_frontier(),
+    ) {
+        (_, Some(frontier)) => validate_semantic_planes_since(store, frontier).is_ok(),
+        (None, None) => validate_semantic_planes_in_full(store).is_ok(),
+        (Some(_), None) => false,
     };
-    store.record_validation_watermark(semantic)?;
+    store.record_validation_watermark(if semantic {
+        nq_store::SemanticCertification::Established
+    } else {
+        nq_store::SemanticCertification::NotEstablished
+    })?;
     Ok(())
 }
 
@@ -8316,6 +8323,12 @@ pub fn validate_semantic_history_since_open(store: &Store) -> Result<(), EngineE
     if let Some(frontier) = store.validated_semantic_frontier() {
         return validate_semantic_planes_since(store, frontier);
     }
+    validate_semantic_planes_in_full(store)
+}
+
+/// Every semantic plane other than provider intake and diagnostic artifacts,
+/// in full.
+fn validate_semantic_planes_in_full(store: &Store) -> Result<(), EngineError> {
     validate_admitted_report_history(store)?;
     validate_watcher_run_history(store)?;
     validate_status_history_v2(store)?;
