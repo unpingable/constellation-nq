@@ -2540,7 +2540,6 @@ fn finalize_upgrade_backup(
     Ok(backup)
 }
 
-#[allow(clippy::too_many_lines)]
 /// Validate every history row of the configured store, ignoring any
 /// watermark, and record a watermark certifying the complete history.
 fn record_full_validation(
@@ -2553,6 +2552,7 @@ fn record_full_validation(
     Ok(nq_core::engine::validate_fully_and_record(&store)?)
 }
 
+#[allow(clippy::too_many_lines)]
 fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -> Result<()> {
     match command {
         AdminCommand::Validate { full } => {
