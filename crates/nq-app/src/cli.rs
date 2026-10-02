@@ -2501,7 +2501,10 @@ fn finalize_upgrade_backup(
 /// watermark, and record a watermark certifying the complete history.
 fn record_full_validation(
     database_path: &Path,
-) -> Result<nq_core::DiagnosticArtifactHistoryVerification> {
+) -> Result<(
+    nq_core::DiagnosticArtifactHistoryVerification,
+    Option<nq_store::ValidationWatermark>,
+)> {
     let store = Store::open_validating_fully(database_path)?;
     Ok(nq_core::engine::validate_fully_and_record(&store)?)
 }
@@ -2514,12 +2517,19 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
             }
             let config = NqConfig::load(config_path)?;
             let started = std::time::Instant::now();
-            let verification = record_full_validation(&config.database_path)?;
+            let (verification, watermark) = record_full_validation(&config.database_path)?;
             print_value(
                 &json!({
                     "validated": "full",
                     "database": config.database_path,
-                    "watermark": nq_store::watermark_path(&config.database_path),
+                    "watermark": watermark.as_ref().map(|_| {
+                        nq_store::watermark_path(&config.database_path)
+                    }),
+                    "commitment_digest": watermark
+                        .as_ref()
+                        .map(|watermark| watermark.commitment_digest.clone()),
+                    "validation_rules": nq_store::VALIDATION_RULES,
+                    "engine_rules": nq_core::engine::engine_validation_rules(),
                     "diagnostic_artifacts": verification.commitments,
                     "elapsed_ms": started.elapsed().as_millis(),
                 }),

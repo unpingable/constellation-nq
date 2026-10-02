@@ -1,40 +1,52 @@
 //! Bounded history validation: the append frontier, the scope a validator
-//! covers, and the digest-bound validation watermark.
+//! covers, and the store-specific validation watermark.
 //!
 //! Every history table is append-only (update/delete triggers abort, and the
 //! schema fingerprint proves those triggers exist on every open). Rowids
-//! therefore grow monotonically in append order. A completed full validation
-//! records the per-table frontier it covered; a later open validates only rows
-//! beyond that frontier, after proving that the rows at or below it are still
-//! the rows that were validated (per-table row counts plus a digest over the
-//! commitment identities).
+//! therefore grow monotonically in append order. A completed validation
+//! records, per table, the highest validated rowid, the row count, and a hash
+//! chain over the complete encoding (rowid and every column value) of each
+//! covered row in rowid order. Chains are extended only over newly validated
+//! rows, so recording costs O(new rows).
+//!
+//! An ordinary open proves that the watermark belongs to this store, that the
+//! covered prefix still ends where it was recorded (each bounding row is
+//! present with its recorded encoding), and then validates only rows beyond
+//! the frontier. It does not re-read untouched covered rows: those are
+//! re-proven when an operation references them (replay, qualification,
+//! export, inspection, and collection re-verify the closure they read), and
+//! by explicit full validation, which recomputes every chain from the stored
+//! rows and refuses if any covered row changed since it was certified.
 //!
 //! The watermark is advisory in one direction only: when it is absent,
-//! unreadable, or bound to another store, schema, or rule set, the store is
+//! unreadable, or written for another schema or rule set, the store is
 //! validated in full. It never makes an unvalidated row count as validated.
+//! A watermark written for another store (another genesis) is refused.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
+use rusqlite::types::ValueRef;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{CanonicalDocument, StoreError};
 
 /// Watermark document schema.
-pub const VALIDATION_WATERMARK_SCHEMA: &str = "nq.validation_watermark.v1";
+pub const VALIDATION_WATERMARK_SCHEMA: &str = "nq.validation_watermark.v2";
 
-/// Identity of the validation rules a watermark vouches for. Any change to
-/// what full validation checks must change this value so that existing
-/// watermarks stop applying and the next open validates in full.
-pub const VALIDATION_RULES: &str = concat!("nq-store/", env!("CARGO_PKG_VERSION"), "/rules.1");
+/// Identity of the store validation rules a watermark vouches for. Any change
+/// to what store validation checks must change this value so that existing
+/// watermarks stop applying and the next open validates in full. Semantic
+/// rules layered above the store are bound separately through the engine
+/// rules a watermark records.
+pub const VALIDATION_RULES: &str = concat!("nq-store/", env!("CARGO_PKG_VERSION"), "/rules.2");
 
-/// Every append-only history table. The frontier covers all of them so that a
-/// row appended at or below a recorded bound (which append-only writers never
-/// do) is detected as a count mismatch.
+/// Every append-only history table. The frontier covers all of them.
 pub(crate) const HISTORY_TABLES: &[&str] = &[
     "admission_records",
     "admitted_reports",
@@ -78,77 +90,172 @@ pub(crate) const HISTORY_TABLES: &[&str] = &[
     "watcher_runs",
 ];
 
-/// Commitment identities bound into the watermark digest: each validated
-/// row's rowid and stable identity, read through the identity's own index.
-/// Substituting, removing, or inserting one of these rows at or below the
-/// frontier changes the digest. Payload bytes behind an unchanged identity
-/// are re-proven only by full validation.
-const COMMITMENT_IDENTITIES: &[(&str, &str)] = &[
-    ("diagnostic_artifact_commitments", "artifact_id"),
-    ("provider_intake_attempts", "intake_id"),
-    ("watcher_runs", "run_id"),
-    ("raw_submissions", "submission_id"),
-    ("admitted_reports", "report_id"),
-    ("evaluation_runs", "evaluation_id"),
-    ("status_events", "status_event_id"),
-    ("local_successor_acquisition_intents", "acquisition_id"),
-];
+thread_local! {
+    static SQL_WORK: Cell<Option<u64>> = const { Cell::new(None) };
+}
 
-/// The append position of one history table.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// SQLite virtual-machine operations between two work-counter ticks.
+pub const SQL_WORK_TICK: i32 = 64;
+
+/// Deterministic measure of the SQL work a thread performs: start counting
+/// before opening a store, and every connection opened afterwards on this
+/// thread reports one tick per [`SQL_WORK_TICK`] SQLite virtual-machine
+/// operations. Used by tests and measurements to assert that bounded paths do
+/// not grow with retained history; inert unless started.
+pub fn start_sql_work_count() {
+    SQL_WORK.with(|work| work.set(Some(0)));
+}
+
+/// Ticks counted since [`start_sql_work_count`], or `None` when not counting.
+#[must_use]
+pub fn sql_work_count() -> Option<u64> {
+    SQL_WORK.with(Cell::get)
+}
+
+/// Stop counting and return the ticks counted.
+pub fn stop_sql_work_count() -> Option<u64> {
+    SQL_WORK.with(|work| work.replace(None))
+}
+
+pub(crate) fn install_sql_work_counter(connection: &Connection) {
+    if sql_work_count().is_none() {
+        return;
+    }
+    connection.progress_handler(
+        SQL_WORK_TICK,
+        Some(|| {
+            SQL_WORK.with(|work| {
+                if let Some(count) = work.get() {
+                    work.set(Some(count.saturating_add(1)));
+                }
+            });
+            false
+        }),
+    );
+}
+
+/// The append position and content commitment of one history table.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TableFrontier {
     /// Highest rowid present, or `None` when the table was empty.
     pub max_rowid: Option<i64>,
     /// Rows at or below `max_rowid`.
     pub rows: i64,
+    /// Hash chain over the full encoding of every row at or below
+    /// `max_rowid`, in rowid order.
+    pub chain: String,
+    /// Digest of the full encoding of the row at `max_rowid`.
+    pub boundary: Option<String>,
 }
 
 /// Per-table append positions plus the evaluation sequence, which history
-/// paging uses instead of the rowid.
+/// paging uses instead of the rowid. A frontier from
+/// [`HistoryFrontier::capture_bounds`] carries positions only and scopes
+/// validation; a certified frontier also carries counts and chains.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryFrontier {
     /// Append position of each history table.
     pub tables: BTreeMap<String, TableFrontier>,
-    /// Highest evaluation append sequence at or below the frontier.
+    /// Evaluation append sequence of the last covered evaluation row.
     pub evaluation_sequence: i64,
 }
 
+fn initial_chain(table: &str) -> String {
+    hex(&Sha256::digest(
+        format!("{VALIDATION_WATERMARK_SCHEMA}/chain/{table}").as_bytes(),
+    ))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+}
+
+/// Digest of one row's complete stored encoding: its rowid and every column
+/// value in schema order, each typed and length-prefixed.
+fn row_digest(row: &rusqlite::Row<'_>, columns: usize) -> Result<[u8; 32], rusqlite::Error> {
+    let mut hasher = Sha256::new();
+    for index in 0..columns {
+        match row.get_ref(index)? {
+            ValueRef::Null => hasher.update([0u8]),
+            ValueRef::Integer(value) => {
+                hasher.update([1u8]);
+                hasher.update(value.to_be_bytes());
+            }
+            ValueRef::Real(value) => {
+                hasher.update([2u8]);
+                hasher.update(value.to_bits().to_be_bytes());
+            }
+            ValueRef::Text(bytes) => {
+                hasher.update([3u8]);
+                hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+                hasher.update(bytes);
+            }
+            ValueRef::Blob(bytes) => {
+                hasher.update([4u8]);
+                hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+                hasher.update(bytes);
+            }
+        }
+    }
+    Ok(hasher.finalize().into())
+}
+
+/// Columns of `SELECT rowid, * FROM table`.
+fn column_count(connection: &Connection, table: &str) -> Result<usize, StoreError> {
+    let columns: i64 = connection.query_row(
+        &format!("SELECT COUNT(*) FROM pragma_table_info('{table}')"),
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(usize::try_from(columns).unwrap_or(0) + 1)
+}
+
+fn extend_chain(chain: &str, row: &[u8; 32]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(chain.as_bytes());
+    hasher.update(row);
+    hex(&hasher.finalize())
+}
+
 impl HistoryFrontier {
-    /// Read the current append position and row count of every history
-    /// table, as a watermark records it.
-    pub(crate) fn capture(connection: &Connection) -> Result<Self, StoreError> {
-        Self::read(connection, true)
-    }
-
-    /// Read only the append positions (each an O(log n) rowid lookup). Row
-    /// counts are left at zero: such a frontier scopes writers and is never
-    /// recorded as a watermark.
+    /// Read the current append position of every history table (each an
+    /// O(log n) rowid lookup), without counts or chains.
     pub(crate) fn capture_bounds(connection: &Connection) -> Result<Self, StoreError> {
-        Self::read(connection, false)
-    }
-
-    fn read(connection: &Connection, with_counts: bool) -> Result<Self, StoreError> {
         let mut tables = BTreeMap::new();
         for table in HISTORY_TABLES {
-            let count = if with_counts {
-                format!("(SELECT COUNT(*) FROM {table})")
-            } else {
-                "0".to_owned()
-            };
-            let (max_rowid, rows): (Option<i64>, i64) = connection.query_row(
-                &format!("SELECT (SELECT MAX(rowid) FROM {table}), {count}"),
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            tables.insert((*table).to_owned(), TableFrontier { max_rowid, rows });
+            let max_rowid: Option<i64> =
+                connection.query_row(&format!("SELECT MAX(rowid) FROM {table}"), [], |row| {
+                    row.get(0)
+                })?;
+            tables.insert(
+                (*table).to_owned(),
+                TableFrontier {
+                    max_rowid,
+                    ..TableFrontier::default()
+                },
+            );
         }
-        let evaluation_sequence = connection.query_row(
-            "SELECT COALESCE(MAX(evaluation_sequence), 0) FROM evaluation_runs",
-            [],
-            |row| row.get(0),
-        )?;
+        // Evaluation sequences are allocated in append order, so the bounding
+        // row carries the highest covered sequence.
+        let evaluation_sequence = match tables
+            .get("evaluation_runs")
+            .and_then(|frontier| frontier.max_rowid)
+        {
+            Some(bound) => connection.query_row(
+                "SELECT evaluation_sequence FROM evaluation_runs WHERE rowid = ?1",
+                [bound],
+                |row| row.get(0),
+            )?,
+            None => 0,
+        };
         Ok(Self {
             tables,
             evaluation_sequence,
@@ -164,82 +271,165 @@ impl HistoryFrontier {
             .and_then(|frontier| frontier.max_rowid)
     }
 
-    /// Prove that the rows at or below this frontier are exactly the rows that
-    /// were present when it was captured: the same count, and the bounding row
-    /// still present. Append-only writers can only add rows above it.
-    fn verify_unchanged(&self, connection: &Connection) -> Result<(), StoreError> {
+    /// Certify the rows at or below `bounds`: extend `base`'s chains over the
+    /// rows beyond it (O(new rows)), or chain every row from scratch without a
+    /// base. With `prior`, every table's chain is also checkpointed at the
+    /// prior bound and must equal the prior chain, proving that no covered
+    /// row changed since `prior` was certified.
+    pub(crate) fn certify(
+        connection: &Connection,
+        base: Option<&HistoryFrontier>,
+        bounds: &HistoryFrontier,
+        prior: Option<&ValidationWatermark>,
+    ) -> Result<Self, StoreError> {
+        let mut tables = BTreeMap::new();
         for table in HISTORY_TABLES {
-            let recorded = self.tables.get(*table).copied().ok_or_else(|| {
+            let bound = bounds.max_rowid(table);
+            let from = base
+                .and_then(|base| base.tables.get(*table))
+                .filter(|from| from.max_rowid <= bound);
+            let (start, mut rows, mut chain, mut boundary) = match from {
+                Some(from) => (
+                    from.max_rowid,
+                    from.rows,
+                    from.chain.clone(),
+                    from.boundary.clone(),
+                ),
+                None => (None, 0, initial_chain(table), None),
+            };
+            // A prior certification is compared only on a recomputation from
+            // scratch, at the prior bound.
+            let checkpoint = prior
+                .filter(|_| from.is_none())
+                .and_then(|prior| prior.frontier.tables.get(*table));
+            let checkpoint_bound = checkpoint.and_then(|checkpoint| checkpoint.max_rowid);
+            if checkpoint_bound > bound {
+                return Err(StoreError::Integrity(format!(
+                    "the validation watermark covers history table {table} through rowid {} but \
+                     the store ends at {}: rows certified earlier are missing (rollback or \
+                     truncation). If this database was deliberately restored, move the watermark \
+                     aside and validate again",
+                    checkpoint_bound.map_or_else(|| "none".to_owned(), |b| b.to_string()),
+                    bound.map_or_else(|| "none".to_owned(), |b| b.to_string()),
+                )));
+            }
+            let mut checkpoint_seen = checkpoint_bound.is_none();
+            if let Some(bound) = bound {
+                let columns = column_count(connection, table)?;
+                let mut statement = connection.prepare(&format!(
+                    "SELECT rowid, * FROM {table} WHERE rowid > ?1 AND rowid <= ?2 ORDER BY rowid"
+                ))?;
+                let mut cursor = statement.query([start.unwrap_or(i64::MIN), bound])?;
+                while let Some(row) = cursor.next()? {
+                    let rowid: i64 = row.get(0)?;
+                    let digest = row_digest(row, columns)?;
+                    chain = extend_chain(&chain, &digest);
+                    rows += 1;
+                    if rowid == bound {
+                        boundary = Some(hex(&digest));
+                    }
+                    if Some(rowid) == checkpoint_bound
+                        && let Some(checkpoint) = checkpoint
+                    {
+                        verify_checkpoint(table, checkpoint, rows, &chain, prior)?;
+                        checkpoint_seen = true;
+                    }
+                }
+            }
+            if !checkpoint_seen {
+                return Err(StoreError::Integrity(format!(
+                    "history table {table} no longer contains the row at rowid {} that bounded \
+                     the history certified at {}: a covered row was removed or renumbered",
+                    checkpoint_bound.unwrap_or_default(),
+                    prior.map_or("an earlier validation", |prior| prior.validated_at.as_str())
+                )));
+            }
+            tables.insert(
+                (*table).to_owned(),
+                TableFrontier {
+                    max_rowid: bound,
+                    rows,
+                    chain,
+                    boundary: bound.and(boundary),
+                },
+            );
+        }
+        Ok(Self {
+            tables,
+            evaluation_sequence: bounds.evaluation_sequence,
+        })
+    }
+
+    /// Prove the covered prefix still ends where it was certified: every
+    /// bounding row is present with its recorded encoding. O(tables).
+    fn verify_boundaries(&self, connection: &Connection) -> Result<(), StoreError> {
+        for table in HISTORY_TABLES {
+            let recorded = self.tables.get(*table).ok_or_else(|| {
                 StoreError::Integrity(format!(
                     "validation watermark has no frontier for history table {table}"
                 ))
             })?;
-            let Some(bound) = recorded.max_rowid else {
-                // Empty when validated: every present row is beyond the
-                // frontier and is validated as new.
-                if recorded.rows != 0 {
-                    return Err(watermark_mismatch(table));
+            let (Some(bound), Some(boundary)) = (recorded.max_rowid, recorded.boundary.as_ref())
+            else {
+                if recorded.max_rowid.is_some() {
+                    return Err(boundary_mismatch(table, None));
                 }
                 continue;
             };
-            // COUNT(*) without a predicate uses the smallest index; only the
-            // rows beyond the bound are walked by rowid.
-            let (total, beyond, bounding): (i64, i64, i64) = connection.query_row(
-                &format!(
-                    "SELECT (SELECT COUNT(*) FROM {table}),
-                            (SELECT COUNT(*) FROM {table} WHERE rowid > ?1),
-                            (SELECT COUNT(*) FROM {table} WHERE rowid = ?1)"
-                ),
-                [bound],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
-            if total - beyond != recorded.rows || bounding != 1 {
-                return Err(watermark_mismatch(table));
+            let columns = column_count(connection, table)?;
+            let mut statement =
+                connection.prepare(&format!("SELECT rowid, * FROM {table} WHERE rowid = ?1"))?;
+            let mut cursor = statement.query([bound])?;
+            let present = match cursor.next()? {
+                Some(row) => Some(hex(&row_digest(row, columns)?)),
+                None => None,
+            };
+            if present.as_ref() != Some(boundary) {
+                return Err(boundary_mismatch(table, Some(bound)));
             }
         }
         Ok(())
     }
 
-    /// Digest over the commitment identities at or below this frontier.
-    fn commitment_digest(&self, connection: &Connection) -> Result<String, StoreError> {
-        let mut hasher = Sha256::new();
-        hasher.update(VALIDATION_WATERMARK_SCHEMA.as_bytes());
-        for (table, column) in COMMITMENT_IDENTITIES {
+    /// Feed every table's bound, count, chain and boundary, plus the
+    /// evaluation sequence, into `hasher`.
+    fn hash_into(&self, hasher: &mut Sha256) {
+        for (table, frontier) in &self.tables {
             hasher.update(b"\ntable\0");
             hasher.update(table.as_bytes());
-            let Some(bound) = self.max_rowid(table) else {
-                continue;
-            };
-            // Selecting only the identity and rowid lets SQLite answer from
-            // the identity's covering index instead of reading row payloads.
-            let mut statement =
-                connection.prepare(&format!("SELECT rowid, {column} FROM {table}"))?;
-            let mut rows = statement
-                .query_map([], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-                })?
-                .filter(|row| row.as_ref().map_or(true, |(rowid, _)| *rowid <= bound))
-                .collect::<Result<Vec<_>, _>>()?;
-            rows.sort_unstable_by_key(|(rowid, _)| *rowid);
-            for (rowid, identity) in rows {
-                hasher.update(rowid.to_be_bytes());
-                hasher.update(
-                    u64::try_from(identity.len())
-                        .unwrap_or(u64::MAX)
-                        .to_be_bytes(),
-                );
-                hasher.update(identity.as_bytes());
-            }
+            hasher.update(frontier.max_rowid.unwrap_or(0).to_be_bytes());
+            hasher.update(frontier.rows.to_be_bytes());
+            hasher.update(frontier.chain.as_bytes());
+            hasher.update(frontier.boundary.as_deref().unwrap_or("").as_bytes());
         }
-        Ok(format!("sha256:{:x}", hasher.finalize()))
+        hasher.update(self.evaluation_sequence.to_be_bytes());
     }
 }
 
-fn watermark_mismatch(table: &str) -> StoreError {
+fn verify_checkpoint(
+    table: &str,
+    checkpoint: &TableFrontier,
+    rows: i64,
+    chain: &str,
+    prior: Option<&ValidationWatermark>,
+) -> Result<(), StoreError> {
+    if checkpoint.rows != rows || checkpoint.chain != chain {
+        return Err(StoreError::Integrity(format!(
+            "history table {table} changed at or below the frontier certified at {}: a covered row \
+             was added, removed, or rewritten since it was validated",
+            prior.map_or("an earlier validation", |prior| prior.validated_at.as_str())
+        )));
+    }
+    Ok(())
+}
+
+fn boundary_mismatch(table: &str, bound: Option<i64>) -> StoreError {
     StoreError::Integrity(format!(
-        "history table {table} no longer matches its validation watermark: rows at or below \
-         the validated frontier were added, removed, or substituted; run \
-         `nq admin validate --full` to re-establish validation"
+        "history table {table} no longer matches its validation watermark: the covered row at \
+         rowid {} is missing or rewritten (truncation, rollback, substitution, or a watermark from \
+         a later state of this store); run `nq admin validate --full`, which refuses if certified \
+         history changed",
+        bound.map_or_else(|| "?".to_owned(), |bound| bound.to_string())
     ))
 }
 
@@ -317,6 +507,31 @@ impl<'a> Scope<'a> {
     }
 }
 
+/// Latest finding event of one evaluation lineage, as the finding-lineage
+/// replay holds it after replaying every covered evaluation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineageHead {
+    /// Hex encoding of the lineage key.
+    pub lineage: String,
+    /// Finding identity of the lineage.
+    pub finding_id: String,
+    /// Revision of the latest finding event.
+    pub event_revision: i64,
+    /// Condition state of the latest finding event.
+    pub condition_state: String,
+}
+
+/// Semantic certification carried by a watermark: the complete semantic
+/// history is proven through the watermark frontier, and replay resumes from
+/// these lineage heads.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticState {
+    /// Finding-lineage replay state at the frontier.
+    pub lineage_heads: Vec<LineageHead>,
+}
+
 /// A completed validation, bound to one store, schema, and rule set.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -325,6 +540,9 @@ pub struct ValidationWatermark {
     pub schema: String,
     /// The [`VALIDATION_RULES`] that produced it.
     pub validation_rules: String,
+    /// Identity of the semantic validation rules (engine and compiled
+    /// profile catalog) that certified the history above the store.
+    pub engine_rules: String,
     /// The store's sole genesis identity.
     pub genesis_id: String,
     /// Schema version of the validated store.
@@ -332,17 +550,52 @@ pub struct ValidationWatermark {
     /// Schema artifact digest of the validated store.
     pub schema_artifact_digest: String,
     /// Frontier through which store validation and the provider-intake and
-    /// diagnostic-artifact history were proven (what every engine open
-    /// validates).
+    /// diagnostic-artifact history were proven, with each table's content
+    /// chain.
     pub frontier: HistoryFrontier,
-    /// Digest over the commitment identities at or below `frontier`.
+    /// [`ValidationWatermark::computed_commitment`] at write time.
     pub commitment_digest: String,
-    /// Frontier, never beyond `frontier`, through which the complete semantic
-    /// history (admitted reports, runs, status, rejected custody, evaluation
-    /// and finding replay) was also proven; `None` when not established.
-    pub semantic_frontier: Option<HistoryFrontier>,
+    /// Present when the complete semantic history is also certified through
+    /// `frontier`.
+    pub semantic: Option<SemanticState>,
     /// When the covered validation completed.
     pub validated_at: String,
+}
+
+impl ValidationWatermark {
+    /// The commitment this watermark should carry: a digest over its store
+    /// identity, rule sets, certified frontier (every table's bound, count,
+    /// content chain, and boundary row), and semantic replay state.
+    #[must_use]
+    pub fn computed_commitment(&self) -> String {
+        let mut hasher = Sha256::new();
+        for field in [
+            self.schema.as_str(),
+            self.validation_rules.as_str(),
+            self.engine_rules.as_str(),
+            self.genesis_id.as_str(),
+            self.schema_artifact_digest.as_str(),
+        ] {
+            hasher.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_be_bytes());
+            hasher.update(field.as_bytes());
+        }
+        hasher.update(self.schema_version.to_be_bytes());
+        self.frontier.hash_into(&mut hasher);
+        match &self.semantic {
+            None => hasher.update([0u8]),
+            Some(state) => {
+                hasher.update([1u8]);
+                for head in &state.lineage_heads {
+                    for field in [&head.lineage, &head.finding_id, &head.condition_state] {
+                        hasher.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_be_bytes());
+                        hasher.update(field.as_bytes());
+                    }
+                    hasher.update(head.event_revision.to_be_bytes());
+                }
+            }
+        }
+        format!("sha256:{}", hex(&hasher.finalize()))
+    }
 }
 
 /// Why an open validated history in full.
@@ -353,7 +606,7 @@ pub enum FullValidationReason {
     NoWatermark,
     /// The watermark could not be read or decoded.
     UnreadableWatermark,
-    /// The watermark belongs to another store, schema, or rule set.
+    /// The watermark was written for another schema or rule set.
     InapplicableWatermark,
     /// The caller required full validation.
     Requested,
@@ -366,38 +619,19 @@ pub enum FullValidationReason {
 pub enum OpenValidation {
     /// Every history row was validated.
     Full(FullValidationReason),
-    /// Rows at or below the watermark frontier were proven unchanged; only
-    /// rows beyond it were validated.
-    SinceWatermark {
-        /// Frontier of the store-level and core history certification.
-        frontier: Box<HistoryFrontier>,
-        /// Frontier of the semantic history certification, if established.
-        semantic_frontier: Option<Box<HistoryFrontier>>,
-    },
+    /// The covered prefix was proven to end where it was certified; only rows
+    /// beyond it were validated.
+    SinceWatermark(Box<ValidationWatermark>),
 }
 
 /// Whether a recorded watermark also certifies the complete semantic history.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SemanticCertification {
     /// The caller validated every semantic plane beyond the handle's prior
-    /// semantic frontier (or in full) and it now extends to the open frontier.
-    Established,
+    /// semantic certification (or in full); replay state at the frontier.
+    Established(SemanticState),
     /// The semantic history is not certified by this watermark.
     NotEstablished,
-}
-
-impl HistoryFrontier {
-    /// Whether every table bound of `self` is at or below that of `other`.
-    fn within(&self, other: &Self) -> bool {
-        self.evaluation_sequence <= other.evaluation_sequence
-            && self.tables.iter().all(|(table, frontier)| {
-                match (frontier.max_rowid, other.max_rowid(table)) {
-                    (None, _) => true,
-                    (Some(_), None) => false,
-                    (Some(mine), Some(theirs)) => mine <= theirs,
-                }
-            })
-    }
 }
 
 /// Sidecar path holding the watermark for `database`.
@@ -414,90 +648,109 @@ pub(crate) struct StoreIdentity {
     pub schema_artifact_digest: String,
 }
 
-/// Read and decode the sidecar without consulting the database.
-pub(crate) fn read_watermark(database: &Path) -> Result<ValidationWatermark, FullValidationReason> {
+/// A sidecar as read from disk, before it is related to the database.
+pub(crate) enum SidecarState {
+    Absent,
+    Unreadable,
+    Present(Box<ValidationWatermark>),
+}
+
+pub(crate) fn read_sidecar(database: &Path) -> SidecarState {
     let bytes = match std::fs::read(watermark_path(database)) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(FullValidationReason::NoWatermark);
+            return SidecarState::Absent;
         }
-        Err(_) => return Err(FullValidationReason::UnreadableWatermark),
+        Err(_) => return SidecarState::Unreadable,
     };
-    let watermark = serde_json::from_slice::<ValidationWatermark>(&bytes)
-        .map_err(|_| FullValidationReason::UnreadableWatermark)?;
-    if watermark.schema != VALIDATION_WATERMARK_SCHEMA
-        || watermark.validation_rules != VALIDATION_RULES
-    {
-        return Err(FullValidationReason::InapplicableWatermark);
-    }
-    Ok(watermark)
+    serde_json::from_slice::<ValidationWatermark>(&bytes)
+        .map_or(SidecarState::Unreadable, |watermark| {
+            SidecarState::Present(Box::new(watermark))
+        })
 }
 
-/// Decide whether a decoded watermark belongs to this store and schema, then
-/// prove the rows at or below its frontier unchanged. A watermark for another
-/// store or schema is ignored (full validation follows); one that belongs to
-/// this store but no longer matches its rows fails closed, because validated
-/// history changed.
+/// Refuse a sidecar written for another store: a different genesis means the
+/// file next to this database was not produced by validating it.
+pub(crate) fn refuse_foreign(
+    database: &Path,
+    watermark: &ValidationWatermark,
+    identity: Option<&StoreIdentity>,
+) -> Result<(), StoreError> {
+    if let Some(identity) = identity
+        && watermark.genesis_id != identity.genesis_id
+    {
+        return Err(StoreError::Integrity(format!(
+            "validation watermark {} was written for store genesis {}, not this store's {}; it \
+             does not belong to this database. Confirm which database belongs at this path, move \
+             the watermark aside, and open again (the next open validates in full)",
+            watermark_path(database).display(),
+            watermark.genesis_id,
+            identity.genesis_id
+        )));
+    }
+    Ok(())
+}
+
+/// Whether a watermark of this store was written under the current schema
+/// and store rules, so its frontier and chains are meaningful here.
+pub(crate) fn applies(watermark: &ValidationWatermark, identity: &StoreIdentity) -> bool {
+    watermark.schema == VALIDATION_WATERMARK_SCHEMA
+        && watermark.validation_rules == VALIDATION_RULES
+        && watermark.genesis_id == identity.genesis_id
+        && watermark.schema_version == identity.schema_version
+        && watermark.schema_artifact_digest == identity.schema_artifact_digest
+}
+
+/// Prove an applicable watermark's frontier still bounds this store.
 pub(crate) fn verify_watermark(
     connection: &Connection,
-    watermark: ValidationWatermark,
-    identity: Option<&StoreIdentity>,
-) -> Result<Result<OpenValidation, FullValidationReason>, StoreError> {
-    let Some(identity) = identity else {
-        return Ok(Err(FullValidationReason::InapplicableWatermark));
-    };
-    if watermark.genesis_id != identity.genesis_id
-        || watermark.schema_version != identity.schema_version
-        || watermark.schema_artifact_digest != identity.schema_artifact_digest
-    {
-        return Ok(Err(FullValidationReason::InapplicableWatermark));
-    }
-    watermark.frontier.verify_unchanged(connection)?;
-    let digest = watermark.frontier.commitment_digest(connection)?;
-    if digest != watermark.commitment_digest {
+    watermark: &ValidationWatermark,
+) -> Result<(), StoreError> {
+    if watermark.computed_commitment() != watermark.commitment_digest {
         return Err(StoreError::Integrity(format!(
-            "commitment digest {digest} differs from validation watermark {}: validated history \
-             was substituted; run `nq admin validate --full` to re-establish validation",
+            "validation watermark commitment {} does not match its own frontier; the watermark \
+             was edited. Run `nq admin validate --full`",
             watermark.commitment_digest
         )));
     }
-    // A semantic frontier beyond the verified one is not covered by the
-    // digest; it is ignored rather than trusted.
-    let semantic_frontier = watermark
-        .semantic_frontier
-        .filter(|semantic| semantic.within(&watermark.frontier))
-        .map(Box::new);
-    Ok(Ok(OpenValidation::SinceWatermark {
-        frontier: Box::new(watermark.frontier),
-        semantic_frontier,
-    }))
+    watermark.frontier.verify_boundaries(connection)
 }
 
-/// Atomically replace the sidecar with a watermark for `frontier`.
+/// Atomically replace the sidecar with a watermark for `frontier`. The
+/// temporary file name is unique per write; any failure is reported with the
+/// path it concerned.
 pub(crate) fn write_watermark(
-    connection: &Connection,
     database: &Path,
     identity: &StoreIdentity,
-    frontier: &HistoryFrontier,
+    engine_rules: &str,
+    frontier: HistoryFrontier,
     semantic: SemanticCertification,
     validated_at: String,
-) -> Result<(), StoreError> {
-    let watermark = ValidationWatermark {
+) -> Result<ValidationWatermark, StoreError> {
+    let mut watermark = ValidationWatermark {
         schema: VALIDATION_WATERMARK_SCHEMA.to_owned(),
         validation_rules: VALIDATION_RULES.to_owned(),
+        engine_rules: engine_rules.to_owned(),
         genesis_id: identity.genesis_id.clone(),
         schema_version: identity.schema_version,
         schema_artifact_digest: identity.schema_artifact_digest.clone(),
-        frontier: frontier.clone(),
-        commitment_digest: frontier.commitment_digest(connection)?,
-        semantic_frontier: (semantic == SemanticCertification::Established)
-            .then(|| frontier.clone()),
+        commitment_digest: String::new(),
+        frontier,
+        semantic: match semantic {
+            SemanticCertification::Established(state) => Some(state),
+            SemanticCertification::NotEstablished => None,
+        },
         validated_at,
     };
+    watermark.commitment_digest = watermark.computed_commitment();
     let document = CanonicalDocument::from_serializable(&watermark)?;
     let path = watermark_path(database);
     let mut temporary = path.as_os_str().to_owned();
-    temporary.push(format!(".tmp-{}", std::process::id()));
+    temporary.push(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
     let temporary = PathBuf::from(temporary);
     let result = (|| {
         let mut file = std::fs::OpenOptions::new()
@@ -513,37 +766,49 @@ pub(crate) fn write_watermark(
         }
         Ok::<(), std::io::Error>(())
     })();
-    if result.is_err() {
+    if let Err(error) = result {
         let _ = std::fs::remove_file(&temporary);
+        return Err(StoreError::WatermarkWrite(format!(
+            "cannot write validation watermark {}: {error}",
+            path.display()
+        )));
     }
-    result.map_err(StoreError::from)
+    Ok(watermark)
 }
 
 /// Delta accessors for semantic history validation layered above the store.
 /// Each returns the records whose obligations are not covered by `frontier`,
 /// in append order; the caller reopens and validates exactly those.
 impl crate::Store {
-    /// The frontier this handle's open proved validated, or `None` when the
-    /// open validated history in full (so callers must too).
+    /// The watermark this handle's open applied, or `None` when the open
+    /// validated history in full.
     #[must_use]
-    pub fn validated_history_frontier(&self) -> Option<&HistoryFrontier> {
+    pub fn applied_watermark(&self) -> Option<&ValidationWatermark> {
         match &self.validation.opened {
-            OpenValidation::SinceWatermark { frontier, .. } => Some(frontier),
+            OpenValidation::SinceWatermark(watermark) => Some(watermark),
             OpenValidation::Full(_) => None,
         }
     }
 
-    /// The frontier through which the open's watermark certified the complete
-    /// semantic history, or `None` when semantic history must be validated in
-    /// full.
+    /// The frontier this handle's open proved validated, or `None` when the
+    /// open validated history in full (so callers must too).
     #[must_use]
-    pub fn validated_semantic_frontier(&self) -> Option<&HistoryFrontier> {
-        match &self.validation.opened {
-            OpenValidation::SinceWatermark {
-                semantic_frontier, ..
-            } => semantic_frontier.as_deref(),
-            OpenValidation::Full(_) => None,
-        }
+    pub fn validated_history_frontier(&self) -> Option<&HistoryFrontier> {
+        self.applied_watermark()
+            .map(|watermark| &watermark.frontier)
+    }
+
+    /// The frontier through which the applied watermark certified the
+    /// complete semantic history, with the replay state there; `None` when
+    /// semantic history must be validated in full.
+    #[must_use]
+    pub fn validated_semantic_state(&self) -> Option<(&HistoryFrontier, &SemanticState)> {
+        self.applied_watermark().and_then(|watermark| {
+            watermark
+                .semantic
+                .as_ref()
+                .map(|state| (&watermark.frontier, state))
+        })
     }
 
     fn ids_since(&self, sql: &str) -> Result<Vec<String>, StoreError> {

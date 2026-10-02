@@ -26,8 +26,10 @@ use thiserror::Error;
 mod history_scope;
 
 pub use history_scope::{
-    FullValidationReason, HistoryFrontier, OpenValidation, SemanticCertification, TableFrontier,
-    VALIDATION_RULES, VALIDATION_WATERMARK_SCHEMA, ValidationWatermark, watermark_path,
+    FullValidationReason, HistoryFrontier, LineageHead, OpenValidation, SQL_WORK_TICK,
+    SemanticCertification, SemanticState, TableFrontier, VALIDATION_RULES,
+    VALIDATION_WATERMARK_SCHEMA, ValidationWatermark, sql_work_count, start_sql_work_count,
+    stop_sql_work_count, watermark_path,
 };
 use history_scope::{Scope, StoreIdentity};
 
@@ -237,6 +239,9 @@ pub enum StoreError {
     /// a different bound context.
     #[error("provider intake replay conflict: {0}")]
     ReplayConflict(String),
+    /// A validated history could not be recorded as a validation watermark.
+    #[error("{0}")]
+    WatermarkWrite(String),
 }
 
 /// A canonical JSON document and its SHA-256 semantic digest.
@@ -1787,6 +1792,9 @@ struct ValidationState {
     store_validated: Option<HistoryFrontier>,
     /// Whether the handle may record a validation watermark.
     may_record: bool,
+    /// An applicable watermark of this store that an explicit full
+    /// validation must not contradict.
+    prior: Option<Box<ValidationWatermark>>,
 }
 
 impl Default for ValidationState {
@@ -1796,6 +1804,7 @@ impl Default for ValidationState {
             open_frontier: None,
             store_validated: None,
             may_record: false,
+            prior: None,
         }
     }
 }
@@ -2068,47 +2077,63 @@ impl Store {
 
     /// Validate structure, then history: in full when no applicable watermark
     /// exists (or `require_full`), otherwise only rows beyond the watermark
-    /// frontier after proving the rows at or below it unchanged.
+    /// frontier after proving the covered prefix still ends where it was
+    /// certified. A watermark written for another store refuses the open.
     fn validate_on_open(&mut self, require_full: bool) -> Result<(), StoreError> {
+        history_scope::install_sql_work_counter(&self.connection);
         let path = self
             .path
             .clone()
             .ok_or_else(|| StoreError::Invariant("an opened store has a backing path".into()))?;
+        let sidecar = history_scope::read_sidecar(&path);
+        // Version, application, and schema refusal precede reading any
+        // history table.
+        self.validate_identity()?;
+        let identity = self.store_identity()?;
+        let mut prior = None;
+        let candidate = match sidecar {
+            history_scope::SidecarState::Absent => Err(FullValidationReason::NoWatermark),
+            history_scope::SidecarState::Unreadable => {
+                Err(FullValidationReason::UnreadableWatermark)
+            }
+            history_scope::SidecarState::Present(watermark) => {
+                history_scope::refuse_foreign(&path, &watermark, identity.as_ref())?;
+                if identity
+                    .as_ref()
+                    .is_some_and(|identity| history_scope::applies(&watermark, identity))
+                {
+                    if require_full {
+                        prior = Some(watermark);
+                        Err(FullValidationReason::Requested)
+                    } else {
+                        Ok(watermark)
+                    }
+                } else {
+                    Err(FullValidationReason::InapplicableWatermark)
+                }
+            }
+        };
         let candidate = if require_full {
             Err(FullValidationReason::Requested)
         } else {
-            history_scope::read_watermark(&path)
+            candidate
         };
-        // Version, application, and schema refusal precede reading any
-        // history table. Without a candidate watermark the order is exactly
-        // that of full validation.
-        self.validate_identity()?;
         if candidate.is_err() {
             self.validate_pages_and_foreign_keys()?;
         }
         self.validate_shape()?;
-        let frontier = HistoryFrontier::capture(&self.connection)?;
+        let frontier = HistoryFrontier::capture_bounds(&self.connection)?;
         let opened = match candidate {
             Err(reason) => OpenValidation::Full(reason),
             Ok(watermark) => {
-                let identity = self.store_identity()?;
-                match history_scope::verify_watermark(
-                    &self.connection,
-                    watermark,
-                    identity.as_ref(),
-                )? {
-                    Ok(validated) => validated,
-                    Err(reason) => {
-                        self.validate_pages_and_foreign_keys()?;
-                        OpenValidation::Full(reason)
-                    }
-                }
+                history_scope::verify_watermark(&self.connection, &watermark)?;
+                OpenValidation::SinceWatermark(watermark)
             }
         };
         match &opened {
             OpenValidation::Full(_) => self.validate_history(Scope::FULL)?,
-            OpenValidation::SinceWatermark { frontier, .. } => {
-                self.validate_history(Scope::after(frontier))?;
+            OpenValidation::SinceWatermark(watermark) => {
+                self.validate_history(Scope::after(&watermark.frontier))?;
             }
         }
         self.validation = ValidationState {
@@ -2116,6 +2141,7 @@ impl Store {
             open_frontier: Some(frontier.clone()),
             store_validated: Some(frontier),
             may_record: false,
+            prior,
         };
         Ok(())
     }
@@ -2148,38 +2174,57 @@ impl Store {
     }
 
     /// Record that validation is proven through the frontier captured when
-    /// this handle opened.
+    /// this handle opened, extending the applied watermark's content chains
+    /// over the newly validated rows (or chaining every row after a full
+    /// validation, refusing if rows certified by an earlier watermark of this
+    /// store changed).
     ///
     /// The caller asserts that it has validated the provider-intake and
     /// diagnostic-artifact history beyond [`Self::validated_history_frontier`]
-    /// (or in full), and, for [`SemanticCertification::Established`], every
-    /// other semantic plane beyond [`Self::validated_semantic_frontier`] (or
-    /// in full). Only writable handles from [`Self::open`] or
-    /// [`Self::open_validating_fully`] record, and only for a store with
-    /// exactly one genesis identity; otherwise this returns `false`.
+    /// (or in full) under `engine_rules`, and, for
+    /// [`SemanticCertification::Established`], every other semantic plane
+    /// beyond [`Self::validated_semantic_state`] (or in full). Only writable
+    /// handles from [`Self::open`] or [`Self::open_validating_fully`] record,
+    /// and only for a store with exactly one genesis identity; otherwise this
+    /// returns `None`. A watermark of another store is never overwritten.
     pub fn record_validation_watermark(
         &self,
         semantic: SemanticCertification,
-    ) -> Result<bool, StoreError> {
-        let (true, Some(frontier), Some(path)) = (
+        engine_rules: &str,
+    ) -> Result<Option<ValidationWatermark>, StoreError> {
+        let (true, Some(bounds), Some(path)) = (
             self.validation.may_record,
             self.validation.open_frontier.as_ref(),
             self.path.as_deref(),
         ) else {
-            return Ok(false);
+            return Ok(None);
         };
         let Some(identity) = self.store_identity()? else {
-            return Ok(false);
+            return Ok(None);
+        };
+        if let history_scope::SidecarState::Present(current) = history_scope::read_sidecar(path) {
+            history_scope::refuse_foreign(path, &current, Some(&identity))?;
+        }
+        let certified = match &self.validation.opened {
+            OpenValidation::SinceWatermark(applied) => {
+                HistoryFrontier::certify(&self.connection, Some(&applied.frontier), bounds, None)?
+            }
+            OpenValidation::Full(_) => HistoryFrontier::certify(
+                &self.connection,
+                None,
+                bounds,
+                self.validation.prior.as_deref(),
+            )?,
         };
         history_scope::write_watermark(
-            &self.connection,
             path,
             &identity,
-            frontier,
+            engine_rules,
+            certified,
             semantic,
             now_utc(),
-        )?;
-        Ok(true)
+        )
+        .map(Some)
     }
 
     fn validate_scoped(&self, scope: Scope<'_>) -> Result<(), StoreError> {

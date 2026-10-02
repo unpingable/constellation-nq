@@ -8265,42 +8265,111 @@ pub fn backup_store(store: &Store, destination: &Path) -> Result<(), EngineError
     Ok(())
 }
 
+/// Identity of the semantic validation rules above the store: this engine
+/// version and a digest of the compiled profile catalog. A watermark records
+/// it; when it differs, the history above the store is validated in full
+/// again (store-level checks are bound separately by
+/// [`nq_store::VALIDATION_RULES`]).
+#[must_use]
+pub fn engine_validation_rules() -> &'static str {
+    static RULES: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let mut catalog = Vec::new();
+        for module in nq_profiles::all_profiles() {
+            let descriptor = module.descriptor();
+            let digest = descriptor.digest().map_or_else(
+                |error| format!("invalid:{error}"),
+                |digest| digest.as_str().to_owned(),
+            );
+            catalog.push(format!(
+                "{}\0{}\0{digest}",
+                descriptor.profile.id, descriptor.profile.version
+            ));
+        }
+        catalog.sort();
+        format!(
+            "nq-core/{}/engine-rules.1/catalog:{}",
+            env!("CARGO_PKG_VERSION"),
+            nq_protocol::sha256_bytes(catalog.join("\n").as_bytes()).as_str()
+        )
+    });
+    RULES.as_str()
+}
+
+/// The applied watermark when it was certified under this engine's rules.
+fn engine_watermark(store: &Store) -> Option<&nq_store::ValidationWatermark> {
+    store
+        .applied_watermark()
+        .filter(|watermark| watermark.engine_rules == engine_validation_rules())
+}
+
+fn engine_core_frontier(store: &Store) -> Option<&nq_store::HistoryFrontier> {
+    engine_watermark(store).map(|watermark| &watermark.frontier)
+}
+
+fn engine_semantic_state(
+    store: &Store,
+) -> Option<(&nq_store::HistoryFrontier, &nq_store::SemanticState)> {
+    engine_watermark(store).and_then(|watermark| {
+        watermark
+            .semantic
+            .as_ref()
+            .map(|state| (&watermark.frontier, state))
+    })
+}
+
 /// What every engine open validates: store validation (done by the open),
 /// then the provider-intake and diagnostic-artifact history the open's
 /// watermark does not cover. The remaining semantic planes are validated
-/// beyond the watermark's semantic frontier when it certifies one, and in
+/// beyond the watermark's semantic certification when it has one, and in
 /// full when the open found no applicable watermark, so the certification is
 /// established or advanced. A semantic failure withdraws the certification
-/// (qualification and collection then validate semantic history in full)
-/// without failing the open, which never required semantic history. A
-/// writable handle then records the watermark.
+/// (qualification and collection then validate semantic history in full) and
+/// is reported on stderr; it does not fail the open, which never required
+/// semantic history. A writable handle then records the watermark; a failure
+/// to write it is reported and leaves the previous watermark in place.
 fn validate_engine_open_history(store: &Store) -> Result<(), EngineError> {
     validate_core_history_since_open(store)?;
-    let semantic = match (
-        store.validated_history_frontier(),
-        store.validated_semantic_frontier(),
-    ) {
-        (_, Some(frontier)) => validate_semantic_planes_since(store, frontier).is_ok(),
-        (None, None) => validate_semantic_planes_in_full(store).is_ok(),
-        (Some(_), None) => false,
+    let semantic = match (engine_core_frontier(store), engine_semantic_state(store)) {
+        (_, Some((frontier, state))) => validate_semantic_planes_since(store, frontier, state),
+        (None, None) => validate_semantic_planes_in_full(store),
+        (Some(_), None) => Err(EngineError::Invariant(
+            "the validation watermark does not certify semantic history".into(),
+        )),
     };
-    store.record_validation_watermark(if semantic {
-        nq_store::SemanticCertification::Established
-    } else {
-        nq_store::SemanticCertification::NotEstablished
-    })?;
-    Ok(())
+    let certification = match semantic {
+        Ok(state) => nq_store::SemanticCertification::Established(state),
+        Err(error) => {
+            eprintln!(
+                "nq: warning: semantic history is not certified ({error}); qualification, export, \
+                 inspection, and collection validate it in full until `nq admin validate --full` \
+                 succeeds"
+            );
+            nq_store::SemanticCertification::NotEstablished
+        }
+    };
+    match store.record_validation_watermark(certification, engine_validation_rules()) {
+        Ok(_) => Ok(()),
+        Err(nq_store::StoreError::WatermarkWrite(message)) => {
+            eprintln!(
+                "nq: warning: {message}; this validation is not recorded and the next open \
+                 validates the same history again"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Provider-intake and diagnostic-artifact history not covered by the
-/// store's validation watermark (all of it when the store opened in full).
+/// store's validation watermark (all of it when the store opened in full or
+/// the watermark was certified under other engine rules).
 ///
 /// # Errors
 ///
 /// As [`validate_provider_intake_history`] and
 /// [`validate_diagnostic_artifact_history`] for the uncovered rows.
 pub fn validate_core_history_since_open(store: &Store) -> Result<(), EngineError> {
-    if let Some(frontier) = store.validated_history_frontier() {
+    if let Some(frontier) = engine_core_frontier(store) {
         validate_provider_intake_history_since(store, frontier)?;
         validate_diagnostic_artifact_history_since(store, frontier)?;
     } else {
@@ -8312,57 +8381,99 @@ pub fn validate_core_history_since_open(store: &Store) -> Result<(), EngineError
 
 /// The complete semantic chain of [`validate_semantic_history`], validating
 /// only rows its open's watermark does not certify: the core history beyond
-/// the core frontier and every other plane beyond the semantic frontier. With
-/// no applicable certification this is exactly the exhaustive validation.
+/// the core frontier and every other plane beyond the semantic
+/// certification. With no applicable certification this is exactly the
+/// exhaustive validation.
 ///
 /// # Errors
 ///
 /// As [`validate_semantic_history`] for the uncovered rows.
 pub fn validate_semantic_history_since_open(store: &Store) -> Result<(), EngineError> {
     validate_core_history_since_open(store)?;
-    if let Some(frontier) = store.validated_semantic_frontier() {
-        return validate_semantic_planes_since(store, frontier);
+    if let Some((frontier, state)) = engine_semantic_state(store) {
+        validate_semantic_planes_since(store, frontier, state)?;
+    } else {
+        validate_semantic_planes_in_full(store)?;
     }
-    validate_semantic_planes_in_full(store)
+    Ok(())
+}
+
+/// Validate one referenced diagnostic artifact's own closure (bytes, origin
+/// run, provider intake, evaluation, and status correspondence) whether or
+/// not a validation watermark covers it.
+///
+/// # Errors
+///
+/// Returns when the artifact is not committed or any closure binding fails.
+pub fn validate_referenced_diagnostic_artifact(
+    store: &Store,
+    artifact_id: &Sha256Digest,
+) -> Result<(), EngineError> {
+    validate_diagnostic_artifact_closure(
+        store,
+        artifact_id,
+        &mut DiagnosticArtifactHistoryVerification::default(),
+    )
 }
 
 /// Every semantic plane other than provider intake and diagnostic artifacts,
-/// in full.
-fn validate_semantic_planes_in_full(store: &Store) -> Result<(), EngineError> {
+/// in full; returns the finding-lineage replay state at the end of history.
+fn validate_semantic_planes_in_full(store: &Store) -> Result<nq_store::SemanticState, EngineError> {
+    // The evaluation history is replayed once, first; status and rejected
+    // custody then read their runs' evaluations without replaying it again.
+    let (_, heads) = replay_evaluation_history_in_full(store)?;
     validate_admitted_report_history(store)?;
     validate_watcher_run_history(store)?;
-    validate_status_history_v2(store)?;
-    validate_rejected_custody_history(store)?;
-    validate_evaluation_refusal_history(store)?;
-    Ok(())
+    validate_status_history_v2_with_page_size(store, 256, EvaluationHistory::AlreadyValidated)?;
+    validate_rejected_custody_history_with_page_size(
+        store,
+        nq_store::MAX_PUBLIC_QUERY_ROWS,
+        EvaluationHistory::AlreadyValidated,
+    )?;
+    Ok(semantic_state(&heads))
 }
 
 /// Validate every history row of a store opened with
 /// [`Store::open_validating_fully`] and record a watermark certifying the
-/// complete semantic history through the open's frontier.
+/// complete semantic history through the open's frontier. Refuses when rows
+/// certified by an earlier watermark of this store changed.
 ///
 /// # Errors
 ///
 /// As [`validate_semantic_history`], or when the watermark cannot be written.
 pub fn validate_fully_and_record(
     store: &Store,
-) -> Result<DiagnosticArtifactHistoryVerification, EngineError> {
+) -> Result<
+    (
+        DiagnosticArtifactHistoryVerification,
+        Option<nq_store::ValidationWatermark>,
+    ),
+    EngineError,
+> {
     if store.validated_history_frontier().is_some() {
         return Err(EngineError::Invariant(
             "full validation requires a store opened without a watermark".into(),
         ));
     }
-    let verification = validate_semantic_history(store)?;
-    store.record_validation_watermark(nq_store::SemanticCertification::Established)?;
-    Ok(verification)
+    let state = validate_semantic_planes_in_full(store)?;
+    validate_provider_intake_history(store)?;
+    let verification = validate_diagnostic_artifact_history(store)?;
+    // `None` when the handle cannot record (read-only, or no sole genesis).
+    let watermark = store.record_validation_watermark(
+        nq_store::SemanticCertification::Established(state),
+        engine_validation_rules(),
+    )?;
+    Ok((verification, watermark))
 }
 
 /// Every semantic plane other than provider intake and diagnostic artifacts,
-/// for rows beyond `frontier`.
+/// for rows beyond `frontier`; returns the finding-lineage replay state at
+/// the end of history.
 fn validate_semantic_planes_since(
     store: &Store,
     frontier: &nq_store::HistoryFrontier,
-) -> Result<(), EngineError> {
+    state: &nq_store::SemanticState,
+) -> Result<nq_store::SemanticState, EngineError> {
     const STATUS_PAGE_SIZE: u32 = 256;
     store.validate_admitted_report_associations_since(frontier)?;
     for report_id in store.admitted_report_ids_since(frontier)? {
@@ -8370,7 +8481,7 @@ fn validate_semantic_planes_since(
     }
     // Status and rejected custody read their runs' evaluations, so the
     // evaluation history beyond the frontier is proven first.
-    validate_evaluation_refusal_history_since(store, frontier)?;
+    let heads = validate_evaluation_refusal_history_since(store, frontier, state)?;
     store.validate_run_results_since(frontier)?;
     for run_id in store.watcher_run_ids_since(frontier)? {
         let run = store.watcher_run_outcome(&run_id)?.ok_or_else(|| {
@@ -8394,7 +8505,46 @@ fn validate_semantic_planes_since(
     for row in store.rejected_custody_since(frontier)? {
         rejected_custody_from_row(store, row, EvaluationHistory::AlreadyValidated)?;
     }
-    Ok(())
+    Ok(semantic_state(&heads))
+}
+
+fn semantic_state(heads: &BTreeMap<Vec<u8>, ReplayedFinding>) -> nq_store::SemanticState {
+    nq_store::SemanticState {
+        lineage_heads: heads
+            .iter()
+            .map(|(lineage, head)| nq_store::LineageHead {
+                lineage: hex::encode(lineage),
+                finding_id: head.finding_id.clone(),
+                event_revision: head.event_revision,
+                condition_state: head.condition_state.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn replay_heads(
+    state: &nq_store::SemanticState,
+) -> Result<BTreeMap<Vec<u8>, ReplayedFinding>, EngineError> {
+    state
+        .lineage_heads
+        .iter()
+        .map(|head| {
+            let lineage = hex::decode(&head.lineage).map_err(|error| {
+                EngineError::Invariant(format!(
+                    "validation watermark lineage head {} is not hex: {error}",
+                    head.lineage
+                ))
+            })?;
+            Ok((
+                lineage,
+                ReplayedFinding {
+                    finding_id: head.finding_id.clone(),
+                    event_revision: head.event_revision,
+                    condition_state: head.condition_state.clone(),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// Exhaustively reopen the complete persisted semantic chain.
@@ -8415,11 +8565,7 @@ fn validate_semantic_planes_since(
 pub fn validate_semantic_history(
     store: &Store,
 ) -> Result<DiagnosticArtifactHistoryVerification, EngineError> {
-    validate_admitted_report_history(store)?;
-    validate_watcher_run_history(store)?;
-    validate_status_history_v2(store)?;
-    validate_rejected_custody_history(store)?;
-    validate_evaluation_refusal_history(store)?;
+    validate_semantic_planes_in_full(store)?;
     validate_provider_intake_history(store)?;
     validate_diagnostic_artifact_history(store)
 }
@@ -9213,17 +9359,22 @@ pub fn evaluation_history_bounded(
 /// canonical collection, status-projection, or linked-refusal contract.
 pub fn validate_status_history_v2(store: &Store) -> Result<usize, EngineError> {
     const PAGE_SIZE: u32 = 256;
-    validate_status_history_v2_with_page_size(store, PAGE_SIZE)
+    // Admitted instance statuses read their run's evaluations; the
+    // evaluation history is proven once, when the first one needs it.
+    let evaluations_validated = std::cell::Cell::new(false);
+    validate_status_history_v2_with_page_size(
+        store,
+        PAGE_SIZE,
+        EvaluationHistory::OncePerTraversal(&evaluations_validated),
+    )
 }
 
 fn validate_status_history_v2_with_page_size(
     store: &Store,
     page_size: u32,
+    evaluations: EvaluationHistory<'_>,
 ) -> Result<usize, EngineError> {
     validate_watcher_run_history_with_page_size(store, page_size)?;
-    // Admitted instance statuses read their run's evaluations; the
-    // evaluation history is proven once, when the first one needs it.
-    let evaluations_validated = std::cell::Cell::new(false);
     let mut after_sequence = None;
     let mut validated = 0usize;
     loop {
@@ -9234,11 +9385,7 @@ fn validate_status_history_v2_with_page_size(
         let page_len = page.len();
         for row in page {
             after_sequence = Some(row.status_sequence);
-            validate_status_event_record(
-                store,
-                row,
-                EvaluationHistory::OncePerTraversal(&evaluations_validated),
-            )?;
+            validate_status_event_record(store, row, evaluations)?;
             validated = validated.checked_add(1).ok_or_else(|| {
                 EngineError::Invariant("status history event count overflowed".into())
             })?;
@@ -9367,62 +9514,54 @@ where
         through_evaluation_sequence,
         visit,
     )
+    .map(|(reopened, _)| reopened)
+}
+
+/// The complete evaluation history replay; returns the count and the
+/// finding-lineage state at the end of history.
+fn replay_evaluation_history_in_full(
+    store: &Store,
+) -> Result<(usize, BTreeMap<Vec<u8>, ReplayedFinding>), EngineError> {
+    store.validate_evaluation_history_invariants()?;
+    visit_evaluation_history_between(
+        store,
+        nq_store::MAX_PUBLIC_QUERY_ROWS,
+        None,
+        BTreeMap::new(),
+        store.latest_evaluation_sequence()?,
+        |_, _| Ok(()),
+    )
 }
 
 /// The evaluation and finding history a new evaluation builds on: beyond the
 /// open's semantic certification when one applies, otherwise in full.
 fn validate_evaluation_history_before_evaluating(store: &Store) -> Result<(), EngineError> {
-    match store.validated_semantic_frontier() {
-        Some(frontier) => validate_evaluation_refusal_history_since(store, frontier),
-        None => validate_evaluation_refusal_history(store),
+    match engine_semantic_state(store) {
+        Some((frontier, state)) => {
+            validate_evaluation_refusal_history_since(store, frontier, state).map(|_| ())
+        }
+        None => validate_evaluation_refusal_history(store).map(|_| ()),
     }
-    .map(|_| ())
 }
 
 /// Evaluation history beyond `frontier`: the store-wide laws for new rows,
 /// then each evaluation after the frontier's sequence, replayed from the
-/// finding-lineage state the frontier's prefix ends in.
+/// finding-lineage state the certification recorded at the frontier.
 fn validate_evaluation_refusal_history_since(
     store: &Store,
     frontier: &nq_store::HistoryFrontier,
-) -> Result<usize, EngineError> {
+    state: &nq_store::SemanticState,
+) -> Result<BTreeMap<Vec<u8>, ReplayedFinding>, EngineError> {
     store.validate_evaluation_history_invariants_since(frontier)?;
-    let after = frontier.evaluation_sequence;
-    let mut replay = BTreeMap::new();
-    for sequence in store.finding_lineage_heads_through(after)? {
-        let mut rows = store.evaluation_refusal_history_bounded(1, Some(sequence - 1), sequence)?;
-        let [row] = rows.as_mut_slice() else {
-            return Err(EngineError::Invariant(format!(
-                "finding lineage head at evaluation sequence {sequence} cannot be reopened"
-            )));
-        };
-        let envelope = validate_evaluation_refusal_row(store, row, true)?;
-        let (Some(finding_id), Some(event_revision), Some(condition_state)) = (
-            row.finding_id.clone(),
-            row.finding_event_revision,
-            row.finding_condition_state.clone(),
-        ) else {
-            return Err(EngineError::Invariant(format!(
-                "finding lineage head at evaluation sequence {sequence} has no finding event"
-            )));
-        };
-        replay.insert(
-            evaluation_lineage_key(&envelope)?,
-            ReplayedFinding {
-                finding_id,
-                event_revision,
-                condition_state,
-            },
-        );
-    }
-    visit_evaluation_history_between(
+    let (_, heads) = visit_evaluation_history_between(
         store,
         nq_store::MAX_PUBLIC_QUERY_ROWS,
-        Some(after),
-        replay,
+        Some(frontier.evaluation_sequence),
+        replay_heads(state)?,
         store.latest_evaluation_sequence()?,
         |_, _| Ok(()),
-    )
+    )?;
+    Ok(heads)
 }
 
 fn visit_evaluation_history_between<F>(
@@ -9432,7 +9571,7 @@ fn visit_evaluation_history_between<F>(
     mut replay: BTreeMap<Vec<u8>, ReplayedFinding>,
     through_evaluation_sequence: i64,
     mut visit: F,
-) -> Result<usize, EngineError>
+) -> Result<(usize, BTreeMap<Vec<u8>, ReplayedFinding>), EngineError>
 where
     F: FnMut(
         nq_store::EvaluationRefusalHistoryRow,
@@ -9447,7 +9586,7 @@ where
             through_evaluation_sequence,
         )?;
         if page.is_empty() {
-            return Ok(reopened);
+            return Ok((reopened, replay));
         }
         let page_len = page.len();
         for row in page {
@@ -9460,7 +9599,7 @@ where
             })?;
         }
         if page_len < page_size as usize {
-            return Ok(reopened);
+            return Ok((reopened, replay));
         }
     }
 }
@@ -10335,14 +10474,19 @@ pub fn rejected_custody_snapshot_bounded(
 /// Returns when paging fails or any row cannot prove exact canonical refusal,
 /// projection, instance, run, or profile association.
 pub fn validate_rejected_custody_history(store: &Store) -> Result<usize, EngineError> {
-    validate_rejected_custody_history_with_page_size(store, nq_store::MAX_PUBLIC_QUERY_ROWS)
+    let evaluations_validated = std::cell::Cell::new(false);
+    validate_rejected_custody_history_with_page_size(
+        store,
+        nq_store::MAX_PUBLIC_QUERY_ROWS,
+        EvaluationHistory::OncePerTraversal(&evaluations_validated),
+    )
 }
 
 fn validate_rejected_custody_history_with_page_size(
     store: &Store,
     page_size: u32,
+    evaluations: EvaluationHistory<'_>,
 ) -> Result<usize, EngineError> {
-    let evaluations_validated = std::cell::Cell::new(false);
     let mut after_submission_id: Option<String> = None;
     let mut validated = 0usize;
     loop {
@@ -10353,11 +10497,7 @@ fn validate_rejected_custody_history_with_page_size(
         let page_len = page.len();
         for row in page {
             after_submission_id = Some(row.submission_id.clone());
-            rejected_custody_from_row(
-                store,
-                row,
-                EvaluationHistory::OncePerTraversal(&evaluations_validated),
-            )?;
+            rejected_custody_from_row(store, row, evaluations)?;
             validated = validated.checked_add(1).ok_or_else(|| {
                 EngineError::Invariant("rejected custody count overflowed".into())
             })?;
@@ -15978,7 +16118,7 @@ sys.stdout.write("\n")
             })
             .expect("store hostile late status");
         assert!(matches!(
-            validate_status_history_v2_with_page_size(&store, 1),
+            validate_status_history_v2_with_page_size(&store, 1, EvaluationHistory::ValidateNow),
             Err(EngineError::Invariant(message))
                 if message.contains("not a valid versioned collection result")
         ));
@@ -16216,7 +16356,8 @@ sys.stdout.write("\n")
                 2
             );
             assert_eq!(
-                validate_status_history_v2_with_page_size(store, 1).expect("one-row status pages"),
+                validate_status_history_v2_with_page_size(store, 1, EvaluationHistory::ValidateNow)
+                    .expect("one-row status pages"),
                 2
             );
             assert_eq!(
@@ -16224,8 +16365,12 @@ sys.stdout.write("\n")
                 2
             );
             assert_eq!(
-                validate_rejected_custody_history_with_page_size(store, 1)
-                    .expect("one-row custody pages"),
+                validate_rejected_custody_history_with_page_size(
+                    store,
+                    1,
+                    EvaluationHistory::ValidateNow
+                )
+                .expect("one-row custody pages"),
                 2
             );
         };
@@ -17305,7 +17450,7 @@ sys.stdout.write("\n")
                 .validated_history_frontier()
                 .expect("full validation recorded a watermark")
                 .clone();
-            assert!(store.validated_semantic_frontier().is_some());
+            assert!(store.validated_semantic_state().is_some());
             assert!(
                 store
                     .diagnostic_artifact_ids_since(&frontier)
@@ -17338,7 +17483,7 @@ sys.stdout.write("\n")
                 .expect("advanced")
                 .clone();
             assert!(
-                store.validated_semantic_frontier().is_some(),
+                store.validated_semantic_state().is_some(),
                 "{label}: semantic advances"
             );
             assert_eq!(
@@ -17361,8 +17506,23 @@ sys.stdout.write("\n")
         }
     }
 
+    fn read_watermark_file(config: &NqConfig) -> nq_store::ValidationWatermark {
+        serde_json::from_slice(
+            &fs::read(nq_store::watermark_path(&config.database_path)).expect("read watermark"),
+        )
+        .expect("decode watermark")
+    }
+
+    fn write_watermark_file(config: &NqConfig, watermark: &nq_store::ValidationWatermark) {
+        fs::write(
+            nq_store::watermark_path(&config.database_path),
+            serde_json::to_vec(watermark).expect("encode watermark"),
+        )
+        .expect("write watermark");
+    }
+
     #[test]
-    fn validation_watermark_is_ignored_for_another_store_schema_or_rule_set() {
+    fn validation_watermark_refuses_another_store_and_ignores_another_schema_or_rule_set() {
         let first = tempfile::tempdir().expect("temporary directory");
         let second = tempfile::tempdir().expect("temporary directory");
         let Some((first_config, _)) = successor_fixture(first.path(), "watermark-first", 1) else {
@@ -17380,57 +17540,86 @@ sys.stdout.write("\n")
             .open_validation()
         {
             nq_store::OpenValidation::Full(reason) => *reason,
-            nq_store::OpenValidation::SinceWatermark { .. } => {
+            nq_store::OpenValidation::SinceWatermark(_) => {
                 panic!("an inapplicable watermark must not bound validation")
             }
         };
 
-        // Another store's genesis.
+        // Another store's watermark is refused by every open, and an engine
+        // open never overwrites it.
         fs::copy(&first_watermark, &second_watermark).expect("copy watermark");
+        let foreign = fs::read(&second_watermark).expect("foreign bytes");
+        for open in [
+            Store::open(&second_config.database_path).err(),
+            Store::open_read_only(&second_config.database_path).err(),
+        ] {
+            let error = open.expect("a foreign watermark refuses the open");
+            assert!(
+                error
+                    .to_string()
+                    .contains("was written for store genesis watermark-first"),
+                "{error}"
+            );
+        }
+        assert!(reopen_with_test_identity(&second_config).is_err());
+        assert_eq!(fs::read(&second_watermark).expect("still foreign"), foreign);
+        fs::remove_file(&second_watermark).expect("operator moves it aside");
         assert_eq!(
             reason(&second_config),
-            nq_store::FullValidationReason::InapplicableWatermark
+            nq_store::FullValidationReason::NoWatermark
         );
 
-        let original: serde_json::Value =
-            serde_json::from_slice(&fs::read(&first_watermark).expect("read")).expect("decode");
-        let write_variant = |field: &str, value: serde_json::Value| {
+        let original = read_watermark_file(&first_config);
+        let reseal = |change: &dyn Fn(&mut nq_store::ValidationWatermark)| {
             let mut variant = original.clone();
-            variant[field] = value;
-            fs::write(
-                &first_watermark,
-                serde_json::to_vec(&variant).expect("encode"),
-            )
-            .expect("write variant");
+            change(&mut variant);
+            variant.commitment_digest = variant.computed_commitment();
+            write_watermark_file(&first_config, &variant);
         };
-        // Another schema artifact.
-        write_variant(
-            "schema_artifact_digest",
-            json!(nq_protocol::sha256_bytes(b"another schema").as_str()),
-        );
+        // Another schema artifact, schema version, or store rule set: ignored.
+        reseal(&|watermark| {
+            watermark.schema_artifact_digest =
+                nq_protocol::sha256_bytes(b"another schema").into_string();
+        });
         assert_eq!(
             reason(&first_config),
             nq_store::FullValidationReason::InapplicableWatermark
         );
-        // Another schema version.
-        write_variant("schema_version", json!(nq_store::SCHEMA_VERSION + 1));
+        reseal(&|watermark| watermark.schema_version = nq_store::SCHEMA_VERSION + 1);
         assert_eq!(
             reason(&first_config),
             nq_store::FullValidationReason::InapplicableWatermark
         );
-        // Another validation rule set.
-        write_variant("validation_rules", json!("nq-store/0.0.0/rules.0"));
+        reseal(&|watermark| watermark.validation_rules = "nq-store/0.0.0/rules.0".into());
         assert_eq!(
             reason(&first_config),
             nq_store::FullValidationReason::InapplicableWatermark
         );
-        // Undecodable.
+        // An edit that does not reseal the commitment is refused.
+        let mut edited = original.clone();
+        edited.frontier.evaluation_sequence += 1;
+        write_watermark_file(&first_config, &edited);
+        let error = Store::open(&first_config.database_path)
+            .err()
+            .expect("an edited watermark refuses");
+        assert!(error.to_string().contains("was edited"), "{error}");
+        // Other engine rules: the store prefix stays bounded, the history
+        // above the store is validated in full and recertified.
+        reseal(&|watermark| watermark.engine_rules = "nq-core/0.0.0/engine-rules.0".into());
+        let store = Store::open(&first_config.database_path).expect("store rules still apply");
+        assert!(store.applied_watermark().is_some());
+        assert!(engine_core_frontier(&store).is_none());
+        drop(store);
+        drop(reopen_with_test_identity(&first_config).expect("engine open recertifies"));
+        let recertified = read_watermark_file(&first_config);
+        assert_eq!(recertified.engine_rules, engine_validation_rules());
+        assert!(recertified.semantic.is_some());
+        // Undecodable or absent: full validation.
         fs::write(&first_watermark, b"{").expect("write garbage");
         assert_eq!(
             reason(&first_config),
             nq_store::FullValidationReason::UnreadableWatermark
         );
-        // Absent.
         fs::remove_file(&first_watermark).expect("remove");
         assert_eq!(
             reason(&first_config),
@@ -17439,7 +17628,9 @@ sys.stdout.write("\n")
     }
 
     #[test]
-    fn validation_watermark_detects_tampering_beyond_and_below_it() {
+    fn validation_watermark_refuses_changed_boundaries_and_full_validation_refuses_changed_prefix()
+    {
+        // A row beyond the watermark is validated on every open.
         let directory = tempfile::tempdir().expect("temporary directory");
         let Some((config, watcher)) = successor_fixture(directory.path(), "watermark-tamper", 2)
         else {
@@ -17447,8 +17638,6 @@ sys.stdout.write("\n")
         };
         full_validation_and_watermark(&config);
         let database = config.database_path.clone();
-
-        // A row beyond the watermark is validated on every open.
         let mut engine = reopen_with_test_identity(&config).expect("engine");
         engine
             .diagnostic_acquire_successor_local(&watcher, "watermark-tamper-beyond")
@@ -17464,80 +17653,152 @@ sys.stdout.write("\n")
             .err()
             .expect("tampering beyond is refused");
         assert!(error.to_string().contains("hash to"), "{error}");
-        drop(directory);
 
-        // Payload bytes at or below the watermark are re-proven by full
-        // validation (and by any replay or qualification whose closure reads
-        // them); an ordinary open proves only that the covered rows and
-        // their commitment identities are unchanged.
+        // Rewriting or removing a covered row that bounds the frontier
+        // (truncation, rollback, a watermark ahead of the store) refuses.
+        for (genesis, table, sql) in [
+            (
+                "watermark-boundary-rewrite",
+                "diagnostic_artifact_payloads",
+                "UPDATE diagnostic_artifact_payloads SET canonical_bytes = CAST('{}' AS BLOB)
+                 WHERE rowid = (SELECT MAX(rowid) FROM diagnostic_artifact_payloads)",
+            ),
+            (
+                "watermark-boundary-truncate",
+                "evaluation_watermarks",
+                "DELETE FROM evaluation_watermarks
+                 WHERE rowid = (SELECT MAX(rowid) FROM evaluation_watermarks)",
+            ),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let Some((config, _)) = successor_fixture(directory.path(), genesis, 2) else {
+                return;
+            };
+            full_validation_and_watermark(&config);
+            mutate_bypassing_triggers(&config.database_path, table, sql);
+            for error in [
+                Store::open(&config.database_path).err(),
+                Store::open_read_only(&config.database_path).err(),
+            ] {
+                let error = error.expect("a changed boundary refuses");
+                assert!(
+                    error.to_string().contains(&format!(
+                        "history table {table} no longer matches its validation watermark"
+                    )),
+                    "{error}"
+                );
+            }
+        }
+
+        // An untouched covered row is not re-read by an ordinary open. It is
+        // re-proven when an operation references it, and explicit full
+        // validation refuses any change since the certified prefix.
+        for (genesis, table, sql, replay_id, expected) in [
+            (
+                "watermark-inner-payload",
+                "diagnostic_artifact_payloads",
+                "UPDATE diagnostic_artifact_payloads SET canonical_bytes = CAST('{}' AS BLOB)
+                 WHERE rowid = (SELECT MIN(rowid) FROM diagnostic_artifact_payloads
+                                WHERE artifact_id IN (SELECT artifact_id
+                                                      FROM local_diagnostic_artifact_origins
+                                                      WHERE run_id IN (SELECT run_id
+                                                      FROM local_successor_acquisition_intents
+                                                      WHERE acquisition_id = 'watermark-inner-payload-0')))",
+                Some("watermark-inner-payload-0"),
+                "byte verification",
+            ),
+            (
+                "watermark-inner-rewrite",
+                "status_events",
+                "UPDATE status_events SET observed_at = '2001-01-01T00:00:00.000Z'
+                 WHERE status_sequence = (SELECT MIN(status_sequence) FROM status_events)",
+                None,
+                "changed at or below the frontier certified",
+            ),
+            (
+                "watermark-inner-delete",
+                "evaluation_watermarks",
+                "DELETE FROM evaluation_watermarks
+                 WHERE rowid = (SELECT MIN(rowid) FROM evaluation_watermarks)",
+                None,
+                "refused by full validation",
+            ),
+        ] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let Some((config, watcher)) = successor_fixture(directory.path(), genesis, 2) else {
+                return;
+            };
+            full_validation_and_watermark(&config);
+            let before = read_watermark_file(&config);
+            mutate_bypassing_triggers(&config.database_path, table, sql);
+            let store = Store::open(&config.database_path)
+                .expect("an untouched covered row is not re-read by an ordinary open");
+            assert!(store.applied_watermark().is_some());
+            drop(store);
+            if let Some(replay_id) = replay_id {
+                let engine = reopen_with_test_identity(&config).expect("engine open");
+                let error = engine
+                    .diagnostic_replay_local_successor(&watcher, replay_id)
+                    .err()
+                    .expect("a referenced closure re-reads its rows");
+                assert!(error.to_string().contains(expected), "{error}");
+                drop(engine);
+            }
+            let full = Store::open_validating_fully(&config.database_path)
+                .map_err(EngineError::from)
+                .and_then(|store| validate_fully_and_record(&store).map(|_| ()));
+            let error = full.err().expect("full validation refuses a changed prefix");
+            // A rewritten payload fails its own byte or provenance check; a
+            // coherent identity substitution or a removed row passes those and
+            // is caught by the certified content chain.
+            assert!(
+                expected != "changed at or below the frontier certified"
+                    || error.to_string().contains(expected),
+                "{genesis}: {error}"
+            );
+            if replay_id.is_none() {
+                assert_eq!(
+                    read_watermark_file(&config).frontier,
+                    before.frontier,
+                    "a refused full validation leaves the watermark"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validation_watermark_write_failure_is_reported_without_failing_the_open() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let Some((config, watcher)) = successor_fixture(directory.path(), "watermark-below", 2)
+        let Some((config, watcher)) = successor_fixture(directory.path(), "watermark-write", 1)
         else {
             return;
         };
-        full_validation_and_watermark(&config);
-        let database = config.database_path.clone();
-        mutate_bypassing_triggers(
-            &database,
-            "diagnostic_artifact_payloads",
-            "UPDATE diagnostic_artifact_payloads SET canonical_bytes = CAST('{}' AS BLOB)
-             WHERE artifact_id = (SELECT artifact_id FROM diagnostic_artifact_commitments
-                                  ORDER BY artifact_sequence DESC LIMIT 1)",
+        let watermark = nq_store::watermark_path(&config.database_path);
+        let established = read_watermark_file(&config);
+        assert!(
+            established.semantic.is_some(),
+            "the first engine open of a store without a watermark validates in full and \
+             establishes the semantic certification"
         );
-        let store = Store::open(&database).expect("covered payload is not re-read by an open");
-        assert!(matches!(
-            store.open_validation(),
-            nq_store::OpenValidation::SinceWatermark { .. }
-        ));
-        drop(store);
-        let engine = reopen_with_test_identity(&config).expect("engine open");
-        let replay = engine.diagnostic_replay_local_successor(&watcher, "watermark-below-1");
-        assert!(replay.is_err(), "replay re-proves its own artifact closure");
+        fs::remove_file(&watermark).expect("remove");
+        fs::create_dir(&watermark).expect("make the watermark path unwritable");
+        let engine = reopen_with_test_identity(&config).expect("an unwritable watermark warns");
+        engine
+            .diagnostic_replay_local_successor(&watcher, "watermark-write-0")
+            .expect("replay");
         drop(engine);
-        let full = Store::open_validating_fully(&database)
-            .map_err(EngineError::from)
-            .and_then(|store| validate_fully_and_record(&store).map(|_| ()));
-        assert!(
-            full.is_err(),
-            "full validation re-proves covered payload bytes"
-        );
-
-        // Substituting a covered commitment identity changes the digest.
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let Some((config, _)) = successor_fixture(directory.path(), "watermark-identity", 2) else {
-            return;
-        };
-        full_validation_and_watermark(&config);
-        mutate_bypassing_triggers(
-            &config.database_path,
-            "status_events",
-            "UPDATE status_events SET status_event_id = 'substituted-status-event'
-             WHERE status_sequence = (SELECT MIN(status_sequence) FROM status_events)",
-        );
-        let error = Store::open(&config.database_path)
-            .err()
-            .expect("identity substitution below the watermark fails closed");
-        assert!(error.to_string().contains("commitment digest"), "{error}");
-
-        // Removing a covered row changes its table's count.
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let Some((config, _)) = successor_fixture(directory.path(), "watermark-delete", 2) else {
-            return;
-        };
-        full_validation_and_watermark(&config);
-        mutate_bypassing_triggers(
-            &config.database_path,
-            "evaluation_watermarks",
-            "DELETE FROM evaluation_watermarks
-             WHERE rowid = (SELECT MIN(rowid) FROM evaluation_watermarks)",
-        );
-        let error = Store::open(&config.database_path)
-            .err()
-            .expect("removal below the watermark fails closed");
-        assert!(
-            error.to_string().contains("validation watermark"),
-            "{error}"
-        );
+        assert!(watermark.is_dir(), "nothing replaced the unwritable path");
+        let leftovers = fs::read_dir(directory.path())
+            .expect("list")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0, "a failed write leaves no temporary file");
+        fs::remove_dir(&watermark).expect("restore");
+        // Read-only opens never write one.
+        let store = Store::open_read_only(&config.database_path).expect("read-only");
+        drop(store);
+        assert!(!watermark.exists());
     }
 
     /// Per-open validation cost no longer grows with retained history.
