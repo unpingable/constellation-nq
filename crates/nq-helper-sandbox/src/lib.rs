@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use nix::fcntl::AtFlags;
-use nix::unistd::{Gid, Uid, User, chown, fchownat, getegid, geteuid};
+use nix::unistd::{chown, fchownat, getegid, geteuid, Gid, Uid, User};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -40,9 +40,6 @@ const AUDIT_ARCH_NATIVE: u32 = 0xc000_003e;
 const AUDIT_ARCH_NATIVE: u32 = 0xc000_00b7;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("nq-helper-sandbox supports only Linux AMD64 and ARM64 in v1");
-const MAX_XATTR_NAME_BYTES: usize = 64 * 1024;
-const POSIX_ACCESS_ACL: &[u8] = b"system.posix_acl_access";
-const POSIX_DEFAULT_ACL: &[u8] = b"system.posix_acl_default";
 
 /// Exact local account identity bound into an admission and helper launch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -394,78 +391,45 @@ pub fn child_has_exited(pid: u32) -> io::Result<bool> {
 /// group, and other mode bits. An extended ACL could grant write access that
 /// those bits do not describe, so supported helper/runtime paths must not use
 /// one. Filesystems that report ACL/xattr support as unavailable are accepted;
-/// all other inspection errors fail closed. The xattr-name list is bounded
-/// before allocation.
+/// all other inspection errors fail closed. Unrelated attribute names are not
+/// part of this contract; descriptor-based exact ACL queries require no allocation.
 ///
 /// # Errors
 ///
-/// Returns a permission error when a POSIX ACL is present, an invalid-data
-/// error for an oversized or malformed xattr-name list, or the underlying
+/// Returns a permission error when a POSIX ACL is present, or the underlying
 /// descriptor inspection error.
 pub fn require_no_posix_acl(file: &File) -> io::Result<()> {
-    let descriptor = file.as_raw_fd();
-    // SAFETY: `flistxattr` receives a valid borrowed descriptor and either a
-    // null zero-length probe or the exact writable allocation below. No
-    // pointer escapes the call.
-    let required = unsafe { libc::flistxattr(descriptor, std::ptr::null_mut(), 0) };
-    if required < 0 {
-        let error = io::Error::last_os_error();
-        if xattrs_unavailable(&error) {
-            return Ok(());
+    // Inspect only the attributes relevant to the mode-bits-only permission
+    // contract. A name-list size probe can include names hidden from this UID
+    // on overlay filesystems; list length equality is not an ACL property.
+    for name in [
+        b"system.posix_acl_access\0".as_slice(),
+        b"system.posix_acl_default\0".as_slice(),
+    ] {
+        // SAFETY: valid borrowed descriptor, NUL-terminated constant name,
+        // null value buffer with zero length. No pointer escapes the call.
+        let result = unsafe {
+            libc::fgetxattr(
+                file.as_raw_fd(),
+                name.as_ptr().cast(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if result >= 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "POSIX access/default ACL is outside the supported deployment policy",
+            ));
         }
-        return Err(error);
-    }
-    let required = usize::try_from(required)
-        .map_err(|_| io::Error::other("negative xattr-name list length"))?;
-    if required > MAX_XATTR_NAME_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("xattr-name list exceeds {MAX_XATTR_NAME_BYTES} bytes"),
-        ));
-    }
-    if required == 0 {
-        return Ok(());
-    }
-    let mut names = vec![0_u8; required];
-    // SAFETY: `names` is writable for exactly `names.len()` bytes for the
-    // duration of this call, and the descriptor remains borrowed and valid.
-    let actual = unsafe {
-        libc::flistxattr(
-            descriptor,
-            names.as_mut_ptr().cast::<libc::c_char>(),
-            names.len(),
-        )
-    };
-    if actual < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let actual =
-        usize::try_from(actual).map_err(|_| io::Error::other("negative xattr-name list length"))?;
-    if actual != names.len() || names.last() != Some(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "xattr-name list changed or is malformed",
-        ));
-    }
-    if contains_posix_acl(&names) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "POSIX access/default ACL is outside the supported deployment policy",
-        ));
+        let error = io::Error::last_os_error();
+        if !error.raw_os_error().is_some_and(|code| {
+            code == libc::ENODATA || code == libc::ENOTSUP || code == libc::EOPNOTSUPP
+        }) {
+            return Err(error);
+        }
     }
     Ok(())
-}
-
-fn xattrs_unavailable(error: &io::Error) -> bool {
-    error
-        .raw_os_error()
-        .is_some_and(|code| code == libc::ENOTSUP || code == libc::EOPNOTSUPP)
-}
-
-fn contains_posix_acl(names: &[u8]) -> bool {
-    names
-        .split(|byte| *byte == 0)
-        .any(|name| name == POSIX_ACCESS_ACL || name == POSIX_DEFAULT_ACL)
 }
 
 /// Grant a watcher primary group write/traverse access to a freshly created
@@ -908,6 +872,61 @@ mod tests {
             )));
         }
         String::from_utf8(output.stdout).map_err(io::Error::other)
+    }
+
+    #[test]
+    fn acl_check_accepts_no_acl_and_unrelated_xattrs_but_refuses_extended_acl() {
+        let file = tempfile::tempfile().unwrap();
+        require_no_posix_acl(&file).unwrap();
+        let name = b"user.nq_test\0";
+        let value = b"ordinary metadata";
+        // SAFETY: valid borrowed fd and constant name/value buffers.
+        let rc = unsafe {
+            libc::fsetxattr(
+                file.as_raw_fd(),
+                name.as_ptr().cast(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+            )
+        };
+        if rc < 0 {
+            let e = io::Error::last_os_error();
+            assert!(
+                e.raw_os_error()
+                    .is_some_and(|c| c == libc::ENOTSUP || c == libc::EOPNOTSUPP),
+                "{e}"
+            );
+            return;
+        }
+        require_no_posix_acl(&file).unwrap();
+        let mut acl = 2_u32.to_le_bytes().to_vec();
+        for (tag, permission, id) in [
+            (1_u16, 6_u16, u32::MAX),
+            (2, 4, 65533),
+            (4, 0, u32::MAX),
+            (16, 4, u32::MAX),
+            (32, 0, u32::MAX),
+        ] {
+            acl.extend(tag.to_le_bytes());
+            acl.extend(permission.to_le_bytes());
+            acl.extend(id.to_le_bytes());
+        }
+        // SAFETY: valid borrowed fd and exact Linux POSIX ACL attribute buffer.
+        let rc = unsafe {
+            libc::fsetxattr(
+                file.as_raw_fd(),
+                b"system.posix_acl_access\0".as_ptr().cast(),
+                acl.as_ptr().cast(),
+                acl.len(),
+                0,
+            )
+        };
+        assert_eq!(rc, 0, "{}", io::Error::last_os_error());
+        assert_eq!(
+            require_no_posix_acl(&file).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]
