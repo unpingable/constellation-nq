@@ -67,6 +67,15 @@ The repository implements the stage-one operational spine:
   exact rematerialization. The only live provider kind is the existing
   NQ-controlled local helper; this is not a remote or provider-neutral intake
   service;
+- bounded store validation: every open checks schema identity and shape; an
+  applicable validation watermark (a digest-bound per-table history frontier
+  in `<database>.validation-watermark.json`) limits history validation to
+  rows beyond the frontier after proving the covered rows unchanged; full
+  validation (`quick_check`, foreign keys, every history row, the complete
+  semantic history) runs without an applicable watermark, on `init`, after
+  `admin upgrade`, and through `nq admin validate --full`. Payload bytes of
+  covered rows are re-proven only by full validation or by a closure that
+  reads them; see [Operations](OPERATIONS.md#store-validation-and-the-validation-watermark);
 - one atomic collection-completion boundary: the provider attempt, local
   watcher run, exact native outcome and raw capture, raw submission when one
   exists, admission or linked refusal, report, evaluations/findings, status,
