@@ -4470,6 +4470,36 @@ pub struct NotificationDeliveryStatus {
     pub event_count: u32,
     pub delivery_state: String,
 }
+/// Read-time counts over retained notification delivery custody.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct NotificationDeliverySummary {
+    pub pending: u64,
+    pub refused: u64,
+    pub failed: u64,
+    pub unknown: u64,
+    pub accepted: u64,
+    pub newest_failure: Option<NotificationDeliveryFailure>,
+    pub newest_accepted_at: Option<String>,
+}
+
+impl NotificationDeliverySummary {
+    /// Number of retained delivery records.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.pending + self.refused + self.failed + self.unknown + self.accepted
+    }
+}
+
+/// The newest failed or uncertain delivery event; a claim without a terminal
+/// outcome is reported as uncertain.
+#[derive(Clone, Debug, Serialize)]
+pub struct NotificationDeliveryFailure {
+    pub notification_id: String,
+    pub outcome: String,
+    pub occurred_at: String,
+    pub detail_json: Vec<u8>,
+}
+
 /// Bounded status projection for legacy/general outbox rows not represented by
 /// the newer delivery-intent contract. Callers must treat absent or nonterminal
 /// attempts as ineligible rather than infer delivery.
@@ -6150,6 +6180,87 @@ impl Store {
         };
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
+    }
+
+    /// Read one retained delivery intent by its notification identity.
+    pub fn notification_delivery_intent_by_id(
+        &self,
+        notification_id: &str,
+    ) -> Result<Option<CanonicalDocument>, StoreError> {
+        let bytes: Option<Vec<u8>> = self
+            .connection
+            .query_row(
+                "SELECT intent_json FROM notification_delivery_intents WHERE notification_id=?1",
+                [notification_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        bytes
+            .map(CanonicalDocument::from_canonical_bytes)
+            .transpose()
+    }
+
+    /// Summarize retained delivery custody at read time. It derives counts
+    /// from the existing status view and the newest uncertain or failed event;
+    /// it records nothing.
+    pub fn notification_delivery_summary(&self) -> Result<NotificationDeliverySummary, StoreError> {
+        let mut summary = NotificationDeliverySummary::default();
+        // Older supported stores, read before migration, have no delivery custody.
+        let has_custody: bool = self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'view' AND name = 'public_notification_delivery_status_v1')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_custody {
+            return Ok(summary);
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT event_count, delivery_state, COUNT(*) FROM public_notification_delivery_status_v1 GROUP BY event_count, delivery_state",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, u32>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (event_count, state, count) = row?;
+            let slot = match notification_delivery_state(event_count, state).as_str() {
+                "pending" => &mut summary.pending,
+                "refused" => &mut summary.refused,
+                "failed" => &mut summary.failed,
+                "unknown" => &mut summary.unknown,
+                "accepted" => &mut summary.accepted,
+                other => {
+                    return Err(StoreError::Invariant(format!(
+                        "unsupported notification delivery state {other}"
+                    )));
+                }
+            };
+            *slot += count;
+        }
+        summary.newest_failure = self
+            .connection
+            .query_row(
+                "SELECT e.notification_id, CASE WHEN e.outcome = 'claimed' THEN 'unknown' ELSE e.outcome END, e.occurred_at, CASE WHEN e.outcome = 'claimed' THEN CAST('{\"reason\":\"claimed_without_terminal_outcome\"}' AS BLOB) ELSE e.detail_json END FROM notification_delivery_events AS e WHERE e.outcome IN ('failed', 'unknown') OR (e.outcome = 'claimed' AND NOT EXISTS (SELECT 1 FROM notification_delivery_events AS t WHERE t.notification_id = e.notification_id AND t.event_number > e.event_number)) ORDER BY e.occurred_at DESC, e.rowid DESC LIMIT 1",
+                [],
+                |row| {
+                    Ok(NotificationDeliveryFailure {
+                        notification_id: row.get(0)?,
+                        outcome: row.get(1)?,
+                        occurred_at: row.get(2)?,
+                        detail_json: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        summary.newest_accepted_at = self.connection.query_row(
+            "SELECT MAX(occurred_at) FROM notification_delivery_events WHERE outcome = 'accepted'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(summary)
     }
 
     /// Page every legacy/general outbox status without unbounded materialization.

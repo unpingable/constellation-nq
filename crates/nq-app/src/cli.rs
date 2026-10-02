@@ -461,6 +461,21 @@ pub enum NotificationCommand {
         #[arg(long)]
         notification_id: Option<String>,
     },
+    /// Submit a new record for the same condition as a retained pagerduty (v2)
+    /// record that was not accepted, under a new event identity. The original
+    /// record keeps its outcome; the shared dedup key makes the send
+    /// idempotent at the destination.
+    Resubmit {
+        /// Retained record to re-derive the intent from.
+        #[arg(long)]
+        notification_id: String,
+        /// New event identity for the resubmitted record.
+        #[arg(long)]
+        stable_event_id: String,
+        /// Permit the one network request.
+        #[arg(long)]
+        enable_network: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1437,6 +1452,16 @@ async fn notification_command(
             &notification::inspect(&config, notification_id.as_deref())?,
             json_output,
         ),
+        NotificationCommand::Resubmit {
+            notification_id,
+            stable_event_id,
+            enable_network,
+        } => {
+            let result =
+                notification::resubmit(&config, &notification_id, &stable_event_id, enable_network)
+                    .await?;
+            print_value(&result, json_output)
+        }
     }
 }
 

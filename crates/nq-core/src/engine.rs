@@ -8802,6 +8802,7 @@ pub fn status_snapshot_v3(store: &Store) -> Result<StatusSnapshotV3, EngineError
             },
         });
     }
+    project_notification_delivery_status(store, &mut components)?;
     components.sort_by(|left, right| (&left.kind, &left.id).cmp(&(&right.kind, &right.id)));
     Ok(StatusSnapshotV3 {
         schema: STATUS_SNAPSHOT_V3_SCHEMA.into(),
@@ -10221,6 +10222,80 @@ fn status_from_row_v2(
         &row.detail_json,
         &row.observed_at,
     )
+}
+
+/// Replace the one-time `notification/outbox` initialization row with counts
+/// read from retained delivery custody when any delivery record exists. This
+/// is computed at export time and writes nothing. Only closed reason fields of
+/// the newest failure are projected; free-text destination messages stay in
+/// `notification inspect`.
+fn project_notification_delivery_status(
+    store: &Store,
+    components: &mut Vec<ComponentStatusV3>,
+) -> Result<(), EngineError> {
+    let summary = store.notification_delivery_summary()?;
+    if summary.total() == 0 {
+        return Ok(());
+    }
+    let newest_failure = match &summary.newest_failure {
+        Some(failure) => {
+            let detail: serde_json::Value =
+                serde_json::from_slice(&failure.detail_json).map_err(|_| {
+                    EngineError::Invariant("notification event detail is not JSON".into())
+                })?;
+            let mut projected = serde_json::Map::new();
+            projected.insert("notification_id".into(), json!(failure.notification_id));
+            projected.insert("outcome".into(), json!(failure.outcome));
+            projected.insert("occurred_at".into(), json!(failure.occurred_at));
+            for field in ["reason", "http_status", "retry_class"] {
+                if let Some(value) = detail.get(field)
+                    && (value.is_u64() || value.as_str().is_some_and(|text| text.len() <= 64))
+                {
+                    projected.insert(field.into(), value.clone());
+                }
+            }
+            serde_json::Value::Object(projected)
+        }
+        None => serde_json::Value::Null,
+    };
+    let failure_unresolved = summary.newest_failure.as_ref().is_some_and(|failure| {
+        summary
+            .newest_accepted_at
+            .as_deref()
+            .is_none_or(|accepted| failure.occurred_at.as_str() > accepted)
+    });
+    let (state, code) = if failure_unresolved {
+        (HealthState::Degraded, "delivery_failure_unresolved")
+    } else if summary.pending > 0 {
+        (HealthState::Degraded, "delivery_pending")
+    } else {
+        (HealthState::Healthy, "delivery_custody_current")
+    };
+    components.retain(|component| {
+        !(component.kind == ComponentKind::Notification && component.id == "outbox")
+    });
+    components.push(ComponentStatusV3 {
+        kind: ComponentKind::Notification,
+        id: "outbox".into(),
+        state,
+        code: code.into(),
+        detail: ComponentStatusDetailV3::Diagnostic {
+            value: json!({
+                "source": "retained_delivery_custody_at_export",
+                "counts": {
+                    "pending": summary.pending,
+                    "refused": summary.refused,
+                    "failed": summary.failed,
+                    "unknown": summary.unknown,
+                    "accepted": summary.accepted,
+                },
+                "newest_failure": newest_failure,
+                "newest_accepted_at": summary.newest_accepted_at,
+            }),
+        },
+        observed_at: Utc::now(),
+    });
+    Ok(())
 }
 
 fn status_from_row_v3(

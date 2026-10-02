@@ -13,7 +13,7 @@ use nq_store::{
     NotificationDeliveryRetention, NotificationInput, Store,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::future::Future;
@@ -24,6 +24,40 @@ use std::time::Duration;
 
 const MAX_INTENT_BYTES: usize = 32_768;
 const LOCAL_INBOX_FILE_MAX_BYTES: usize = 4_096;
+const INTENT_V1: &str = "nq.notification_delivery_intent.v1";
+const INTENT_V2: &str = "nq.notification_delivery_intent.v2";
+const PAGERDUTY_ENQUEUE_URL: &str = "https://events.pagerduty.com/v2/enqueue";
+const PAGERDUTY_DETAILS_MAX_BYTES: usize = 4_096;
+const PAGERDUTY_COMPONENTS: [&str; 6] = [
+    "nq",
+    "host_posture",
+    "nightshift",
+    "docket",
+    "ag",
+    "service",
+];
+/// The rule anchors of the beta alert registry (page and warn), excluding the
+/// retired `docket-not-ready` anchor.
+const PAGERDUTY_RULES: [&str; 17] = [
+    "nq-no-fresh-acquisition",
+    "host-posture-unknown",
+    "nightshift-recurrence-missing",
+    "docket-unsettled",
+    "ag-executor-unavailable",
+    "service-down",
+    "host-disk",
+    "nq-latency-near-bound",
+    "nq-open-cost-growing",
+    "nq-pending-acquisition",
+    "host-posture-refusals",
+    "host-posture-retention",
+    "nightshift-evidence-stale",
+    "nightshift-cycle-slow",
+    "docket-reconciliation-lag",
+    "ag-repeated-refusals",
+    "build-identity",
+];
+const V2_FIELDS: [&str; 5] = ["action", "condition", "severity", "runbook_url", "details"];
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +76,202 @@ pub(crate) struct Intent {
     owner_receipt: Option<Value>,
 }
 
+/// The stable condition a `PagerDuty` alert is about. It deliberately excludes
+/// event, evidence and time identities so that trigger, repeat and resolve of
+/// the same condition share one derived dedup key.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Condition {
+    site: String,
+    component: String,
+    rule: String,
+    target_class: Option<String>,
+}
+
+/// The fields `nq.notification_delivery_intent.v2` adds to the v1 intent.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PagerDutyFields {
+    action: String,
+    condition: Condition,
+    severity: String,
+    runbook_url: Option<String>,
+    details: Option<Value>,
+}
+
+/// Derive the `PagerDuty` dedup key. It is never supplied by the caller.
+fn dedup_key(condition: &Condition) -> String {
+    let mut key = format!(
+        "constellation:{}:{}:{}",
+        condition.site, condition.component, condition.rule
+    );
+    if let Some(target_class) = &condition.target_class {
+        key.push(':');
+        key.push_str(target_class);
+    }
+    key
+}
+
+/// Name the per-event identity a condition value appears to carry, if any.
+fn per_event_identity(value: &str) -> Option<&'static str> {
+    let lower = value.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    if lower.contains("sha256") {
+        return Some("a digest");
+    }
+    let uuid = |window: &[u8]| {
+        window.iter().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+    };
+    if bytes.windows(36).any(uuid) {
+        return Some("a UUID");
+    }
+    let date = |window: &[u8]| {
+        window.iter().enumerate().all(|(index, byte)| {
+            if matches!(index, 4 | 7) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_digit()
+            }
+        })
+    };
+    if bytes.windows(10).any(date) {
+        return Some("a date");
+    }
+    let mut hex_run = 0usize;
+    let mut digit_run = 0usize;
+    for byte in bytes {
+        hex_run = if byte.is_ascii_hexdigit() {
+            hex_run + 1
+        } else {
+            0
+        };
+        digit_run = if byte.is_ascii_digit() {
+            digit_run + 1
+        } else {
+            0
+        };
+        if hex_run >= 32 {
+            return Some("a hexadecimal identifier");
+        }
+        if digit_run >= 8 {
+            return Some("a numeric timestamp or identifier");
+        }
+    }
+    if bytes.iter().all(u8::is_ascii_digit) {
+        return Some("a numeric identifier");
+    }
+    None
+}
+
+fn condition_token(label: &str, value: &str, maximum: usize) -> Result<()> {
+    if let Some(kind) = per_event_identity(value) {
+        bail!(
+            "notification condition {label} is refused: it looks like {kind}; a condition names a stable class, not an event"
+        );
+    }
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > maximum
+        || !bytes[0].is_ascii_alphanumeric()
+        || !bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+    {
+        bail!("notification condition {label} must be 1..={maximum} characters of [a-z0-9._-]");
+    }
+    Ok(())
+}
+
+fn secret_like_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "routing_key",
+        "token",
+        "secret",
+        "password",
+        "api_key",
+        "authorization",
+        "credential",
+    ]
+    .iter()
+    .any(|name| key.contains(name))
+}
+
+fn reject_secret_like_keys(value: &Value) -> Result<()> {
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                if secret_like_key(key) {
+                    bail!("notification details must not carry credential-like field {key:?}");
+                }
+                reject_secret_like_keys(nested)?;
+            }
+        }
+        Value::Array(items) => {
+            for nested in items {
+                reject_secret_like_keys(nested)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_pagerduty_fields(fields: &PagerDutyFields) -> Result<()> {
+    if !matches!(fields.action.as_str(), "trigger" | "resolve") {
+        bail!("notification action must be trigger or resolve");
+    }
+    if !matches!(
+        fields.severity.as_str(),
+        "critical" | "error" | "warning" | "info"
+    ) {
+        bail!("notification severity must be critical, error, warning or info");
+    }
+    let condition = &fields.condition;
+    condition_token("site", &condition.site, 64)?;
+    condition_token("component", &condition.component, 64)?;
+    condition_token("rule", &condition.rule, 64)?;
+    if !PAGERDUTY_COMPONENTS.contains(&condition.component.as_str()) {
+        bail!("notification condition component is not in the closed component set");
+    }
+    if !PAGERDUTY_RULES.contains(&condition.rule.as_str()) {
+        bail!("notification condition rule is not a beta alert registry anchor");
+    }
+    if let Some(target_class) = &condition.target_class {
+        condition_token("target_class", target_class, 48)?;
+    }
+    if let Some(url) = &fields.runbook_url
+        && (!url.starts_with("https://")
+            || url.len() > 1024
+            || url.chars().any(|c| c.is_control() || c.is_whitespace()))
+    {
+        bail!("notification runbook_url must be an https URL of at most 1024 bytes");
+    }
+    if let Some(details) = &fields.details {
+        let Some(map) = details.as_object() else {
+            bail!("notification details must be a JSON object");
+        };
+        if map.contains_key("constellation") {
+            bail!("notification details must not use the reserved constellation key");
+        }
+        if CanonicalDocument::from_serializable(details)?
+            .as_bytes()
+            .len()
+            > PAGERDUTY_DETAILS_MAX_BYTES
+        {
+            bail!("notification details exceed {PAGERDUTY_DETAILS_MAX_BYTES} bytes");
+        }
+        reject_secret_like_keys(details)?;
+    }
+    Ok(())
+}
+
 fn bounded(label: &str, value: &str, maximum: usize) -> Result<()> {
     if value.is_empty() || value.len() > maximum || value.chars().any(char::is_control) {
         bail!("notification {label} must be 1..={maximum} non-control bytes");
@@ -56,7 +286,9 @@ fn required_json_string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
         .with_context(|| format!("Nightshift {field} is missing"))
 }
 
-fn read_intent(path: &std::path::Path) -> Result<(Intent, CanonicalDocument)> {
+fn read_intent(
+    path: &std::path::Path,
+) -> Result<(Intent, Option<PagerDutyFields>, CanonicalDocument)> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
@@ -81,15 +313,43 @@ fn read_intent(path: &std::path::Path) -> Result<(Intent, CanonicalDocument)> {
     if document.as_bytes() != bytes {
         bail!("notification intent must be canonical JSON");
     }
-    let intent = parse_submitted_intent(value)?;
-    Ok((intent, document))
+    let (intent, pager) = parse_submitted(value)?;
+    Ok((intent, pager, document))
 }
 
 fn parse_submitted_intent(value: Value) -> Result<Intent> {
-    let intent: Intent = serde_json::from_value(value)?;
-    if intent.schema != "nq.notification_delivery_intent.v1" {
-        bail!("unsupported notification intent schema");
+    parse_submitted(value).map(|(intent, _)| intent)
+}
+
+/// Parse a v1 intent, or a v2 intent as its v1 fields plus the `PagerDuty`
+/// fields. Both keep closed field sets.
+fn parse_submitted(value: Value) -> Result<(Intent, Option<PagerDutyFields>)> {
+    match value.get("schema").and_then(Value::as_str) {
+        Some(INTENT_V1) => Ok((parse_intent_fields(value, 512)?, None)),
+        Some(INTENT_V2) => {
+            let mut common = value
+                .as_object()
+                .context("notification intent is not an object")?
+                .clone();
+            let mut added = Map::new();
+            for field in V2_FIELDS {
+                if let Some(value) = common.remove(field) {
+                    added.insert(field.to_owned(), value);
+                }
+            }
+            let pager: PagerDutyFields = serde_json::from_value(Value::Object(added))?;
+            validate_pagerduty_fields(&pager)?;
+            Ok((
+                parse_intent_fields(Value::Object(common), 1024)?,
+                Some(pager),
+            ))
+        }
+        _ => bail!("unsupported notification intent schema"),
     }
+}
+
+fn parse_intent_fields(value: Value, summary_maximum: usize) -> Result<Intent> {
+    let intent: Intent = serde_json::from_value(value)?;
     for (name, value, maximum) in [
         ("stable_event_id", intent.stable_event_id.as_str(), 256),
         (
@@ -104,7 +364,7 @@ fn parse_submitted_intent(value: Value) -> Result<Intent> {
             intent.destination_identity.as_str(),
             256,
         ),
-        ("summary", intent.summary.as_str(), 512),
+        ("summary", intent.summary.as_str(), summary_maximum),
         (
             "inspection_reference",
             intent.inspection_reference.as_str(),
@@ -461,8 +721,212 @@ fn render(route: &NotificationRouteConfig, intent: &Intent) -> Result<CanonicalD
         NotificationTransportKind::LocalFile => {
             bail!("local inbox uses its own bounded message envelope")
         }
+        NotificationTransportKind::PagerDuty => {
+            bail!("pagerduty uses its own event envelope")
+        }
     };
     Ok(CanonicalDocument::from_serializable(&payload)?)
+}
+
+/// Render the retained `PagerDuty` event. The routing key is never part of
+/// these bytes; it is added only to the request body at dispatch.
+fn render_pagerduty(
+    intent: &Intent,
+    pager: &PagerDutyFields,
+    intent_document: &CanonicalDocument,
+) -> Result<CanonicalDocument> {
+    let key = dedup_key(&pager.condition);
+    let event = if pager.action == "resolve" {
+        json!({"event_action":"resolve","dedup_key":key})
+    } else {
+        let mut custom_details = match &pager.details {
+            Some(Value::Object(details)) => details.clone(),
+            _ => Map::new(),
+        };
+        custom_details.insert(
+            "constellation".into(),
+            json!({
+                "schema":intent.schema,
+                "stable_event_id":intent.stable_event_id,
+                "transition_id":intent.transition_id,
+                "intent_digest":intent_document.digest(),
+                "inspection_reference":intent.inspection_reference,
+            }),
+        );
+        let mut payload = json!({
+            "summary":intent.summary,
+            "source":pager.condition.site,
+            "severity":pager.severity,
+            "component":pager.condition.component,
+            "group":pager.condition.rule,
+            "custom_details":custom_details,
+        });
+        if let Some(target_class) = &pager.condition.target_class {
+            payload["class"] = json!(target_class);
+        }
+        let mut event = json!({"event_action":"trigger","dedup_key":key,"payload":payload});
+        if let Some(url) = &pager.runbook_url {
+            event["links"] = json!([{"href":url,"text":"Runbook"}]);
+        }
+        event
+    };
+    Ok(CanonicalDocument::from_serializable(&event)?)
+}
+
+fn valid_routing_key(key: &str) -> bool {
+    key.len() == 32 && key.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Add the routing key to the request bytes only.
+fn inject_routing_key(retained: &[u8], routing_key: &str) -> Result<Vec<u8>> {
+    let mut event: Map<String, Value> =
+        serde_json::from_slice(retained).context("retained PagerDuty event is not an object")?;
+    event.insert("routing_key".into(), Value::String(routing_key.to_owned()));
+    Ok(serde_json::to_vec(&event)?)
+}
+
+/// Bound destination text and mask the routing key or any key-shaped run.
+fn redact_destination_text(text: &str, routing_key: &str) -> String {
+    let replaced = if routing_key.is_empty() {
+        text.to_owned()
+    } else {
+        text.replace(routing_key, "<redacted>")
+    };
+    let mut output = String::new();
+    let mut run = String::new();
+    let flush = |run: &mut String, output: &mut String| {
+        if run.len() >= 32 {
+            output.push_str("<redacted>");
+        } else {
+            output.push_str(run);
+        }
+        run.clear();
+    };
+    for character in replaced.chars().filter(|c| !c.is_control()) {
+        if character.is_ascii_alphanumeric() {
+            run.push(character);
+        } else {
+            flush(&mut run, &mut output);
+            output.push(character);
+        }
+    }
+    flush(&mut run, &mut output);
+    output.chars().take(256).collect()
+}
+
+async fn read_bounded_body(mut response: reqwest::Response, maximum: usize) -> Option<Vec<u8>> {
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() + chunk.len() > maximum {
+                    return None;
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => return Some(body),
+            Err(_) => return None,
+        }
+    }
+}
+
+fn reported(outcome: &'static str, detail: Value) -> TransportResult {
+    TransportResult::Reported { outcome, detail }
+}
+
+/// One Events API v2 request. HTTP 202 with `status: success` is accepted;
+/// 429/5xx and refused connections are retryable failures; other 4xx are
+/// permanent failures; a timeout or loss after dispatch is unknown. Nothing
+/// here retries.
+async fn pagerduty_post(
+    client: &reqwest::Client,
+    url: &str,
+    routing_key: &str,
+    retained: &[u8],
+    max_response_bytes: usize,
+) -> Result<TransportResult> {
+    let body = inject_routing_key(retained, routing_key)?;
+    let response = match client
+        .post(url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) if error.is_connect() => {
+            return Ok(reported(
+                "failed",
+                json!({"reason":"connect_failed","retry_class":"retryable"}),
+            ));
+        }
+        Err(error) if error.is_timeout() => {
+            return Ok(reported(
+                "unknown",
+                json!({"reason":"timeout_after_dispatch","retry_class":"resubmit_safe"}),
+            ));
+        }
+        Err(_) => {
+            return Ok(reported(
+                "unknown",
+                json!({"reason":"transport_error_or_response_loss","retry_class":"resubmit_safe"}),
+            ));
+        }
+    };
+    let status = response.status().as_u16();
+    let parsed = read_bounded_body(response, max_response_bytes)
+        .await
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let mut detail = Map::new();
+    detail.insert("http_status".into(), json!(status));
+    let pagerduty_status = parsed
+        .as_ref()
+        .and_then(|body| body.get("status"))
+        .and_then(Value::as_str);
+    if let Some(body) = &parsed {
+        if let Some(text) = pagerduty_status {
+            detail.insert(
+                "pagerduty_status".into(),
+                json!(redact_destination_text(text, routing_key)),
+            );
+        }
+        if let Some(message) = body.get("message").and_then(Value::as_str) {
+            detail.insert(
+                "pagerduty_message".into(),
+                json!(redact_destination_text(message, routing_key)),
+            );
+        }
+        if let Some(errors) = body.get("errors").and_then(Value::as_array) {
+            let errors: Vec<String> = errors
+                .iter()
+                .filter_map(Value::as_str)
+                .take(5)
+                .map(|error| redact_destination_text(error, routing_key))
+                .collect();
+            detail.insert("pagerduty_errors".into(), json!(errors));
+        }
+    } else {
+        detail.insert("response_body".into(), json!("unparsed_or_over_limit"));
+    }
+    let (outcome, reason, retry_class) = match status {
+        202 if pagerduty_status == Some("success") => ("accepted", None, None),
+        200..=299 => (
+            "unknown",
+            Some("success_not_confirmed"),
+            Some("resubmit_safe"),
+        ),
+        429 => ("failed", Some("rate_limited"), Some("retryable")),
+        500..=599 => ("failed", Some("server_error"), Some("retryable")),
+        400..=499 => ("failed", Some("rejected"), Some("permanent")),
+        _ => ("failed", Some("unexpected_status"), Some("permanent")),
+    };
+    if let Some(reason) = reason {
+        detail.insert("reason".into(), json!(reason));
+    }
+    if let Some(retry_class) = retry_class {
+        detail.insert("retry_class".into(), json!(retry_class));
+    }
+    Ok(reported(outcome, Value::Object(detail)))
 }
 
 fn local_inbox_binding(
@@ -594,7 +1058,10 @@ fn deliver_local_with<O: LocalInboxWriteOperation>(
     route_ref: &str,
     operation: &O,
 ) -> Result<Value> {
-    let (intent, intent_document) = read_intent(intent_path)?;
+    let (intent, pager, intent_document) = read_intent(intent_path)?;
+    if pager.is_some() {
+        bail!("nq.notification_delivery_intent.v2 is accepted only by pagerduty routes");
+    }
     if intent.route_reference != route_ref {
         bail!("CLI route does not match intent route reference");
     }
@@ -700,11 +1167,32 @@ fn deliver_local_with<O: LocalInboxWriteOperation>(
     )
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum TransportResult {
     Accepted(u16),
     Failed(u16),
     Unknown,
+    /// A transport that classifies its own bounded, secret-free result.
+    Reported {
+        outcome: &'static str,
+        detail: Value,
+    },
+}
+
+fn retain_refusal(
+    store: &mut Store,
+    notification_id: &str,
+    at: String,
+    reason: &str,
+) -> Result<Value> {
+    store.append_notification_delivery_event(&NotificationDeliveryEventInput {
+        notification_id: notification_id.to_owned(),
+        event_number: 1,
+        occurred_at: at,
+        outcome: "refused".into(),
+        detail: CanonicalDocument::from_serializable(&json!({"reason":reason}))?,
+    })?;
+    Ok(json!({"notification_id": notification_id, "delivery_state":"refused"}))
 }
 
 async fn submit_with_dispatch<R, P, F, Fut>(
@@ -721,7 +1209,79 @@ where
     F: FnOnce(String, Vec<u8>, u64) -> Fut,
     Fut: Future<Output = Result<TransportResult>>,
 {
-    let (intent, intent_document) = read_intent(intent_path)?;
+    let (intent, pager, intent_document) = read_intent(intent_path)?;
+    submit_parsed_with_dispatch(
+        config,
+        intent,
+        pager,
+        intent_document,
+        route_ref,
+        enable_network,
+        resolve_endpoint,
+        prepare_dispatch,
+    )
+    .await
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "One custody path shared by file submission and resubmission"
+)]
+async fn submit_parsed_with_dispatch<R, P, F, Fut>(
+    config: &NqConfig,
+    intent: Intent,
+    pager: Option<PagerDutyFields>,
+    intent_document: CanonicalDocument,
+    route_ref: &str,
+    enable_network: bool,
+    resolve_endpoint: R,
+    prepare_dispatch: P,
+) -> Result<Value>
+where
+    R: FnOnce(&str) -> Result<String>,
+    P: FnOnce(u64) -> Result<F>,
+    F: FnOnce(String, Vec<u8>, u64) -> Fut,
+    Fut: Future<Output = Result<TransportResult>>,
+{
+    let key = pager.as_ref().map(|pager| dedup_key(&pager.condition));
+    let mut result = submit_custody(
+        config,
+        intent,
+        pager.as_ref(),
+        intent_document,
+        route_ref,
+        enable_network,
+        resolve_endpoint,
+        prepare_dispatch,
+    )
+    .await?;
+    if let Some(key) = key {
+        result["dedup_key"] = json!(key);
+    }
+    Ok(result)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "Keep the ordered custody, refusal and dispatch boundary in one place"
+)]
+async fn submit_custody<R, P, F, Fut>(
+    config: &NqConfig,
+    intent: Intent,
+    pager: Option<&PagerDutyFields>,
+    intent_document: CanonicalDocument,
+    route_ref: &str,
+    enable_network: bool,
+    resolve_endpoint: R,
+    prepare_dispatch: P,
+) -> Result<Value>
+where
+    R: FnOnce(&str) -> Result<String>,
+    P: FnOnce(u64) -> Result<F>,
+    F: FnOnce(String, Vec<u8>, u64) -> Fut,
+    Fut: Future<Output = Result<TransportResult>>,
+{
     if intent.route_reference != route_ref {
         bail!("CLI route does not match intent route reference");
     }
@@ -733,12 +1293,21 @@ where
     if route.transport == NotificationTransportKind::LocalFile {
         bail!("local_file routes require notification deliver-local");
     }
+    let pagerduty = route.transport == NotificationTransportKind::PagerDuty;
+    if pagerduty != pager.is_some() {
+        bail!(
+            "pagerduty routes accept only nq.notification_delivery_intent.v2, which other routes refuse"
+        );
+    }
     if let Some(existing) = retained_duplicate(config, route, &intent, &intent_document)? {
         return Ok(existing);
     }
     replay_nightshift(route, &intent)?;
     let owner_receipt = intent.owner_receipt.clone();
-    let payload = render(route, &intent)?;
+    let payload = match pager {
+        Some(pager) => render_pagerduty(&intent, pager, &intent_document)?,
+        None => render(route, &intent)?,
+    };
     let mut store = Store::open(&config.database_path)?;
     let notification_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -749,6 +1318,7 @@ where
         destination_kind: match route.transport {
             NotificationTransportKind::Slack => "slack".into(),
             NotificationTransportKind::Discord => "discord".into(),
+            NotificationTransportKind::PagerDuty => "pagerduty".into(),
             NotificationTransportKind::LocalFile => {
                 unreachable!("local routes use notification deliver-local")
             }
@@ -785,68 +1355,67 @@ where
         return Ok(json!({"notification_id":notification_id,"delivery_state":"refused"}));
     }
     if !enable_network {
-        store.append_notification_delivery_event(&NotificationDeliveryEventInput {
-            notification_id: notification_id.clone(),
-            event_number: 1,
-            occurred_at: now,
-            outcome: "refused".into(),
-            detail: CanonicalDocument::from_serializable(
-                &json!({"reason":"network_dispatch_not_explicitly_enabled"}),
-            )?,
-        })?;
-        return Ok(json!({"notification_id": notification_id, "delivery_state":"refused"}));
+        return retain_refusal(
+            &mut store,
+            &notification_id,
+            now,
+            "network_dispatch_not_explicitly_enabled",
+        );
     }
-    let endpoint_locator = route
-        .endpoint_secret_locator
-        .as_deref()
-        .context("HTTPS route has no endpoint secret locator")?;
-    let endpoint = match resolve_endpoint(endpoint_locator) {
-        Ok(endpoint) => endpoint,
+    let locator = if pagerduty {
+        route
+            .routing_key_env
+            .as_deref()
+            .context("pagerduty route has no routing key locator")?
+    } else {
+        route
+            .endpoint_secret_locator
+            .as_deref()
+            .context("HTTPS route has no endpoint secret locator")?
+    };
+    // The resolved value is a secret: it is never retained, digested, printed
+    // or included in an error; only a fixed reason is kept.
+    let secret = match resolve_endpoint(locator) {
+        Ok(secret) if !pagerduty || valid_routing_key(&secret) => secret,
+        Ok(_) => {
+            return retain_refusal(&mut store, &notification_id, now, "routing_key_malformed");
+        }
         Err(_) => {
-            store.append_notification_delivery_event(&NotificationDeliveryEventInput {
-                notification_id: notification_id.clone(),
-                event_number: 1,
-                occurred_at: now,
-                outcome: "refused".into(),
-                detail: CanonicalDocument::from_serializable(
-                    &json!({"reason":"endpoint_resolution_unavailable"}),
-                )?,
-            })?;
-            return Ok(json!({"notification_id": notification_id, "delivery_state":"refused"}));
+            let reason = if pagerduty {
+                "routing_key_unavailable"
+            } else {
+                "endpoint_resolution_unavailable"
+            };
+            return retain_refusal(&mut store, &notification_id, now, reason);
         }
     };
-    let dispatch = match prepare_dispatch(route.timeout_ms) {
-        Ok(dispatch) => dispatch,
-        Err(_) => {
-            store.append_notification_delivery_event(&NotificationDeliveryEventInput {
-                notification_id: notification_id.clone(),
-                event_number: 1,
-                occurred_at: now,
-                outcome: "refused".into(),
-                detail: CanonicalDocument::from_serializable(
-                    &json!({"reason":"transport_client_unavailable"}),
-                )?,
-            })?;
-            return Ok(json!({"notification_id": notification_id, "delivery_state":"refused"}));
-        }
+    let Ok(dispatch) = prepare_dispatch(route.timeout_ms) else {
+        return retain_refusal(
+            &mut store,
+            &notification_id,
+            now,
+            "transport_client_unavailable",
+        );
     };
     store.append_notification_delivery_event(&NotificationDeliveryEventInput {
         notification_id: notification_id.clone(),
         event_number: 1,
         occurred_at: now.clone(),
         outcome: "claimed".into(),
-        detail: CanonicalDocument::from_serializable(
-            &json!({"route_reference":route.reference,"transport":"https"}),
-        )?,
+        detail: CanonicalDocument::from_serializable(&json!({
+            "route_reference":route.reference,
+            "transport": if pagerduty { "pagerduty" } else { "https" }
+        }))?,
     })?;
     let (outcome, detail) =
-        match dispatch(endpoint, payload.as_bytes().to_vec(), route.timeout_ms).await? {
+        match dispatch(secret, payload.as_bytes().to_vec(), route.timeout_ms).await? {
             TransportResult::Accepted(status) => ("accepted", json!({"http_status":status})),
             TransportResult::Failed(status) => ("failed", json!({"http_status":status})),
             TransportResult::Unknown => (
                 "unknown",
                 json!({"reason":"transport_error_or_response_loss"}),
             ),
+            TransportResult::Reported { outcome, detail } => (outcome, detail),
         };
     store.append_notification_delivery_event(&NotificationDeliveryEventInput {
         notification_id: notification_id.clone(),
@@ -864,9 +1433,30 @@ pub(crate) async fn submit(
     route_ref: &str,
     enable_network: bool,
 ) -> Result<Value> {
-    submit_with_dispatch(
+    let (intent, pager, document) = read_intent(intent_path)?;
+    submit_parsed(config, intent, pager, document, route_ref, enable_network).await
+}
+
+async fn submit_parsed(
+    config: &NqConfig,
+    intent: Intent,
+    pager: Option<PagerDutyFields>,
+    document: CanonicalDocument,
+    route_ref: &str,
+    enable_network: bool,
+) -> Result<Value> {
+    let route = config
+        .notification_routes
+        .iter()
+        .find(|route| route.reference == route_ref);
+    let pagerduty =
+        route.is_some_and(|route| route.transport == NotificationTransportKind::PagerDuty);
+    let max_response_bytes = route.map_or(1, |route| route.max_response_bytes);
+    submit_parsed_with_dispatch(
         config,
-        intent_path,
+        intent,
+        pager,
+        document,
         route_ref,
         enable_network,
         |locator| {
@@ -878,7 +1468,17 @@ pub(crate) async fn submit(
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(std::time::Duration::from_millis(timeout_ms))
                 .build()?;
-            Ok(move |endpoint, body, _| async move {
+            Ok(move |endpoint: String, body: Vec<u8>, _| async move {
+                if pagerduty {
+                    return pagerduty_post(
+                        &client,
+                        PAGERDUTY_ENQUEUE_URL,
+                        &endpoint,
+                        &body,
+                        max_response_bytes,
+                    )
+                    .await;
+                }
                 match client
                     .post(endpoint)
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -898,10 +1498,97 @@ pub(crate) async fn submit(
     .await
 }
 
+/// Re-derive a v2 intent from a retained, not-accepted record with a new
+/// event identity. The condition, and therefore the dedup key, is unchanged.
+fn prepare_resubmission(
+    config: &NqConfig,
+    notification_id: &str,
+    stable_event_id: &str,
+) -> Result<(Intent, Option<PagerDutyFields>, CanonicalDocument)> {
+    bounded("stable_event_id", stable_event_id, 256)?;
+    let store = Store::open_read_only(&config.database_path)?;
+    let retained = store
+        .notification_delivery_intent_by_id(notification_id)?
+        .context("notification is not retained")?;
+    let status = store
+        .notification_delivery_status(Some(notification_id))?
+        .pop()
+        .context("retained notification custody is incomplete")?;
+    let mut value: Value = serde_json::from_slice(retained.as_bytes())?;
+    if value.get("schema").and_then(Value::as_str) != Some(INTENT_V2) {
+        bail!(
+            "resubmit is defined only for nq.notification_delivery_intent.v2 (pagerduty) records"
+        );
+    }
+    if status.delivery_state == "accepted" {
+        bail!("notification was accepted by its destination; resubmit is refused");
+    }
+    if value.get("stable_event_id").and_then(Value::as_str) == Some(stable_event_id) {
+        bail!("resubmit requires a new stable_event_id");
+    }
+    value["stable_event_id"] = json!(stable_event_id);
+    let document = CanonicalDocument::from_serializable(&value)?;
+    if document.as_bytes().len() > MAX_INTENT_BYTES {
+        bail!("notification intent exceeds {MAX_INTENT_BYTES} bytes");
+    }
+    let (intent, pager) = parse_submitted(value)?;
+    Ok((intent, pager, document))
+}
+
+/// Submit a new record for the same `PagerDuty` condition. The original record
+/// keeps its retained outcome; `PagerDuty` deduplicates on the shared key.
+pub(crate) async fn resubmit(
+    config: &NqConfig,
+    notification_id: &str,
+    stable_event_id: &str,
+    enable_network: bool,
+) -> Result<Value> {
+    let (intent, pager, document) = prepare_resubmission(config, notification_id, stable_event_id)?;
+    let route = intent.route_reference.clone();
+    let mut result = submit_parsed(config, intent, pager, document, &route, enable_network).await?;
+    result["resubmitted_from"] = json!(notification_id);
+    Ok(result)
+}
+
 pub(crate) fn inspect(config: &NqConfig, id: Option<&str>) -> Result<Value> {
-    Ok(serde_json::to_value(
-        Store::open_read_only(&config.database_path)?.notification_delivery_status(id)?,
-    )?)
+    let store = Store::open_read_only(&config.database_path)?;
+    let statuses = store.notification_delivery_status(id)?;
+    let mut value = serde_json::to_value(&statuses)?;
+    for (index, status) in statuses.iter().enumerate() {
+        let Some(retained) = store.notification_delivery_intent_by_id(&status.notification_id)?
+        else {
+            continue;
+        };
+        let intent: Value = serde_json::from_slice(retained.as_bytes())?;
+        if intent.get("schema").and_then(Value::as_str) != Some(INTENT_V2) {
+            continue;
+        }
+        let (_, Some(pager)) = parse_submitted(intent)? else {
+            continue;
+        };
+        let last_event = store
+            .notification_delivery_events_bounded(
+                &status.notification_id,
+                nq_store::MAX_PUBLIC_QUERY_ROWS,
+                None,
+            )?
+            .pop()
+            .map(|event| -> Result<Value> {
+                Ok(json!({
+                    "event_number":event.event_number,
+                    "outcome":event.outcome,
+                    "occurred_at":event.occurred_at,
+                    "detail":serde_json::from_slice::<Value>(&event.detail_json)?,
+                }))
+            })
+            .transpose()?;
+        value[index]["pagerduty"] = json!({
+            "action":pager.action,
+            "dedup_key":dedup_key(&pager.condition),
+            "last_event":last_event,
+        });
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -921,6 +1608,7 @@ mod tests {
             reference: "ops.primary".into(),
             transport,
             endpoint_secret_locator: Some("NQ_TEST_URL".into()),
+            routing_key_env: None,
             local_inbox_directory: None,
             // Replay includes descriptor custody, account/sandbox setup, and
             // process launch. Keep the explicit timeout qualification below at
@@ -960,6 +1648,7 @@ mod tests {
                 reference: "local.ops".into(),
                 transport: NotificationTransportKind::LocalFile,
                 endpoint_secret_locator: None,
+                routing_key_env: None,
                 local_inbox_directory: Some(inbox),
                 timeout_ms: 10_000,
                 max_response_bytes: 1024,
@@ -1962,5 +2651,765 @@ mod tests {
                 assert!(error.contains("event and transition identities"));
             }
         }
+    }
+
+    // PagerDuty Events API v2 sink.
+
+    const ROUTING_KEY: &str = "0123456789abcdef0123456789abcdef";
+
+    fn pagerduty_route() -> NotificationRouteConfig {
+        NotificationRouteConfig {
+            reference: "pd.ops".into(),
+            transport: NotificationTransportKind::PagerDuty,
+            endpoint_secret_locator: None,
+            routing_key_env: Some("NQ_PD_OPS_ROUTING_KEY".into()),
+            local_inbox_directory: None,
+            timeout_ms: 2_000,
+            max_response_bytes: 1024,
+            nightshift_attention_replay: None,
+        }
+    }
+
+    fn pagerduty_config(root: &TempDir) -> NqConfig {
+        let mut config = config(root);
+        config.notification_routes.push(pagerduty_route());
+        config
+    }
+
+    fn pagerduty_intent(action: &str, stable_event_id: &str, summary: &str) -> Value {
+        json!({
+            "schema":"nq.notification_delivery_intent.v2",
+            "attention_kind":"operator_assertion",
+            "stable_event_id":stable_event_id,
+            "attention_policy_id":"policy-1",
+            "attention_policy_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "transition_id":"transition-1",
+            "route_reference":"pd.ops",
+            "destination_identity":"pagerduty:pd.ops",
+            "summary":summary,
+            "inspection_reference":"record:1",
+            "action":action,
+            "condition":{"site":"crow-lab","component":"nq","rule":"nq-no-fresh-acquisition","target_class":"demo"},
+            "severity":"critical",
+            "runbook_url":"https://runbooks.example/beta#nq-no-fresh-acquisition",
+            "details":{"newest_artifact_age_seconds":900},
+        })
+    }
+
+    const DEDUP: &str = "constellation:crow-lab:nq:nq-no-fresh-acquisition:demo";
+
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "Matches the secret resolver signature"
+    )]
+    fn routing_key(_: &str) -> Result<String> {
+        Ok(ROUTING_KEY.into())
+    }
+
+    /// Every retained byte (database and WAL), inspection and status export.
+    fn assert_routing_key_absent(config: &NqConfig) {
+        let mut retained = Vec::new();
+        for suffix in ["", "-wal", "-journal"] {
+            let mut path = config.database_path.clone().into_os_string();
+            path.push(suffix);
+            if let Ok(bytes) = fs::read(&path) {
+                retained.extend(bytes);
+            }
+        }
+        assert!(!retained.is_empty());
+        let key = ROUTING_KEY.as_bytes();
+        assert!(
+            !retained.windows(key.len()).any(|window| window == key),
+            "routing key reached retained database bytes"
+        );
+        assert!(
+            !retained
+                .windows(b"routing_key\"".len())
+                .any(|window| window == b"routing_key\""),
+            "a routing_key field reached retained bytes"
+        );
+        assert!(
+            !inspect(config, None)
+                .unwrap()
+                .to_string()
+                .contains(ROUTING_KEY)
+        );
+        let store = Store::open_read_only(&config.database_path).unwrap();
+        let status = nq_core::engine::status_snapshot_v3(&store).unwrap();
+        assert!(
+            !serde_json::to_string(&status)
+                .unwrap()
+                .contains(ROUTING_KEY)
+        );
+    }
+
+    /// Serve exactly one HTTP response on loopback and return the request bytes.
+    fn serve_once(
+        status_line: &'static str,
+        body: String,
+    ) -> (String, std::thread::JoinHandle<Vec<u8>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v2/enqueue", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            let header_end = loop {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0, "request ended before headers");
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map_or(0, |value| value.trim().parse().unwrap());
+            while request.len() < header_end + length {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0, "request ended before body");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            request
+        });
+        (url, handle)
+    }
+
+    fn loopback_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+    }
+
+    fn request_body(request: &[u8]) -> Value {
+        let end = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        serde_json::from_slice(&request[end..]).unwrap()
+    }
+
+    #[test]
+    fn pagerduty_dedup_key_derivation_vectors() {
+        let condition = |site: &str, component: &str, rule: &str, target: Option<&str>| Condition {
+            site: site.into(),
+            component: component.into(),
+            rule: rule.into(),
+            target_class: target.map(Into::into),
+        };
+        for (value, expected) in [
+            (
+                condition("crow-lab", "nq", "nq-no-fresh-acquisition", Some("demo")),
+                "constellation:crow-lab:nq:nq-no-fresh-acquisition:demo",
+            ),
+            (
+                condition(
+                    "labelwatch-host",
+                    "host_posture",
+                    "host-posture-unknown",
+                    None,
+                ),
+                "constellation:labelwatch-host:host_posture:host-posture-unknown",
+            ),
+            (
+                condition("site.a_1", "service", "service-down", Some("nqd.service")),
+                "constellation:site.a_1:service:service-down:nqd.service",
+            ),
+        ] {
+            assert_eq!(dedup_key(&value), expected);
+        }
+    }
+
+    #[test]
+    fn v2_intent_refuses_hostile_or_open_condition_values() {
+        let hostile = [
+            ("site", json!("sha256:aaaa")),
+            ("site", json!("host-0123456789abcdef0123456789abcdef")),
+            ("site", json!("123e4567-e89b-12d3-a456-426614174000")),
+            ("site", json!("1727900000")),
+            ("site", json!("4242")),
+            ("target_class", json!("run-2026-10-02")),
+            ("target_class", json!("batch-20261002")),
+            ("target_class", json!("x0123456789ABCDEF0123456789abcdef0")),
+        ];
+        for (field, value) in hostile {
+            let mut intent = pagerduty_intent("trigger", "event-1", "inspect");
+            intent["condition"][field] = value.clone();
+            let error = parse_submitted(intent).unwrap_err().to_string();
+            assert!(error.contains("is refused"), "{field}={value}: {error}");
+        }
+        let invalid = [
+            ("/condition/target_class", json!("a".repeat(49))),
+            ("/condition/target_class", json!("Demo")),
+            ("/condition/site", json!("crow lab")),
+            ("/condition/component", json!("kernel")),
+            ("/condition/rule", json!("docket-not-ready")),
+            ("/condition/rule", json!("made-up-rule")),
+            ("/action", json!("acknowledge")),
+            ("/severity", json!("page")),
+            ("/runbook_url", json!("http://runbooks.example/x")),
+            ("/details", json!(["not", "an", "object"])),
+            ("/details", json!({"constellation":"reserved"})),
+            ("/details", json!({"nested":{"PagerDuty_Routing_Key":"x"}})),
+            ("/details", json!({"blob":"x".repeat(4100)})),
+            ("/summary", json!("s".repeat(1025))),
+        ];
+        for (pointer, value) in invalid {
+            let mut intent = pagerduty_intent("trigger", "event-1", "inspect");
+            *intent.pointer_mut(pointer).unwrap() = value;
+            assert!(parse_submitted(intent).is_err(), "{pointer}");
+        }
+        let mut extra = pagerduty_intent("trigger", "event-1", "inspect");
+        extra["condition"]["instance"] = json!("x");
+        assert!(parse_submitted(extra).is_err());
+        let mut extra = pagerduty_intent("trigger", "event-1", "inspect");
+        extra["dedup_key"] = json!("caller-supplied");
+        assert!(parse_submitted(extra).is_err());
+        let mut v1_with_action = intent("check storage", "operator_assertion", None);
+        v1_with_action["action"] = json!("trigger");
+        assert!(parse_submitted(v1_with_action).is_err());
+        let mut long_summary = pagerduty_intent("trigger", "event-1", &"s".repeat(1024));
+        assert!(parse_submitted(long_summary.clone()).is_ok());
+        long_summary["schema"] = json!("nq.notification_delivery_intent.v1");
+        assert!(parse_submitted(long_summary).is_err());
+        assert!(parse_submitted(pagerduty_intent("resolve", "event-1", "inspect")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn hostile_condition_is_refused_before_custody_or_dispatch() {
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let mut value = pagerduty_intent("trigger", "event-1", "inspect");
+        value["condition"]["target_class"] = json!("123e4567-e89b-12d3-a456-426614174000");
+        let path = write_intent(&root, value);
+        let error = submit_with_dispatch(
+            &config,
+            &path,
+            "pd.ops",
+            true,
+            |_| panic!("no secret resolution for a refused intent"),
+            |_| Ok(|_, _, _| async { panic!("no dispatch for a refused intent") }),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("looks like a UUID"));
+        assert_eq!(inspect(&config, None).unwrap(), json!([]));
+    }
+
+    #[test]
+    fn pagerduty_trigger_and_resolve_render_without_routing_key() {
+        let trigger = pagerduty_intent("trigger", "event-1", "no fresh NQ acquisition");
+        let document = CanonicalDocument::from_serializable(&trigger).unwrap();
+        let (intent, pager) = parse_submitted(trigger).unwrap();
+        let rendered = render_pagerduty(&intent, pager.as_ref().unwrap(), &document).unwrap();
+        let expected = format!(
+            concat!(
+                r#"{{"dedup_key":"constellation:crow-lab:nq:nq-no-fresh-acquisition:demo","event_action":"trigger","#,
+                r#""links":[{{"href":"https://runbooks.example/beta#nq-no-fresh-acquisition","text":"Runbook"}}],"#,
+                r#""payload":{{"class":"demo","component":"nq","custom_details":{{"constellation":{{"inspection_reference":"record:1","intent_digest":"{}","#,
+                r#""schema":"nq.notification_delivery_intent.v2","stable_event_id":"event-1","transition_id":"transition-1"}},"#,
+                r#""newest_artifact_age_seconds":900}},"group":"nq-no-fresh-acquisition","severity":"critical","#,
+                r#""source":"crow-lab","summary":"no fresh NQ acquisition"}}}}"#
+            ),
+            document.digest()
+        );
+        assert_eq!(
+            String::from_utf8(rendered.as_bytes().to_vec()).unwrap(),
+            expected
+        );
+
+        let resolve = pagerduty_intent("resolve", "event-2", "condition cleared");
+        let document = CanonicalDocument::from_serializable(&resolve).unwrap();
+        let (intent, pager) = parse_submitted(resolve).unwrap();
+        let rendered = render_pagerduty(&intent, pager.as_ref().unwrap(), &document).unwrap();
+        assert_eq!(
+            rendered.as_bytes(),
+            br#"{"dedup_key":"constellation:crow-lab:nq:nq-no-fresh-acquisition:demo","event_action":"resolve"}"#
+        );
+
+        let request: Value =
+            serde_json::from_slice(&inject_routing_key(rendered.as_bytes(), ROUTING_KEY).unwrap())
+                .unwrap();
+        assert_eq!(
+            request,
+            json!({"routing_key":ROUTING_KEY,"event_action":"resolve","dedup_key":DEDUP})
+        );
+    }
+
+    #[tokio::test]
+    async fn pagerduty_http_outcomes_are_classified_from_a_loopback_server() {
+        let cases = [
+            (
+                "202 Accepted",
+                json!({"status":"success","message":"Event processed","dedup_key":DEDUP}),
+                "accepted",
+                None,
+                None,
+            ),
+            (
+                "202 Accepted",
+                json!({"status":"queued"}),
+                "unknown",
+                Some("success_not_confirmed"),
+                Some("resubmit_safe"),
+            ),
+            (
+                "429 Too Many Requests",
+                json!({"status":"throttle event","message":"Requests for this service are arriving too quickly"}),
+                "failed",
+                Some("rate_limited"),
+                Some("retryable"),
+            ),
+            (
+                "500 Internal Server Error",
+                json!({}),
+                "failed",
+                Some("server_error"),
+                Some("retryable"),
+            ),
+            (
+                "400 Bad Request",
+                json!({"status":"invalid event","message":"Event object is invalid","errors":[format!("routing_key {ROUTING_KEY} is incorrect")]}),
+                "failed",
+                Some("rejected"),
+                Some("permanent"),
+            ),
+        ];
+        let client = loopback_client();
+        for (status_line, body, outcome, reason, retry_class) in cases {
+            let (url, server) = serve_once(status_line, body.to_string());
+            let retained = br#"{"dedup_key":"constellation:crow-lab:nq:nq-no-fresh-acquisition:demo","event_action":"resolve"}"#;
+            let result = pagerduty_post(&client, &url, ROUTING_KEY, retained, 1024)
+                .await
+                .unwrap();
+            let request = server.join().unwrap();
+            assert_eq!(
+                request_body(&request),
+                json!({"routing_key":ROUTING_KEY,"event_action":"resolve","dedup_key":DEDUP})
+            );
+            let TransportResult::Reported {
+                outcome: actual,
+                detail,
+            } = result
+            else {
+                panic!("pagerduty reports its own classification")
+            };
+            assert_eq!(actual, outcome, "{status_line}");
+            assert_eq!(detail.get("reason").and_then(Value::as_str), reason);
+            assert_eq!(
+                detail.get("retry_class").and_then(Value::as_str),
+                retry_class
+            );
+            assert!(detail["http_status"].is_u64());
+            assert!(!detail.to_string().contains(ROUTING_KEY), "{detail}");
+            if status_line.starts_with("400") {
+                assert_eq!(detail["pagerduty_message"], "Event object is invalid");
+                assert_eq!(
+                    detail["pagerduty_errors"],
+                    json!(["routing_key <redacted> is incorrect"])
+                );
+            }
+        }
+
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v2/enqueue", closed.local_addr().unwrap());
+        drop(closed);
+        assert_eq!(
+            pagerduty_post(&client, &url, ROUTING_KEY, b"{}", 1024)
+                .await
+                .unwrap(),
+            reported(
+                "failed",
+                json!({"reason":"connect_failed","retry_class":"retryable"})
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn pagerduty_submission_injects_the_routing_key_only_into_request_bytes() {
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let path = write_intent(
+            &root,
+            pagerduty_intent("trigger", "event-1", "no fresh acquisition"),
+        );
+        let (url, server) = serve_once(
+            "202 Accepted",
+            json!({"status":"success","message":"Event processed","dedup_key":DEDUP}).to_string(),
+        );
+        let result = submit_with_dispatch(
+            &config,
+            &path,
+            "pd.ops",
+            true,
+            |locator| {
+                assert_eq!(locator, "NQ_PD_OPS_ROUTING_KEY");
+                Ok(ROUTING_KEY.into())
+            },
+            |timeout| {
+                assert_eq!(timeout, 2_000);
+                let client = loopback_client();
+                Ok(move |key: String, body: Vec<u8>, _| async move {
+                    pagerduty_post(&client, &url, &key, &body, 1024).await
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["delivery_state"], "accepted");
+        assert_eq!(result["dedup_key"], DEDUP);
+        let request = request_body(&server.join().unwrap());
+        assert_eq!(request["routing_key"], ROUTING_KEY);
+        assert_eq!(request["dedup_key"], DEDUP);
+        assert_eq!(request["payload"]["source"], "crow-lab");
+
+        let id = result["notification_id"].as_str().unwrap();
+        let status = inspect(&config, Some(id)).unwrap();
+        assert_eq!(status[0]["delivery_state"], "accepted");
+        assert_eq!(status[0]["pagerduty"]["dedup_key"], DEDUP);
+        assert_eq!(status[0]["pagerduty"]["action"], "trigger");
+        assert_eq!(
+            status[0]["pagerduty"]["last_event"]["detail"]["http_status"],
+            202
+        );
+        let payload: Vec<u8> = Connection::open(&config.database_path)
+            .unwrap()
+            .query_row(
+                "SELECT payload_json FROM notification_outbox WHERE notification_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(payload["dedup_key"], DEDUP);
+        assert!(payload.get("routing_key").is_none());
+        let mut expected_request = payload;
+        expected_request["routing_key"] = json!(ROUTING_KEY);
+        assert_eq!(request, expected_request);
+        assert_routing_key_absent(&config);
+    }
+
+    #[tokio::test]
+    async fn malformed_or_missing_routing_key_is_a_secret_free_retained_refusal() {
+        let malformed = &ROUTING_KEY[..31];
+        for (resolved, reason) in [
+            (Some(malformed), "routing_key_malformed"),
+            (
+                Some("0123456789abcdef0123456789abcdeg"),
+                "routing_key_malformed",
+            ),
+            (None, "routing_key_unavailable"),
+        ] {
+            let root = TempDir::new().unwrap();
+            let config = pagerduty_config(&root);
+            let path = write_intent(&root, pagerduty_intent("trigger", "event-1", "inspect"));
+            let result = submit_with_dispatch(
+                &config,
+                &path,
+                "pd.ops",
+                true,
+                |_| match resolved {
+                    Some(value) => Ok(value.to_owned()),
+                    None => bail!("locator {ROUTING_KEY} unavailable"),
+                },
+                |_| Ok(|_, _, _| async { panic!("no dispatch after a refused key") }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["delivery_state"], "refused");
+            let status = inspect(&config, result["notification_id"].as_str()).unwrap();
+            assert_eq!(
+                status[0]["pagerduty"]["last_event"]["detail"]["reason"],
+                reason
+            );
+            assert!(!status.to_string().contains(malformed));
+            assert_routing_key_absent(&config);
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_and_pagerduty_routes_are_mutually_exclusive_and_slack_is_unchanged() {
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let mut v2_on_slack = pagerduty_intent("trigger", "event-1", "inspect");
+        v2_on_slack["route_reference"] = json!("ops.primary");
+        let path = write_intent(&root, v2_on_slack);
+        let error = submit_with_dispatch(&config, &path, "ops.primary", false, endpoint, |_| {
+            Ok(|_, _, _| async { Ok(TransportResult::Unknown) })
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("pagerduty routes accept only"));
+        let mut v1_on_pagerduty = intent("check storage", "operator_assertion", None);
+        v1_on_pagerduty["route_reference"] = json!("pd.ops");
+        let path = write_intent(&root, v1_on_pagerduty);
+        assert!(
+            submit_with_dispatch(&config, &path, "pd.ops", false, routing_key, |_| {
+                Ok(|_, _, _| async { Ok(TransportResult::Unknown) })
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(inspect(&config, None).unwrap(), json!([]));
+    }
+
+    #[tokio::test]
+    async fn duplicate_pagerduty_intent_converges_without_a_second_send() {
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let path = write_intent(&root, pagerduty_intent("trigger", "event-1", "inspect"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut results = Vec::new();
+        for _ in 0..2 {
+            let calls = Arc::clone(&calls);
+            results.push(
+                submit_with_dispatch(&config, &path, "pd.ops", true, routing_key, |_| {
+                    Ok(move |_, _, _| {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        async { Ok(reported("failed", json!({"reason":"server_error"}))) }
+                    })
+                })
+                .await
+                .unwrap(),
+            );
+        }
+        assert_eq!(results[0], results[1]);
+        assert_eq!(results[0]["dedup_key"], DEDUP);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        write_intent(&root, pagerduty_intent("trigger", "event-1", "changed"));
+        assert!(
+            submit_with_dispatch(&config, &path, "pd.ops", true, routing_key, |_| {
+                Ok(|_, _, _| async { panic!("changed material must not dispatch") })
+            })
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("different canonical intent")
+        );
+    }
+
+    #[tokio::test]
+    async fn repeat_trigger_and_resolve_share_one_dedup_key_across_new_records() {
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let sent = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let mut ids = BTreeMap::new();
+        for (action, event, summary) in [
+            ("trigger", "event-1", "no fresh acquisition"),
+            ("trigger", "event-2", "no fresh acquisition"),
+            ("trigger", "event-3", "no fresh acquisition for 20 minutes"),
+            ("resolve", "event-4", "acquisition resumed"),
+        ] {
+            let path = write_intent(&root, pagerduty_intent(action, event, summary));
+            let sent = Arc::clone(&sent);
+            let result = submit_with_dispatch(&config, &path, "pd.ops", true, routing_key, |_| {
+                Ok(move |key: String, body: Vec<u8>, _| {
+                    let request = inject_routing_key(&body, &key).unwrap();
+                    sent.lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(&request).unwrap());
+                    async { Ok(reported("accepted", json!({"http_status":202}))) }
+                })
+            })
+            .await
+            .unwrap();
+            assert_eq!(result["dedup_key"], DEDUP);
+            ids.insert(
+                result["notification_id"].as_str().unwrap().to_owned(),
+                event,
+            );
+        }
+        assert_eq!(ids.len(), 4, "each event identity is a new record");
+        let sent = sent.lock().unwrap();
+        assert!(sent.iter().all(|request| request["dedup_key"] == DEDUP));
+        assert_eq!(
+            sent[2]["payload"]["summary"],
+            "no fresh acquisition for 20 minutes"
+        );
+        assert_eq!(
+            sent[3],
+            json!({"routing_key":ROUTING_KEY,"event_action":"resolve","dedup_key":DEDUP})
+        );
+        assert_routing_key_absent(&config);
+    }
+
+    #[tokio::test]
+    async fn claimed_without_terminal_stays_unknown_and_resubmit_sends_the_same_condition() {
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let path = write_intent(&root, pagerduty_intent("trigger", "event-1", "inspect"));
+        // A dispatch that never returns a terminal result models a crash
+        // after the claim was committed.
+        assert!(
+            submit_with_dispatch(&config, &path, "pd.ops", true, routing_key, |_| {
+                Ok(|_, _, _| async { bail!("process ended after claim") })
+            })
+            .await
+            .is_err()
+        );
+        let original = inspect(&config, None).unwrap()[0].clone();
+        let original_id = original["notification_id"].as_str().unwrap().to_owned();
+        assert_eq!(original["delivery_state"], "unknown");
+        assert_eq!(original["event_count"], 1);
+
+        // The exact duplicate converges on the unknown record without a send.
+        let duplicate = submit_with_dispatch(&config, &path, "pd.ops", true, routing_key, |_| {
+            Ok(|_, _, _| async { panic!("duplicate must not send") })
+        })
+        .await
+        .unwrap();
+        assert_eq!(duplicate["delivery_state"], "unknown");
+
+        assert!(prepare_resubmission(&config, &original_id, "event-1").is_err());
+        let (resubmission, pager, document) =
+            prepare_resubmission(&config, &original_id, "event-1-resubmit-1").unwrap();
+        let sent = Arc::new(std::sync::Mutex::new(None::<Value>));
+        let captured = Arc::clone(&sent);
+        let resubmitted = submit_parsed_with_dispatch(
+            &config,
+            resubmission,
+            pager,
+            document,
+            "pd.ops",
+            true,
+            routing_key,
+            |_| {
+                Ok(move |_key: String, body: Vec<u8>, _| {
+                    *captured.lock().unwrap() = Some(serde_json::from_slice(&body).unwrap());
+                    async { Ok(reported("accepted", json!({"http_status":202}))) }
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resubmitted["delivery_state"], "accepted");
+        assert_eq!(resubmitted["dedup_key"], DEDUP);
+        assert_ne!(resubmitted["notification_id"], original["notification_id"]);
+        let body = sent.lock().unwrap().clone().unwrap();
+        assert_eq!(body["dedup_key"], DEDUP);
+        assert_eq!(
+            body["payload"]["custom_details"]["constellation"]["stable_event_id"],
+            "event-1-resubmit-1"
+        );
+        let after = inspect(&config, Some(&original_id)).unwrap();
+        assert_eq!(after[0]["delivery_state"], "unknown");
+        assert_eq!(after[0]["event_count"], 1);
+
+        let accepted_id = resubmitted["notification_id"].as_str().unwrap();
+        assert!(
+            prepare_resubmission(&config, accepted_id, "event-1-resubmit-2")
+                .unwrap_err()
+                .to_string()
+                .contains("accepted")
+        );
+        let slack_path = write_intent(&root, intent("check storage", "operator_assertion", None));
+        let slack =
+            submit_with_dispatch(&config, &slack_path, "ops.primary", false, endpoint, |_| {
+                Ok(|_, _, _| async { Ok(TransportResult::Unknown) })
+            })
+            .await
+            .unwrap();
+        assert!(
+            prepare_resubmission(
+                &config,
+                slack["notification_id"].as_str().unwrap(),
+                "event-9"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("only for nq.notification_delivery_intent.v2")
+        );
+        assert_routing_key_absent(&config);
+    }
+
+    fn notification_component(config: &NqConfig) -> nq_core::public::ComponentStatusV3 {
+        let store = Store::open_read_only(&config.database_path).unwrap();
+        nq_core::engine::status_snapshot_v3(&store)
+            .unwrap()
+            .components
+            .into_iter()
+            .find(|component| {
+                component.kind == nq_core::public::ComponentKind::Notification
+                    && component.id == "outbox"
+            })
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn status_export_reflects_retained_delivery_outcomes() {
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let mut store = Store::open(&config.database_path).unwrap();
+        nq_core::engine::record_component_status(
+            &mut store,
+            "notification",
+            "outbox",
+            "healthy",
+            "outbox_empty",
+            &json!({"delivery_enabled": false}),
+        )
+        .unwrap();
+        drop(store);
+        assert_eq!(notification_component(&config).code, "outbox_empty");
+
+        let path = write_intent(&root, pagerduty_intent("trigger", "event-1", "inspect"));
+        submit_with_dispatch(&config, &path, "pd.ops", true, routing_key, |_| {
+            Ok(|_, _, _| async {
+                Ok(reported(
+                    "failed",
+                    json!({"http_status":429,"reason":"rate_limited","retry_class":"retryable","pagerduty_message":"Requests are arriving too quickly"}),
+                ))
+            })
+        })
+        .await
+        .unwrap();
+        let component = notification_component(&config);
+        assert_eq!(component.state, nq_core::public::HealthState::Degraded);
+        assert_eq!(component.code, "delivery_failure_unresolved");
+        let nq_core::public::ComponentStatusDetailV3::Diagnostic { value } = &component.detail
+        else {
+            panic!("notification status is a diagnostic")
+        };
+        assert_eq!(
+            value["counts"],
+            json!({"pending":0,"refused":0,"failed":1,"unknown":0,"accepted":0})
+        );
+        assert_eq!(value["newest_failure"]["reason"], "rate_limited");
+        assert_eq!(value["newest_failure"]["http_status"], 429);
+        assert!(value["newest_failure"].get("pagerduty_message").is_none());
+
+        let path = write_intent(&root, pagerduty_intent("trigger", "event-2", "inspect"));
+        submit_with_dispatch(&config, &path, "pd.ops", true, routing_key, |_| {
+            Ok(|_, _, _| async { Ok(reported("accepted", json!({"http_status":202}))) })
+        })
+        .await
+        .unwrap();
+        let path = write_intent(&root, pagerduty_intent("trigger", "event-3", "inspect"));
+        submit_with_dispatch(&config, &path, "pd.ops", false, routing_key, |_| {
+            Ok(|_, _, _| async { panic!("network disabled") })
+        })
+        .await
+        .unwrap();
+        let component = notification_component(&config);
+        assert_eq!(component.state, nq_core::public::HealthState::Healthy);
+        assert_eq!(component.code, "delivery_custody_current");
+        let nq_core::public::ComponentStatusDetailV3::Diagnostic { value } = &component.detail
+        else {
+            panic!("notification status is a diagnostic")
+        };
+        assert_eq!(
+            value["counts"],
+            json!({"pending":0,"refused":1,"failed":1,"unknown":0,"accepted":1})
+        );
+        assert_eq!(value["newest_failure"]["outcome"], "failed");
+        assert!(value["newest_accepted_at"].is_string());
+        assert_routing_key_absent(&config);
     }
 }
