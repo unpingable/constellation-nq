@@ -700,7 +700,7 @@ fn build_staging(config: &NqConfig, config_path: &Path, staging: &Path) -> Resul
     // backed up verified; one that open() refuses is still preserved, but its
     // historical meaning is not verifiable under this format.
     let db = staging.join("db/nq.db");
-    let source_openable = if let Ok(store) = Store::open(&config.database_path) {
+    let source_openable = if let Ok(store) = Store::open_validating_fully(&config.database_path) {
         validate_historical_semantics(&store)
             .context("validate source database semantics before archiving")?;
         store.backup_verified(&db)?;

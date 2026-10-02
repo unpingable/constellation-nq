@@ -358,6 +358,13 @@ pub struct RestoreArgs {
 /// Administrative maintenance.
 #[derive(Debug, Subcommand)]
 pub enum AdminCommand {
+    /// Validate the store. `--full` re-validates every history row, ignoring
+    /// any validation watermark, and records a new watermark on success.
+    Validate {
+        /// Required: validate every history row.
+        #[arg(long)]
+        full: bool,
+    },
     /// Validate, back up, and explicitly apply the binary's migration chain.
     Upgrade {
         /// Directory for the digest-addressed pre-upgrade backup.
@@ -1500,6 +1507,8 @@ fn initialize(config_path: &Path, arguments: InitArgs, json_output: bool) -> Res
         "outbox_empty",
         &json!({"delivery_enabled": false}),
     )?;
+    drop(store);
+    record_full_validation(&config.database_path)?;
     print_value(
         &json!({
             "initialized": true,
@@ -2241,6 +2250,13 @@ fn restore(backup: &Path, destination: &Path, json_output: bool) -> Result<()> {
         if restored_artifacts != source_artifacts {
             bail!("restore did not preserve the exact diagnostic artifact custody counts");
         }
+        // A validation watermark left beside the absent destination belongs
+        // to a previous database; removing it only forces full validation.
+        match fs::remove_file(nq_store::watermark_path(destination)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("remove a stale validation watermark"),
+        }
         fs::hard_link(&temporary, destination).with_context(|| {
             format!(
                 "publish validated restore {} without replacing another path",
@@ -2481,8 +2497,35 @@ fn finalize_upgrade_backup(
 }
 
 #[allow(clippy::too_many_lines)]
+/// Validate every history row of the configured store, ignoring any
+/// watermark, and record a watermark certifying the complete history.
+fn record_full_validation(
+    database_path: &Path,
+) -> Result<nq_core::DiagnosticArtifactHistoryVerification> {
+    let store = Store::open_validating_fully(database_path)?;
+    Ok(nq_core::engine::validate_fully_and_record(&store)?)
+}
+
 fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -> Result<()> {
     match command {
+        AdminCommand::Validate { full } => {
+            if !full {
+                bail!("only `nq admin validate --full` is supported");
+            }
+            let config = NqConfig::load(config_path)?;
+            let started = std::time::Instant::now();
+            let verification = record_full_validation(&config.database_path)?;
+            print_value(
+                &json!({
+                    "validated": "full",
+                    "database": config.database_path,
+                    "watermark": nq_store::watermark_path(&config.database_path),
+                    "diagnostic_artifacts": verification.commitments,
+                    "elapsed_ms": started.elapsed().as_millis(),
+                }),
+                json_output,
+            )
+        }
         AdminCommand::Archive { destination } => {
             let report = crate::archive::create_archive(config_path, &destination)?;
             print_value(&serde_json::to_value(&report)?, json_output)
@@ -2548,6 +2591,7 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                             "source_digest": source_digest,
                         }))?,
                     })?;
+                    record_full_validation(&config.database_path)?;
                     print_value(
                         &json!({
                             "result": "already_current",
@@ -2640,6 +2684,7 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     )?;
                     let store = Store::open(&config.database_path)?;
                     store.validate()?;
+                    record_full_validation(&config.database_path)?;
                     print_value(
                         &json!({
                             "result": "migrated",
@@ -2700,6 +2745,7 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     )?;
                     let store = Store::open(&config.database_path)?;
                     store.validate()?;
+                    record_full_validation(&config.database_path)?;
                     print_value(
                         &json!({
                             "result": "migrated",
@@ -2725,6 +2771,7 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     )?;
                     let store = Store::open(&config.database_path)?;
                     store.validate()?;
+                    record_full_validation(&config.database_path)?;
                     print_value(
                         &json!({"result":"migrated", "from_schema_version":5,
                         "schema_version":nq_store::SCHEMA_VERSION,
@@ -2743,6 +2790,7 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         &binary_digest,
                         &operator_identity,
                     )?;
+                    record_full_validation(&config.database_path)?;
                     print_value(
                         &json!({"result":"migrated","from_schema_version":12,"schema_version":nq_store::SCHEMA_VERSION,"backup":backup,"backup_digest":backup_digest,"historical_local_successor_acquisitions":"absent_not_synthesized"}),
                         json_output,
