@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use nix::fcntl::AtFlags;
-use nix::unistd::{chown, fchownat, getegid, geteuid, Gid, Uid, User};
+use nix::unistd::{Gid, Uid, User, chown, fchownat, getegid, geteuid};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

@@ -763,7 +763,10 @@ validation costs a full validation.
 `semantic_certified`, `validated_at`, `age_seconds`, `uncovered_history_rows`
 (what the next engine open must validate), and `commitment_digest`. Alert on a
 state other than `certified`, or on an age or uncovered count that keeps
-growing. The qualification carrier deliberately does not carry this state: its
+growing; `uncovered_history_rows` is normally above zero between an
+acquisition and the next replay, so alert on growth, not on non-zero. `init`
+refuses a directory holding another store's sidecar; remove the sidecar with
+the old store when re-initializing. The qualification carrier deliberately does not carry this state: its
 content identity must be the same on every replay of the same artifact.
 
 ### Remaining linear costs
@@ -791,7 +794,12 @@ is bounded by the new rows, the referenced closure, and the schema:
   acquisition reaches a 60-second bound at roughly 100,000 retained
   acquisitions, about 70 to 80 days at one acquisition per minute. Before a
   store approaches that size, archive it (`nq admin archive`) and initialize a
-  new store.
+  new store. Archive with the binary that produced the store, before any
+  package upgrade: a build whose compiled profile catalog differs (any change
+  to the workspace `Cargo.toml` or `Cargo.lock` moves every
+  `profile_semantic_id`) refuses the old store and cannot archive it, and a
+  refused writable open still checkpoints the WAL. The sealed archive is the
+  provenance link between the retired generation and the new store.
 - Full validation is linear in history apart from those lookups: about 7 s,
   27 s, and 81 s at those sizes, and 3.5 s on a 208-acquisition production
   store copy.
@@ -801,8 +809,11 @@ SQLite virtual-machine operation and asserts that a read-only open plus
 `qualify`, and an engine open plus `replay-local-successor`, of an artifact
 beyond the watermark take exactly the same number of operations however much
 history the watermark covers; any per-open scan of covered history fails it.
-Keys are random and a keyed lookup whose key is the last in its index ends one
-operation early, so the test restores each certified store between 16 trials
+The counter sees SQLite virtual-machine operations only: a scan expressed as
+one opcode per page (an unfiltered `COUNT(*)` over a table), Rust-side work,
+and tables the fixture leaves empty are invisible to it, so the invariant is
+necessary, not sufficient. Keyed lookups vary by a few operations with key
+position, so the test restores each certified store between 16 trials
 and compares the maxima, which are exact. The same equality held at 151 against 1,502 and at 501 against 5,002 retained
 acquisitions. Wall times on the reference machine were 0.03 to 0.06 s for a
 bounded `qualify` and 0.07 to 0.12 s for a bounded replay at 500 to 5,000
