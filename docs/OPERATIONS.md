@@ -786,7 +786,9 @@ SQLite virtual-machine operation and asserts that a read-only open plus
 `qualify`, and an engine open plus `replay-local-successor`, of an artifact
 beyond the watermark take exactly the same number of operations however much
 history the watermark covers; any per-open scan of covered history fails it.
-The same equality held at 151 against 1,502 and at 501 against 5,002 retained
+Keys are random and a keyed lookup whose key is the last in its index ends one
+operation early, so the test restores each certified store between 16 trials
+and compares the maxima, which are exact. The same equality held at 151 against 1,502 and at 501 against 5,002 retained
 acquisitions. Wall times on the reference machine were 0.03 to 0.06 s for a
 bounded `qualify` and 0.07 to 0.12 s for a bounded replay at 500 to 5,000
 retained acquisitions; on the 208-acquisition production store copy,

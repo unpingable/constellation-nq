@@ -17916,11 +17916,6 @@ sys.stdout.write("\n")
         }
     }
 
-    /// Validation of new material does not grow with covered history. The
-    /// closure of a covered evaluated artifact keeps one documented term
-    /// that does: counting the evaluations of its run reads the unindexed
-    /// `evaluation_runs.trigger_run_id` (see docs/OPERATIONS.md); it is
-    /// reported, not bounded.
     /// The work of validating an artifact beyond the watermark must be
     /// exactly equal however much history the watermark covers: any per-open
     /// term proportional to retained history adds operations and fails this.
@@ -17955,6 +17950,90 @@ sys.stdout.write("\n")
         );
     }
 
+    /// Independent trials per store size. A keyed lookup whose key is the
+    /// last entry of its index ends one virtual-machine operation early, and
+    /// keys are random, so one trial can come in a few operations under the
+    /// path's work; the maximum over trials is that work exactly. A trial
+    /// reaches it about half the time on the small store (17 of 36 measured),
+    /// so missing it in every trial is about one in 25,000.
+    const WORK_TRIALS: usize = 16;
+
+    /// The store's own files (database, journal, and watermark sidecar),
+    /// which are all a trial changes; the admitted helper keeps its identity.
+    fn store_files(config: &NqConfig) -> Vec<PathBuf> {
+        let root = config.database_path.parent().expect("store directory");
+        let name = config
+            .database_path
+            .file_name()
+            .expect("database name")
+            .to_string_lossy()
+            .into_owned();
+        let mut files = fs::read_dir(root)
+            .expect("read store directory")
+            .map(|entry| entry.expect("store entry").path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .file_name()
+                        .is_some_and(|file| file.to_string_lossy().starts_with(&name))
+            })
+            .collect::<Vec<_>>();
+        files.sort();
+        files
+    }
+
+    /// Run [`measure_hot_path_work`] from the same certified store
+    /// `WORK_TRIALS` times, restoring the store files between trials, and
+    /// keep the maximum of each measure.
+    fn measure_hot_path_work_exactly(
+        config: &NqConfig,
+        watcher: &WatcherConfig,
+        acquisition_id: &str,
+    ) -> HotPathWork {
+        let root = config.database_path.parent().expect("store directory");
+        let snapshot = tempfile::tempdir().expect("snapshot directory");
+        let saved = store_files(config);
+        for file in &saved {
+            fs::copy(file, snapshot.path().join(file.file_name().expect("name")))
+                .expect("snapshot store file");
+        }
+        let mut trials = Vec::with_capacity(WORK_TRIALS);
+        for _ in 0..WORK_TRIALS {
+            for file in store_files(config) {
+                fs::remove_file(file).expect("clear store file");
+            }
+            for file in &saved {
+                let name = file.file_name().expect("name");
+                fs::copy(snapshot.path().join(name), root.join(name)).expect("restore store file");
+            }
+            trials.push(measure_hot_path_work(config, watcher, acquisition_id));
+        }
+        eprintln!(
+            "{acquisition_id}: qualify_uncovered over trials {:?}",
+            trials
+                .iter()
+                .map(|work| work.qualify_uncovered)
+                .collect::<Vec<_>>()
+        );
+        HotPathWork {
+            qualify_uncovered: trials
+                .iter()
+                .map(|work| work.qualify_uncovered)
+                .max()
+                .unwrap_or(0),
+            replay_uncovered: trials
+                .iter()
+                .map(|work| work.replay_uncovered)
+                .max()
+                .unwrap_or(0),
+            qualify_covered: trials
+                .iter()
+                .map(|work| work.qualify_covered)
+                .max()
+                .unwrap_or(0),
+        }
+    }
+
     #[test]
     fn hot_path_work_does_not_grow_with_covered_history() {
         let small_dir = tempfile::tempdir().expect("temporary directory");
@@ -17971,8 +18050,10 @@ sys.stdout.write("\n")
         };
         full_validation_and_watermark(&small_config);
         full_validation_and_watermark(&large_config);
-        let small = measure_hot_path_work(&small_config, &small_watcher, "work-small-newest");
-        let large = measure_hot_path_work(&large_config, &large_watcher, "work-large-newest");
+        let small =
+            measure_hot_path_work_exactly(&small_config, &small_watcher, "work-small-newest");
+        let large =
+            measure_hot_path_work_exactly(&large_config, &large_watcher, "work-large-newest");
         assert_uncovered_work_flat(small, large, (4, 25), "4 -> 25 retained acquisitions");
     }
 
@@ -18024,10 +18105,10 @@ sys.stdout.write("\n")
             (replay, started.elapsed().as_secs_f64())
         };
         build_to(small);
-        let small_work = measure_hot_path_work(&config, &watcher, "scaling-small-probe");
+        let small_work = measure_hot_path_work_exactly(&config, &watcher, "scaling-small-probe");
         let small_wall = wall("scaling-small-probe");
         build_to(total);
-        let total_work = measure_hot_path_work(&config, &watcher, "scaling-total-probe");
+        let total_work = measure_hot_path_work_exactly(&config, &watcher, "scaling-total-probe");
         let total_wall = wall("scaling-total-probe");
         eprintln!(
             "wall (covered artifact) replay {:.4}s -> {:.4}s, qualify {:.4}s -> {:.4}s",
