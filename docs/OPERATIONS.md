@@ -5,15 +5,20 @@ maintenance-declaration, and notification-delivery custody. The small supported
 starting path is the credential-free local saved-check example in
 [`SAVED_CHECKS.md`](SAVED_CHECKS.md). Notification delivery is documented in
 [`NOTIFICATIONS.md`](NOTIFICATIONS.md): local deterministic transport and the
-Nightshift replay boundary have been exercised, while delivery to a live
-destination and a recurring Monitor/NQ/Nightshift profile have not. The
+Nightshift replay boundary have been exercised. Live destination delivery has
+been verified with a person confirming receipt: Slack on 2026-10-01 (disposable
+VM and the Linode host), Discord on 2026-10-02 (crow, released 0.2.0 binary),
+and PagerDuty on 2026-10-02 (non-production service: trigger, dedup, resolve).
+A recurring Monitor/NQ/Nightshift profile has not been exercised. The
 PagerDuty Events API v2 route, its routing-key provisioning and its
 trigger/resolve/resubmit procedure are in
 [`PAGERDUTY_RUNBOOK.md`](PAGERDUTY_RUNBOOK.md); no NQ or Constellation
 component emits PagerDuty conditions yet
 ([`PAGERDUTY_ALERT_MAP.md`](PAGERDUTY_ALERT_MAP.md)). `nq status export`
 derives the `notification`/`outbox` component from retained delivery records
-at read time.
+at read time, so its output changes for any store that has delivery records,
+Slack-only stores included. A PagerDuty record left `unknown` (for example
+after a timeout) blocks rollover for the life of the store.
 
 The remainder of this runbook preserves the earlier NQ-ng developer-preview
 service procedures. It remains useful for its named daemon, package and

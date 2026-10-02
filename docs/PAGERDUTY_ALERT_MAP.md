@@ -49,8 +49,19 @@ Notes:
   share a dedup key unless they use different `target_class` values, so a site
   that sends both should give them distinct classes (for example `oldest` and
   `indeterminate`).
-- `target_class` must name a stable class. Instance ids, digests, UUIDs,
-  timestamps and counts are refused because they would give every event its
-  own PagerDuty alert.
+- `site` and `target_class` are bounded by format and length only: 64 and 48
+  characters of `[a-z0-9._-]`. Keeping their cardinality low is the caller's
+  job. NQ refuses only obvious per-event values: anything containing
+  `sha256`, a UUID, a `YYYY-MM-DD` date, 32 or more hexadecimal characters, 8
+  or more consecutive digits, or only digits. Instance ids such as `host-1`,
+  `run-a7` or `i-0abc12` and counts such as `n42` pass, and each distinct value
+  opens its own PagerDuty alert.
+- The filter also has false positives. A site label with 8 or more digits,
+  such as `linode12345678`, is refused. Templated unit names such as
+  `getty@tty1.service` cannot be a `target_class`, because `@` is outside the
+  character set.
+- A resolve matches only the exact dedup key. If the trigger had a
+  `target_class`, a resolve without it (or with a different one) is still
+  `accepted` by PagerDuty and resolves nothing.
 - Runbook anchors refer to the Cartography design's `docs/RUNBOOKS.md`. A site
   can put its own published copy in `runbook_url`.

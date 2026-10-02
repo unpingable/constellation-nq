@@ -11,8 +11,14 @@ checks and Nightshift replay, then retained one local file; duplicate submission
 returned the same delivery identity without a second write. The caller example
 is in the [Monitor/Pulse source distribution](https://github.com/unpingable/constellation-nightshift/tree/main/integrations/monitor-predicate-support).
 This does not qualify a recurring deployment or human acknowledgment.
-**Live Slack/Discord destination delivery has not been verified.**
-Do not describe the webhook adapters or retained outbox as a completed notification
+
+Live destination delivery has been verified by hand-run operator-assertion
+intents, each with a person confirming receipt: Slack on 2026-10-01 (a
+disposable VM and the Linode observation host), Discord on 2026-10-02 (crow,
+released 0.2.0 binary), and PagerDuty on 2026-10-02 (a non-production
+service: trigger, repeated trigger on one dedup key, resolve). No component
+emits intents on its own, and acknowledgment is not implemented. Do not
+describe the adapters or retained outbox as a completed notification
 migration.
 
 For retained saved checks, the separate [saved-check attention adapter](SAVED_CHECK_ATTENTION.md)
@@ -161,23 +167,42 @@ automatic resolution or paging escalation. The PagerDuty adapter below sends an
 explicit trigger or resolve that a caller submits; it does not decide either.
 Delivery failure must remain visible to the operator without generating an
 alert storm. Existing inspection and local/operator handoff remain necessary
-until destination delivery and consumer binding have been independently
-verified.
+until consumer binding has been independently verified.
 
 ## Failure visibility in status export
 
 `nq status export` derives the `notification`/`outbox` component from retained
 delivery custody each time it is read, once any delivery record exists. It
-writes nothing and adds no table. The detail carries counts of `pending`,
-`refused`, `failed`, `unknown` and `accepted` records, the newest failed or
-uncertain record (its id, outcome, time and only the closed fields `reason`,
-`http_status` and `retry_class`), and the time of the newest accepted delivery.
-The component is `degraded`/`delivery_failure_unresolved` when the newest
-failure is later than the newest acceptance, `degraded`/`delivery_pending` when
-a record has no claim, and otherwise `healthy`/`delivery_custody_current`. A
-store without delivery records still shows the row written by `nq init`.
-Destination free text, such as a PagerDuty error message, appears only in
-`notification inspect`.
+writes nothing and adds no table or index, so the read scans every retained
+delivery event; its cost grows with the store's delivery history.
+
+The detail is grouped by route. For each route it gives counts of `pending`
+(retained, never claimed), `claimed_without_outcome` (in flight, or
+interrupted), `refused`, `failed`, `unknown` and `accepted` records, the time
+of the newest acceptance, and the unresolved failures. A failure is
+unresolved when it is the newest terminal outcome of its condition: the
+route, plus for a PagerDuty record its `site:component:rule[:target_class]`.
+A failure here is `failed`, `unknown`, or any refusal except the deliberate
+`network_dispatch_not_explicitly_enabled`, so a missing or malformed routing
+key counts. An acceptance on another route or for another condition does not
+resolve it. Each listed failure shows its id, condition, outcome, time and
+only the closed fields `reason`, `http_status` and `retry_class` (at most ten
+per route; the count is exact).
+
+The component is `degraded`/`delivery_failure_unresolved` when any
+unresolved failure exists, `healthy`/`delivery_in_flight` when a record is
+pending or claimed without an outcome, and otherwise
+`healthy`/`delivery_custody_current`. A claim without an outcome cannot be
+told apart from a send in progress, so it does not degrade the status; a
+record left that way stays in the counts, reads as `unknown` in `inspect`
+and blocks rollover. A store without delivery records still shows the row
+written by `nq init`. Destination free text, such as a PagerDuty error
+message, appears only in `notification inspect`.
+
+This changes the export for every store that has delivery records, including
+Slack-only stores: they now report the computed row instead of the
+initialization row (`outbox_empty`). The Slack delivery path is unchanged.
+Release notes should say so.
 
 ## PagerDuty Events API v2
 
@@ -185,8 +210,9 @@ The `pagerduty` transport sends one Events API v2 event per record to the fixed
 endpoint `https://events.pagerduty.com/v2/enqueue`. It uses the Events API only:
 no REST API token, acknowledgment, incident query or escalation management, so
 it works on a PagerDuty Free plan with an Events API v2 service integration.
-Live delivery has been qualified only if a separate qualification record says
-so; the adapter's tests use a loopback server.
+Live delivery was verified on 2026-10-02 against a non-production service
+(trigger, repeated trigger on one dedup key, resolve, with receipt confirmed in
+PagerDuty). The adapter's own tests use a loopback server.
 
 ```toml
 [[notification_routes]]
@@ -272,7 +298,10 @@ The detail also keeps the HTTP status and, when present, PagerDuty's `status`,
 `message` and up to five `errors`, each at most 256 characters with control
 characters removed and key-shaped runs masked. A response body is read up to
 `max_response_bytes`. `accepted` means PagerDuty accepted the event for
-processing; it does not establish that anyone was paged or read it.
+processing (it was enqueued). It does not establish that an incident exists,
+that anyone was paged or that anyone read it. A well-formed but wrong or
+revoked routing key also receives HTTP 202 `success`: PagerDuty drops the
+event silently. The only confirmation is the alert appearing in PagerDuty.
 
 ### Retry by resubmission
 
@@ -286,20 +315,44 @@ nq --config ./nq.toml notification resubmit \
 ```
 
 `resubmit` copies the retained v2 intent with only `stable_event_id` replaced
-and submits it to the same route. It refuses a record whose outcome is
-`accepted`, a v1 record, and the record's own event id. It accepts `failed`,
-`unknown`, `refused` and `pending` records. The original keeps its outcome. The
-new record has the same dedup key, so PagerDuty updates the same alert rather
-than opening a second one, and a later `resolve` for the same condition
-resolves exactly that alert. A Nightshift-receipt intent binds its event id to
-the receipt digest, so its resubmission fails replay; mint a new owner decision
-instead.
+and submits it to the same route, under the current submission validation. It
+refuses:
+
+- a record whose outcome is `accepted`;
+- a v1 record;
+- the record's own event id;
+- any record that is not the newest for its condition on its route. The
+  error names the later record.
+
+It accepts `failed`, `unknown`, `refused` and `pending` records that are the
+newest for their condition.
+
+The newest-only rule matters because PagerDuty matches a dedup key only
+against an open alert. Resending an older trigger after a later resolve was
+accepted would open a new alert for a cleared condition. Resending an older
+resolve after a later trigger would close the newer alert. When the newest
+record is resubmitted, it carries the same dedup key, so PagerDuty updates the
+alert that record was about instead of opening a second one. A later
+`resolve` for the same condition resolves exactly that alert. The original
+record keeps its outcome.
+
+A resolve resolves only the exact dedup key. A resolve that omits a
+`target_class` the trigger had (or adds one) gets `accepted` and closes
+nothing.
+
+A Nightshift-receipt intent binds its event id to the receipt digest, so its
+resubmission fails replay; mint a new owner decision instead.
 
 ### Restart
 
 Restart semantics are those of every HTTPS route. A record retained before its
 claim stays `pending`; a crash after the claim reads as `unknown`; neither is
-sent again by NQ. For PagerDuty an `unknown` (or `pending`) record is safe to
-resubmit: if the first request did reach PagerDuty, the second carries the same
-dedup key and updates the same alert. Rollover still refuses while a `pending`
-or `unknown` record exists, because those records remain as they are.
+sent again by NQ. Under the newest-only rule, an `unknown` (or `pending`)
+PagerDuty record is safe to resubmit: if the first request did reach
+PagerDuty, the second carries the same dedup key and updates the same alert.
+
+Rollover refuses while any `pending` or `unknown` record exists, and
+resubmission leaves the original record as it is. Timeouts make `unknown` a
+normal PagerDuty outcome, so a single one blocks rollover for the life of that
+store. The current contract has no way to mark such a record superseded; that
+is a known follow-up.

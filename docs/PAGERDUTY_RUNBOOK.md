@@ -85,20 +85,32 @@ result shows `delivery_state` and `dedup_key`
 nq --config /etc/nq/nq.toml notification inspect --notification-id ID
 ```
 
-`accepted` means PagerDuty answered 202 with `status: success`. Confirm that
-one alert is open in PagerDuty with that dedup key.
+`accepted` means PagerDuty answered 202 with `status: success`: the event was
+enqueued. It does not mean an incident exists. A well-formed but wrong or
+revoked routing key also gets 202 `success`, and PagerDuty then drops the event
+without any error. **The only confirmation is the alert appearing in
+PagerDuty.** Confirm that one alert is open with that dedup key.
 
 To resolve it, submit the same intent with `"action":"resolve"` and a new
-`stable_event_id` (for example `test-resolve-1`). Confirm the alert is resolved.
+`stable_event_id` (for example `test-resolve-1`). Keep the condition exactly
+the same, including `target_class`: a resolve for a different dedup key is
+also `accepted` and resolves nothing. Confirm the alert is resolved.
 A repeated trigger for the same condition with a new `stable_event_id` updates
 the same alert and does not open another.
 
 ## 5. When a delivery fails
 
 `nq status export` shows `notification`/`outbox` as
-`delivery_failure_unresolved` with the newest failure's `reason` and
-`http_status`. `notification inspect --notification-id ID` adds PagerDuty's
+`delivery_failure_unresolved` when, on some route, the newest terminal outcome
+for a condition is a failure. Refusals count, so a missing or malformed key
+shows here, except the deliberate `network_dispatch_not_explicitly_enabled`.
+The detail lists those failures per route with `reason`, `http_status` and
+`retry_class`. `notification inspect --notification-id ID` adds PagerDuty's
 message under `pagerduty.last_event.detail`.
+
+A healthy status does not prove that anyone was paged. `accepted` is what
+NQ can see, and a wrong but well-formed key is `accepted` too; check
+PagerDuty itself.
 
 | `reason` | Next step |
 |---|---|
@@ -106,8 +118,8 @@ message under `pagerduty.last_event.detail`.
 | `routing_key_malformed` | The value is not 32 hex characters; recopy the integration key, then resubmit. |
 | `network_dispatch_not_explicitly_enabled` | Resubmit with `--enable-network`. |
 | `rate_limited`, `server_error`, `connect_failed` | Retryable; resubmit after a pause. |
-| `rejected` | Permanent for that request: wrong or revoked key, or an invalid event. Read the PagerDuty message, fix the cause, then resubmit. |
-| `timeout_after_dispatch`, `transport_error_or_response_loss`, `success_not_confirmed`, or a claim without outcome | PagerDuty may have the event. Resubmitting is safe because it carries the same dedup key. |
+| `rejected` | Permanent for that request: PagerDuty refused the event (for example an invalid payload or a key it reports as malformed). Read the PagerDuty message, fix the cause, then resubmit. A wrong but well-formed key does not appear here; it is `accepted`. |
+| `timeout_after_dispatch`, `transport_error_or_response_loss`, `success_not_confirmed`, or a claim without outcome | PagerDuty may have the event. Resubmitting the newest record for the condition is safe, because it carries the same dedup key. |
 
 ```sh
 NQ_PAGERDUTY_OPS_ROUTING_KEY="$(cat ~/pagerduty-routing-key)" \
@@ -115,8 +127,15 @@ NQ_PAGERDUTY_OPS_ROUTING_KEY="$(cat ~/pagerduty-routing-key)" \
   --notification-id ID --stable-event-id test-trigger-1-r1 --enable-network
 ```
 
-NQ never resubmits on its own. The original record keeps its outcome, and
-rollover keeps refusing while a `pending` or `unknown` record exists.
+Resubmit only the newest record for a condition; NQ refuses older ones and
+names the later record. Resending an older trigger after a resolve would reopen
+a cleared alert, and resending an older resolve after a new trigger would close
+the new alert. If a later record exists, decide from the condition's current
+state and submit a fresh trigger or resolve instead.
+
+NQ never resubmits on its own. The original record keeps its outcome. Rollover
+keeps refusing while a `pending` or `unknown` record exists, so a single
+timeout blocks rollover for the life of that store.
 
 ## 6. After a plan change or key rotation
 
@@ -125,10 +144,11 @@ key rotation, repeat step 4 with new event ids. Confirm that:
 
 - the service and its Events API v2 integration still exist, and the key is
   the one in the environment file;
-- the trigger is `accepted` and opens an alert, and the resolve closes it;
+- the trigger is `accepted` *and* an alert appears in PagerDuty, and the
+  resolve closes it. `accepted` alone does not show that the key is right;
 - someone is actually notified. A downgrade can remove escalation steps,
   schedules or notification channels. NQ cannot see that: `accepted` only
-  means PagerDuty took the event.
+  means PagerDuty enqueued the event.
 
 When rotating the key, replace the environment file and restart or re-run the
 submitting unit. Old records do not hold the key, so nothing in the NQ store
