@@ -1795,6 +1795,8 @@ struct ValidationState {
     /// An applicable watermark of this store that an explicit full
     /// validation must not contradict.
     prior: Option<Box<ValidationWatermark>>,
+    /// Lazily built index of covered evaluations by run.
+    run_evaluations: std::cell::RefCell<Option<history_scope::RunEvaluations>>,
 }
 
 impl Default for ValidationState {
@@ -1805,6 +1807,7 @@ impl Default for ValidationState {
             store_validated: None,
             may_record: false,
             prior: None,
+            run_evaluations: std::cell::RefCell::new(None),
         }
     }
 }
@@ -2142,6 +2145,7 @@ impl Store {
             store_validated: Some(frontier),
             may_record: false,
             prior,
+            run_evaluations: std::cell::RefCell::new(None),
         };
         Ok(())
     }
@@ -3939,27 +3943,17 @@ impl Store {
         &self,
         run_id: &str,
     ) -> Result<Option<AdmittedCollectionRow>, StoreError> {
-        let evaluations = match self.run_evaluation_bound(run_id)? {
-            Some(bound) => format!(
-                "(SELECT COUNT(*) FROM evaluation_runs AS evaluation NOT INDEXED
-                  WHERE evaluation.trigger_run_id = run.run_id AND evaluation.rowid > {bound})"
-            ),
-            None => "(SELECT COUNT(*) FROM evaluation_runs AS evaluation
-                      WHERE evaluation.trigger_run_id = run.run_id)"
-                .to_owned(),
-        };
-        self.connection
+        let row = self
+            .connection
             .query_row(
-                &format!(
-                    "SELECT run.run_id, run.instance_id, report.report_id,
+                "SELECT run.run_id, run.instance_id, report.report_id,
                         report.report_sequence, report.report_status, report.semantic_digest,
-                        report.canonical_json, {evaluations}
+                        report.canonical_json
                  FROM watcher_runs AS run
                  JOIN raw_submissions AS submission ON submission.run_id = run.run_id
                  JOIN admitted_reports AS report
                    ON report.submission_id = submission.submission_id
-                 WHERE run.run_id = ?1 AND submission.admission_outcome = 'admitted'"
-                ),
+                 WHERE run.run_id = ?1 AND submission.admission_outcome = 'admitted'",
                 [run_id],
                 |row| {
                     Ok(AdmittedCollectionRow {
@@ -3970,12 +3964,17 @@ impl Store {
                         report_status: row.get(4)?,
                         semantic_digest: row.get(5)?,
                         canonical_json: row.get(6)?,
-                        evaluations: row.get(7)?,
+                        evaluations: 0,
                     })
                 },
             )
-            .optional()
-            .map_err(StoreError::from)
+            .optional()?;
+        row.map(|mut row| {
+            row.evaluations = i64::try_from(self.run_evaluation_rowids(run_id)?.len())
+                .map_err(|_| StoreError::Invariant("evaluation count overflowed".into()))?;
+            Ok(row)
+        })
+        .transpose()
     }
 
     /// Resolve one canonical detector evidence reference to its exact admitted
@@ -9792,6 +9791,44 @@ fn run_evaluations_sql(columns: &str, bound: Option<i64>) -> String {
     )
 }
 
+/// For full validation, the rowids of every evaluation by run, in append
+/// order, from one scan (`trigger_run_id` is unindexed in schema 13, so per-run
+/// lookups would each scan the table). `None` for a scoped validation.
+fn run_evaluations_in_full(
+    connection: &Connection,
+    scope: Scope<'_>,
+) -> Result<Option<std::collections::HashMap<String, Vec<i64>>>, StoreError> {
+    if !scope.is_full() {
+        return Ok(None);
+    }
+    let mut by_run: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
+    let mut statement = connection.prepare(
+        "SELECT trigger_run_id, rowid FROM evaluation_runs
+         WHERE trigger_run_id IS NOT NULL ORDER BY evaluation_sequence",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        by_run.entry(row.get(0)?).or_default().push(row.get(1)?);
+    }
+    Ok(Some(by_run))
+}
+
+/// Read the given evaluation rows, in the given order.
+fn evaluations_by_rowid<T>(
+    connection: &Connection,
+    columns: &str,
+    rowids: &[i64],
+    map: impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+) -> Result<Vec<T>, StoreError> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {columns} FROM evaluation_runs WHERE rowid = ?1"
+    ))?;
+    rowids
+        .iter()
+        .map(|rowid| statement.query_row([rowid], &map).map_err(StoreError::from))
+        .collect()
+}
+
 fn validate_admitted_evaluation_closures(
     connection: &Connection,
     scope: Scope<'_>,
@@ -9820,10 +9857,24 @@ fn validate_admitted_evaluation_closures(
             .collect::<Result<Vec<_>, _>>()?
     };
 
+    let mut covered = run_evaluations_in_full(connection, scope)?;
     for (run_id, expected_detector_identity, expected_evaluator_artifact, run_rowid) in
         admitted_runs
     {
-        let evaluations = {
+        let evaluations = if let Some(rowids) = covered.as_mut().map(|map| map.remove(&run_id)) {
+            evaluations_by_rowid(
+                connection,
+                "evaluation_id, detector_digest, evaluator_artifact_digest",
+                &rowids.unwrap_or_default(),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )?
+        } else {
             let mut statement = connection.prepare(&run_evaluations_sql(
                 "evaluation_id, detector_digest, evaluator_artifact_digest",
                 run_evaluation_bound(scope.frontier(), run_rowid),
@@ -9903,10 +9954,18 @@ fn validate_admitted_run_result_documents(
             })?
             .collect::<Result<Vec<_>, _>>()?
     };
+    let mut covered = run_evaluations_in_full(connection, scope)?;
     for (run_id, instance_id, report_id, report_status, semantic_digest, detail, run_rowid) in
         admitted_results
     {
-        let evaluations = {
+        let evaluations = if let Some(rowids) = covered.as_mut().map(|map| map.remove(&run_id)) {
+            evaluations_by_rowid(
+                connection,
+                "detail_json",
+                &rowids.unwrap_or_default(),
+                |row| row.get::<_, Vec<u8>>(0),
+            )?
+        } else {
             let mut statement = connection.prepare(&run_evaluations_sql(
                 "detail_json",
                 run_evaluation_bound(scope.frontier(), run_rowid),

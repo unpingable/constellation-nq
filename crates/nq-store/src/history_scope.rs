@@ -523,6 +523,34 @@ impl<'a> Scope<'a> {
     }
 }
 
+/// Evaluations by triggering run, as present when the index was built.
+#[derive(Debug)]
+pub(crate) struct RunEvaluations {
+    /// Highest evaluation rowid the index covers.
+    bound: Option<i64>,
+    by_run: std::collections::HashMap<String, Vec<i64>>,
+}
+
+impl RunEvaluations {
+    fn build(connection: &Connection) -> Result<Self, StoreError> {
+        let bound: Option<i64> =
+            connection.query_row("SELECT MAX(rowid) FROM evaluation_runs", [], |row| {
+                row.get(0)
+            })?;
+        let mut by_run: std::collections::HashMap<String, Vec<i64>> =
+            std::collections::HashMap::new();
+        let mut statement = connection.prepare(
+            "SELECT trigger_run_id, rowid FROM evaluation_runs
+             WHERE trigger_run_id IS NOT NULL AND rowid <= ?1 ORDER BY evaluation_sequence",
+        )?;
+        let mut rows = statement.query([bound.unwrap_or(i64::MIN)])?;
+        while let Some(row) = rows.next()? {
+            by_run.entry(row.get(0)?).or_default().push(row.get(1)?);
+        }
+        Ok(Self { bound, by_run })
+    }
+}
+
 /// Latest finding event of one evaluation lineage, as the finding-lineage
 /// replay holds it after replaying every covered evaluation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1027,17 +1055,43 @@ impl crate::Store {
         Ok(rowid.and_then(|rowid| crate::run_evaluation_bound(Some(frontier), rowid)))
     }
 
+    /// Rowids of every evaluation triggered by `run_id`, in append order.
+    /// `trigger_run_id` is unindexed in schema 13: a run newer than the
+    /// reference frontier is answered from the rowid range beyond it; any
+    /// other run from an index of evaluations by run built once per handle
+    /// (one scan of the evaluation table) plus the range appended since.
+    pub(crate) fn run_evaluation_rowids(&self, run_id: &str) -> Result<Vec<i64>, StoreError> {
+        let beyond = |bound: Option<i64>| -> Result<Vec<i64>, StoreError> {
+            self.connection
+                .prepare(&crate::run_evaluations_sql("rowid", bound))?
+                .query_map([run_id], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(StoreError::from)
+        };
+        if let Some(bound) = self.run_evaluation_bound(run_id)? {
+            return beyond(Some(bound));
+        }
+        let mut cache = self.validation.run_evaluations.borrow_mut();
+        if cache.is_none() {
+            *cache = Some(RunEvaluations::build(&self.connection)?);
+        }
+        let index = cache
+            .as_ref()
+            .ok_or_else(|| StoreError::Invariant("evaluation index was not built".into()))?;
+        let mut rowids = index.by_run.get(run_id).cloned().unwrap_or_default();
+        rowids.extend(beyond(Some(index.bound.unwrap_or(i64::MIN)))?);
+        Ok(rowids)
+    }
+
     /// The canonical detail of every evaluation triggered by `run_id`, in
     /// append order.
     pub fn evaluation_details_for_run(&self, run_id: &str) -> Result<Vec<Vec<u8>>, StoreError> {
-        self.connection
-            .prepare(&crate::run_evaluations_sql(
-                "detail_json",
-                self.run_evaluation_bound(run_id)?,
-            ))?
-            .query_map([run_id], |row| row.get(0))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+        crate::evaluations_by_rowid(
+            &self.connection,
+            "detail_json",
+            &self.run_evaluation_rowids(run_id)?,
+            |row| row.get(0),
+        )
     }
 
     /// Evaluation sequences, at or below `through_evaluation_sequence`, of the
