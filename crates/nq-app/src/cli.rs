@@ -1777,7 +1777,10 @@ fn diagnostic_inspect(config_path: &Path, artifact_id: &str, json_output: bool) 
             ..
         })
     ) {
-        nq_core::engine::validate_semantic_history(&store)?;
+        // History beyond the validation watermark, then the inspected
+        // artifact's own closure, as qualification does.
+        nq_core::engine::validate_semantic_history_since_open(&store)?;
+        nq_core::engine::validate_referenced_diagnostic_artifact(&store, &artifact_id)?;
     }
     print_value(
         &diagnostic_artifact_access_value(&store, &artifact_id)?,
@@ -1800,7 +1803,10 @@ fn diagnostic_export(config_path: &Path, artifact_id: &str) -> Result<()> {
         access.commitment.origin,
         DiagnosticArtifactOrigin::Local { .. }
     ) {
-        nq_core::engine::validate_semantic_history(&store)?;
+        // History beyond the validation watermark, then the exported
+        // artifact's own closure, as qualification does.
+        nq_core::engine::validate_semantic_history_since_open(&store)?;
+        nq_core::engine::validate_referenced_diagnostic_artifact(&store, &artifact_id)?;
     }
     match access.byte_state {
         DiagnosticArtifactByteState::VerifiedAvailable { canonical_bytes } => {
