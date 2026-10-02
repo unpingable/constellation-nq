@@ -1,7 +1,8 @@
 # Tell a person that attention is needed
 
-NQ includes experimental bounded Slack/Discord webhook delivery adapters and a
-local operator-inbox file adapter.
+NQ includes experimental bounded Slack/Discord webhook delivery adapters, a
+PagerDuty Events API v2 adapter ([below](#pagerduty-events-api-v2)) and a local
+operator-inbox file adapter.
 Deterministic transports and the real Nightshift-to-NQ replay interface have been
 exercised locally. Local-inbox source `1ef98c9c9934ea9dac481d3dcdc42fb7dd2bd073`
 passed 107 application tests, reusing 195 unchanged core tests. A four-component
@@ -89,7 +90,9 @@ Without `--enable-network`, submission retains a refusal without contacting or
 resolving the endpoint. It is not a dry run that can later be promoted: repeating
 that same event/destination returns its existing record. Any real message needs
 explicit operator authorization and a deliberately prepared delivery identity;
-never invent new event IDs to bypass an uncertain previous attempt.
+never invent new event IDs to bypass an uncertain previous attempt. PagerDuty
+routes are the one exception, because their dedup key makes a repeated send
+update the same alert; see [Retry by resubmission](#retry-by-resubmission).
 
 The intent is exact canonical JSON, at most32KiB, with schema
 `nq.notification_delivery_intent.v1`. It binds attention kind, event, transition,
@@ -150,10 +153,153 @@ delivery attempt.
 hard local-filesystem write or sync deadline. Use bounded caller supervision for
 the local command. If the process is interrupted after its custody claim, inspect
 the retained delivery record before any recovery decision; a claimed or `unknown`
-record is not permission to issue another delivery attempt.
+record is not permission to issue another delivery attempt, except by
+PagerDuty resubmission as described below.
 
 There is no recursive delivery-failure alert, retry daemon, acknowledgment,
-automatic resolution/update, paging escalation or PagerDuty integration. Delivery
-failure must remain visible to the operator without generating an alert storm.
-Existing inspection and local/operator handoff remain necessary until destination
-delivery and consumer binding have been independently verified.
+automatic resolution or paging escalation. The PagerDuty adapter below sends an
+explicit trigger or resolve that a caller submits; it does not decide either.
+Delivery failure must remain visible to the operator without generating an
+alert storm. Existing inspection and local/operator handoff remain necessary
+until destination delivery and consumer binding have been independently
+verified.
+
+## Failure visibility in status export
+
+`nq status export` derives the `notification`/`outbox` component from retained
+delivery custody each time it is read, once any delivery record exists. It
+writes nothing and adds no table. The detail carries counts of `pending`,
+`refused`, `failed`, `unknown` and `accepted` records, the newest failed or
+uncertain record (its id, outcome, time and only the closed fields `reason`,
+`http_status` and `retry_class`), and the time of the newest accepted delivery.
+The component is `degraded`/`delivery_failure_unresolved` when the newest
+failure is later than the newest acceptance, `degraded`/`delivery_pending` when
+a record has no claim, and otherwise `healthy`/`delivery_custody_current`. A
+store without delivery records still shows the row written by `nq init`.
+Destination free text, such as a PagerDuty error message, appears only in
+`notification inspect`.
+
+## PagerDuty Events API v2
+
+The `pagerduty` transport sends one Events API v2 event per record to the fixed
+endpoint `https://events.pagerduty.com/v2/enqueue`. It uses the Events API only:
+no REST API token, acknowledgment, incident query or escalation management, so
+it works on a PagerDuty Free plan with an Events API v2 service integration.
+Live delivery has been qualified only if a separate qualification record says
+so; the adapter's tests use a loopback server.
+
+```toml
+[[notification_routes]]
+reference = "pagerduty-ops"
+transport = "pagerduty"
+routing_key_env = "NQ_PAGERDUTY_OPS_ROUTING_KEY"
+timeout_ms = 10000
+max_response_bytes = 4096
+```
+
+`routing_key_env` names an environment variable ending in `_ROUTING_KEY`. Its
+value must be the 32-hexadecimal-character integration key. NQ reads it only
+after custody is retained and `--enable-network` is given. A missing value is
+retained as the refusal `routing_key_unavailable` and a malformed one as
+`routing_key_malformed`. The key is added to the request bytes only. It is not
+in the retained payload (the field is absent, not masked), the content digest,
+event details, inspection, status export or any error text, and destination
+text is masked if it echoes it. `endpoint_secret_locator` is refused on this
+transport; the endpoint cannot be redirected by configuration. See
+[`PAGERDUTY_RUNBOOK.md`](PAGERDUTY_RUNBOOK.md) for provisioning.
+
+### Intent v2
+
+A PagerDuty route accepts only `nq.notification_delivery_intent.v2`, and other
+routes refuse it. v1 is unchanged. A v2 intent has every v1 field (the summary
+may be up to 1024 bytes) and, with the same closed field set:
+
+| field | contract |
+|---|---|
+| `action` | `trigger` or `resolve` |
+| `condition.site` | bounded site or installation id, 1..=64 of `[a-z0-9._-]` |
+| `condition.component` | one of `nq`, `host_posture`, `nightshift`, `docket`, `ag`, `service` |
+| `condition.rule` | a beta alert registry anchor; see [`PAGERDUTY_ALERT_MAP.md`](PAGERDUTY_ALERT_MAP.md) |
+| `condition.target_class` | optional, 1..=48 of `[a-z0-9._-]` |
+| `severity` | `critical`, `error`, `warning` or `info` |
+| `runbook_url` | optional `https://` URL, at most 1024 bytes |
+| `details` | optional JSON object, at most 4 KiB canonical; key `constellation` is reserved and credential-like key names are refused |
+
+A condition names a stable class, never an event. NQ refuses, before any
+custody, a condition value that contains `sha256`, 32 or more consecutive
+hexadecimal characters, a UUID, a run of 8 or more digits, a `YYYY-MM-DD` date,
+or only digits. Like every other intent validation error this is a command
+error, not a retained record, so the event identity remains unused. The
+detection is pattern-based; it cannot recognize every per-event identity, and
+NQ cannot tell whether `details` prose holds a secret.
+
+### Dedup identity
+
+The PagerDuty `dedup_key` is derived, never supplied:
+
+```text
+constellation:{site}:{component}:{rule}            (no target_class)
+constellation:{site}:{component}:{rule}:{target_class}
+```
+
+For example `constellation:crow-lab:nq:nq-no-fresh-acquisition:demo`. A trigger
+sends `event_action`, `dedup_key` and `payload` (`summary`, `source` = site,
+`severity`, `component`, `group` = rule, `class` = target class, and
+`custom_details` = `details` plus `constellation` {schema, stable event id,
+transition id, intent digest, inspection reference}), with the runbook as a
+link. A resolve sends only `event_action` and `dedup_key`. The retained payload
+is this event without `routing_key`; `notification submit` and
+`notification inspect` show the dedup key.
+
+NQ records the v2 intent bytes in the existing intent custody row. That table's
+`intent_schema` column admits only the v1 value and names the custody row
+format; the submitted schema is the `schema` field inside the retained intent,
+as it already is for local-inbox wrappers. No store migration is involved.
+
+### Outcomes
+
+| PagerDuty response | Retained outcome | `reason` / `retry_class` |
+|---|---|---|
+| HTTP 202 with JSON `status: "success"` | `accepted` | — |
+| other 2xx | `unknown` | `success_not_confirmed` / `resubmit_safe` |
+| 429 | `failed` | `rate_limited` / `retryable` |
+| 5xx | `failed` | `server_error` / `retryable` |
+| other 4xx | `failed` | `rejected` / `permanent` |
+| connection refused or unreachable | `failed` | `connect_failed` / `retryable` |
+| timeout or loss after the request may have been sent | `unknown` | `timeout_after_dispatch` or `transport_error_or_response_loss` / `resubmit_safe` |
+
+The detail also keeps the HTTP status and, when present, PagerDuty's `status`,
+`message` and up to five `errors`, each at most 256 characters with control
+characters removed and key-shaped runs masked. A response body is read up to
+`max_response_bytes`. `accepted` means PagerDuty accepted the event for
+processing; it does not establish that anyone was paged or read it.
+
+### Retry by resubmission
+
+The one-claim, one-terminal custody of each record is unchanged, and NQ never
+retries inside a record. A retry is a new record: submit an intent with a new
+`stable_event_id` and the same condition, or derive one from a retained record:
+
+```sh
+nq --config ./nq.toml notification resubmit \
+  --notification-id ID --stable-event-id NEW-EVENT-ID --enable-network
+```
+
+`resubmit` copies the retained v2 intent with only `stable_event_id` replaced
+and submits it to the same route. It refuses a record whose outcome is
+`accepted`, a v1 record, and the record's own event id. It accepts `failed`,
+`unknown`, `refused` and `pending` records. The original keeps its outcome. The
+new record has the same dedup key, so PagerDuty updates the same alert rather
+than opening a second one, and a later `resolve` for the same condition
+resolves exactly that alert. A Nightshift-receipt intent binds its event id to
+the receipt digest, so its resubmission fails replay; mint a new owner decision
+instead.
+
+### Restart
+
+Restart semantics are those of every HTTPS route. A record retained before its
+claim stays `pending`; a crash after the claim reads as `unknown`; neither is
+sent again by NQ. For PagerDuty an `unknown` (or `pending`) record is safe to
+resubmit: if the first request did reach PagerDuty, the second carries the same
+dedup key and updates the same alert. Rollover still refuses while a `pending`
+or `unknown` record exists, because those records remain as they are.
