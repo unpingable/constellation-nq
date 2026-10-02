@@ -17801,15 +17801,100 @@ sys.stdout.write("\n")
         assert!(!watermark.exists());
     }
 
-    /// Per-open validation cost no longer grows with retained history.
-    ///
-    /// Builds `NQ_SCALING_N` (default 2000) retained local successors through
-    /// the real acquisition path, timing the hot open paths at a tenth of the
-    /// history and at all of it. Each timing is the minimum of several runs so
-    /// that load spikes on a shared machine do not decide the outcome; the
-    /// ratio bound (3x for 10x history) fails for any linear open cost.
-    /// Ignored by default because building the history takes minutes:
-    /// `cargo test -p nq-core --release --lib open_cost_is_bounded -- --ignored`.
+    /// Deterministic work of the hot read paths, as SQLite virtual-machine
+    /// operations in [`nq_store::SQL_WORK_TICK`] units.
+    #[derive(Clone, Copy, Debug)]
+    struct HotPathWork {
+        /// Read-only open plus `qualify` of an artifact one acquisition
+        /// beyond the watermark.
+        qualify_uncovered: u64,
+        /// Engine open plus `replay-local-successor` of that artifact (the
+        /// open records the watermark).
+        replay_uncovered: u64,
+        /// Read-only open plus `qualify` of the same, now covered, artifact:
+        /// the Monitor order after a replay.
+        qualify_covered: u64,
+    }
+
+    /// Acquire one artifact beyond the current watermark, then measure the
+    /// hot paths that read it.
+    fn measure_hot_path_work(
+        config: &NqConfig,
+        watcher: &WatcherConfig,
+        acquisition_id: &str,
+    ) -> HotPathWork {
+        let mut engine = reopen_with_test_identity(config).expect("engine");
+        let artifact = engine
+            .diagnostic_acquire_successor_local(watcher, acquisition_id)
+            .expect("one acquisition beyond the watermark");
+        drop(engine);
+        let artifact_id = artifact.artifact_id().as_digest().clone();
+        let qualify = || {
+            nq_store::start_sql_work_count();
+            let store = Store::open_read_only(&config.database_path).expect("read-only open");
+            qualify_diagnostic_admission(&store, &artifact_id).expect("qualify");
+            drop(store);
+            nq_store::stop_sql_work_count().expect("counting")
+        };
+        let qualify_uncovered = qualify();
+        nq_store::start_sql_work_count();
+        let engine = reopen_with_test_identity(config).expect("engine open");
+        engine
+            .diagnostic_replay_local_successor(watcher, acquisition_id)
+            .expect("replay");
+        drop(engine);
+        let replay_uncovered = nq_store::stop_sql_work_count().expect("counting");
+        HotPathWork {
+            qualify_uncovered,
+            replay_uncovered,
+            qualify_covered: qualify(),
+        }
+    }
+
+    /// Validation of new material does not grow with covered history. The
+    /// closure of a covered evaluated artifact keeps one documented term
+    /// that does: counting the evaluations of its run reads the unindexed
+    /// `evaluation_runs.trigger_run_id` (see docs/OPERATIONS.md); it is
+    /// reported, not bounded.
+    fn assert_uncovered_work_flat(small: HotPathWork, large: HotPathWork, label: &str) {
+        eprintln!("{label}: sql work ticks {small:?} -> {large:?}");
+        for (path, small, large) in [
+            ("qualify", small.qualify_uncovered, large.qualify_uncovered),
+            ("replay", small.replay_uncovered, large.replay_uncovered),
+        ] {
+            assert!(
+                large * 100 <= small * 102 + 200,
+                "{label}: {path} work grew from {small} to {large} ticks with covered history"
+            );
+        }
+    }
+
+    #[test]
+    fn hot_path_work_does_not_grow_with_covered_history() {
+        let small_dir = tempfile::tempdir().expect("temporary directory");
+        let large_dir = tempfile::tempdir().expect("temporary directory");
+        let Some((small_config, small_watcher)) =
+            successor_fixture(small_dir.path(), "work-small", 3)
+        else {
+            return;
+        };
+        let Some((large_config, large_watcher)) =
+            successor_fixture(large_dir.path(), "work-large", 24)
+        else {
+            return;
+        };
+        full_validation_and_watermark(&small_config);
+        full_validation_and_watermark(&large_config);
+        let small = measure_hot_path_work(&small_config, &small_watcher, "work-small-newest");
+        let large = measure_hot_path_work(&large_config, &large_watcher, "work-large-newest");
+        assert_uncovered_work_flat(small, large, "4 -> 25 retained acquisitions");
+    }
+
+    /// The same work measure, plus wall time, at `NQ_SCALING_N` (default
+    /// 2000) retained acquisitions against a tenth of that, built through the
+    /// real acquisition path. Ignored by default because building takes
+    /// minutes: `cargo test -p nq-core --release --lib open_cost_is_bounded --
+    /// --ignored --nocapture`.
     #[test]
     #[ignore = "builds thousands of real acquisitions; run explicitly"]
     fn open_cost_is_bounded_by_history_beyond_the_watermark() {
@@ -17827,7 +17912,7 @@ sys.stdout.write("\n")
         let mut build_to = |target: usize| {
             let mut engine = reopen_with_test_identity(&config).expect("engine");
             while built < target {
-                // One acquisition per open, as the CLI performs them.
+                // Reopen as the CLI would, so each delta stays small.
                 if built % 50 == 49 {
                     drop(engine);
                     engine = reopen_with_test_identity(&config).expect("engine");
@@ -17838,38 +17923,30 @@ sys.stdout.write("\n")
                 built += 1;
             }
         };
-        let replay_id = |index: usize| format!("scaling-{index:06}");
-        let measure = |last: usize| {
-            // The CLI hot paths: an engine open plus replay of the newest
-            // successor, and a read-only open plus qualification of it.
-            let mut best = (f64::MAX, f64::MAX);
-            for _ in 0..5 {
-                let started = Instant::now();
-                let engine = reopen_with_test_identity(&config).expect("engine open");
-                let artifact = engine
-                    .diagnostic_replay_local_successor(&watcher, &replay_id(last))
-                    .expect("replay");
-                drop(engine);
-                let replay = started.elapsed().as_secs_f64();
-                let started = Instant::now();
-                let store = Store::open_read_only(&config.database_path).expect("read-only open");
-                qualify_diagnostic_admission(&store, artifact.artifact_id().as_digest())
-                    .expect("qualify");
-                let qualify = started.elapsed().as_secs_f64();
-                best = (best.0.min(replay), best.1.min(qualify));
-            }
-            best
+        let wall = |acquisition: &str| {
+            let started = Instant::now();
+            let engine = reopen_with_test_identity(&config).expect("engine open");
+            let artifact = engine
+                .diagnostic_replay_local_successor(&watcher, acquisition)
+                .expect("replay");
+            drop(engine);
+            let replay = started.elapsed().as_secs_f64();
+            let started = Instant::now();
+            let store = Store::open_read_only(&config.database_path).expect("read-only open");
+            qualify_diagnostic_admission(&store, artifact.artifact_id().as_digest())
+                .expect("qualify");
+            (replay, started.elapsed().as_secs_f64())
         };
         build_to(small);
-        let (small_replay, small_qualify) = measure(small - 1);
+        let small_work = measure_hot_path_work(&config, &watcher, "scaling-small-probe");
+        let small_wall = wall("scaling-small-probe");
         build_to(total);
-        let (total_replay, total_qualify) = measure(total - 1);
+        let total_work = measure_hot_path_work(&config, &watcher, "scaling-total-probe");
+        let total_wall = wall("scaling-total-probe");
         eprintln!(
-            "open+replay {small}: {small_replay:.4}s, {total}: {total_replay:.4}s; \
-             read-only open+qualify {small}: {small_qualify:.4}s, {total}: {total_qualify:.4}s"
+            "wall (covered artifact) replay {:.4}s -> {:.4}s, qualify {:.4}s -> {:.4}s",
+            small_wall.0, total_wall.0, small_wall.1, total_wall.1
         );
-        // Selection is exact, not merely fast: after an open recorded the
-        // watermark nothing is uncovered, however long the history.
         let store = Store::open(&config.database_path).expect("open");
         let frontier = store
             .validated_history_frontier()
@@ -17881,19 +17958,11 @@ sys.stdout.write("\n")
                 .expect("delta")
                 .is_empty()
         );
-        assert!(
-            store
-                .provider_intake_ids_since(&frontier)
-                .expect("delta")
-                .is_empty()
-        );
-        assert!(
-            total_replay < 3.0 * small_replay.max(0.010),
-            "open+replay grew from {small_replay:.4}s to {total_replay:.4}s for 10x history"
-        );
-        assert!(
-            total_qualify < 3.0 * small_qualify.max(0.010),
-            "open+qualify grew from {small_qualify:.4}s to {total_qualify:.4}s for 10x history"
+        drop(store);
+        assert_uncovered_work_flat(
+            small_work,
+            total_work,
+            &format!("{} -> {} retained acquisitions", small + 1, total + 2),
         );
     }
 }

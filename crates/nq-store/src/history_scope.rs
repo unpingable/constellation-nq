@@ -29,8 +29,8 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
 use rusqlite::types::ValueRef;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -452,6 +452,22 @@ impl<'a> Scope<'a> {
 
     pub(crate) fn is_full(self) -> bool {
         self.after.is_none()
+    }
+
+    /// Ordering for a query restricted to new rows of `alias`: the original
+    /// key for full validation (so its first reported violation is
+    /// unchanged), the rowid in scope so SQLite walks only the new rowid range.
+    pub(crate) fn order(self, alias: &str, key: &str) -> String {
+        if self.is_full() {
+            format!("{alias}.{key}")
+        } else {
+            format!("{alias}.rowid")
+        }
+    }
+
+    /// The validated frontier, or `None` for a full scope.
+    pub(crate) fn frontier(self) -> Option<&'a HistoryFrontier> {
+        self.after
     }
 
     /// SQL predicate selecting rows of `table` (aliased `alias`) beyond the
@@ -987,14 +1003,38 @@ impl crate::Store {
         crate::validate_provider_intake_invariants(&self.connection, Scope::after(frontier))
     }
 
+    /// The frontier whose capture time bounds what new rows can reference:
+    /// the applied watermark's, else this handle's open frontier.
+    pub(crate) fn reference_frontier(&self) -> Option<&HistoryFrontier> {
+        self.validated_history_frontier()
+            .or(self.validation.store_validated.as_ref())
+    }
+
+    /// Rowid lower bound for the evaluations that can name `run_id`, when the
+    /// run is newer than [`Self::reference_frontier`].
+    pub(crate) fn run_evaluation_bound(&self, run_id: &str) -> Result<Option<i64>, StoreError> {
+        let Some(frontier) = self.reference_frontier() else {
+            return Ok(None);
+        };
+        let rowid: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT rowid FROM watcher_runs WHERE run_id = ?1",
+                [run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(rowid.and_then(|rowid| crate::run_evaluation_bound(Some(frontier), rowid)))
+    }
+
     /// The canonical detail of every evaluation triggered by `run_id`, in
     /// append order.
     pub fn evaluation_details_for_run(&self, run_id: &str) -> Result<Vec<Vec<u8>>, StoreError> {
         self.connection
-            .prepare(
-                "SELECT detail_json FROM evaluation_runs
-                 WHERE trigger_run_id = ?1 ORDER BY evaluation_sequence",
-            )?
+            .prepare(&crate::run_evaluations_sql(
+                "detail_json",
+                self.run_evaluation_bound(run_id)?,
+            ))?
             .query_map([run_id], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)

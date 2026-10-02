@@ -2350,7 +2350,7 @@ impl Store {
         validate_diagnostic_artifact_invariants(&self.connection, scope)?;
         validate_admitted_report_associations_connection(&self.connection, scope)?;
         validate_status_sequence_lower_bound(&self.connection, scope)?;
-        validate_projection_invariants(&self.connection)
+        validate_projection_invariants(&self.connection, scope)
     }
 
     /// Append a compiled descriptor snapshot. Its digest is over canonical bytes.
@@ -3780,6 +3780,13 @@ impl Store {
         inclusive: bool,
     ) -> Result<Vec<ProviderIntakeRow>, StoreError> {
         let comparison = if inclusive { ">=" } else { ">" };
+        // A cursor bounds the identity index range; `?1 IS NULL OR …` would
+        // make SQLite walk the index from its start.
+        let range = if cursor.is_some() {
+            format!("intake.intake_id {comparison} ?1")
+        } else {
+            "?1 IS NULL".to_owned()
+        };
         let sql = format!(
             "SELECT intake.intake_id, intake.attempt_id, intake.idempotency_key,
                     intake.request_id, intake.provider_admission_id,
@@ -3804,7 +3811,7 @@ impl Store {
              JOIN local_watcher_provider_intakes AS local ON local.intake_id = intake.intake_id
              JOIN admission_records AS source
                ON source.admission_id = intake.source_admission_id
-             WHERE ?1 IS NULL OR intake.intake_id {comparison} ?1
+             WHERE {range}
              ORDER BY intake.intake_id LIMIT ?2"
         );
         let mut statement = self.connection.prepare(&sql)?;
@@ -3932,22 +3939,27 @@ impl Store {
         &self,
         run_id: &str,
     ) -> Result<Option<AdmittedCollectionRow>, StoreError> {
+        let evaluations = match self.run_evaluation_bound(run_id)? {
+            Some(bound) => format!(
+                "(SELECT COUNT(*) FROM evaluation_runs AS evaluation NOT INDEXED
+                  WHERE evaluation.trigger_run_id = run.run_id AND evaluation.rowid > {bound})"
+            ),
+            None => "(SELECT COUNT(*) FROM evaluation_runs AS evaluation
+                      WHERE evaluation.trigger_run_id = run.run_id)"
+                .to_owned(),
+        };
         self.connection
             .query_row(
-                "SELECT run.run_id, run.instance_id, report.report_id,
+                &format!(
+                    "SELECT run.run_id, run.instance_id, report.report_id,
                         report.report_sequence, report.report_status, report.semantic_digest,
-                        report.canonical_json,
-                        COUNT(evaluation.evaluation_id)
+                        report.canonical_json, {evaluations}
                  FROM watcher_runs AS run
                  JOIN raw_submissions AS submission ON submission.run_id = run.run_id
                  JOIN admitted_reports AS report
                    ON report.submission_id = submission.submission_id
-                 LEFT JOIN evaluation_runs AS evaluation
-                   ON evaluation.trigger_run_id = run.run_id
-                 WHERE run.run_id = ?1 AND submission.admission_outcome = 'admitted'
-                 GROUP BY run.run_id, run.instance_id, report.report_id,
-                          report.report_sequence, report.report_status,
-                          report.semantic_digest, report.canonical_json",
+                 WHERE run.run_id = ?1 AND submission.admission_outcome = 'admitted'"
+                ),
                 [run_id],
                 |row| {
                     Ok(AdmittedCollectionRow {
@@ -4276,7 +4288,7 @@ impl Store {
             [],
         )?;
         transaction.commit()?;
-        validate_projection_invariants(&self.connection)
+        validate_projection_invariants(&self.connection, Scope::FULL)
     }
 
     fn immediate_transaction(&mut self) -> Result<Transaction<'_>, StoreError> {
@@ -5368,7 +5380,7 @@ impl Store {
             validate_run_results(&transaction, Scope::FULL)?;
             validate_evaluation_refusal_invariants(&transaction, Scope::FULL)?;
             validate_status_sequence_lower_bound(&transaction, Scope::FULL)?;
-            validate_projection_invariants(&transaction)?;
+            validate_projection_invariants(&transaction, Scope::FULL)?;
             let mut committed_receipt = receipt.clone();
             committed_receipt.finished_at = now_utc();
             insert_upgrade_receipt(&transaction, &committed_receipt)?;
@@ -5478,7 +5490,7 @@ impl Store {
             validate_evaluation_refusal_invariants(&transaction, Scope::FULL)?;
             validate_diagnostic_artifact_invariants(&transaction, Scope::FULL)?;
             validate_status_sequence_lower_bound(&transaction, Scope::FULL)?;
-            validate_projection_invariants(&transaction)?;
+            validate_projection_invariants(&transaction, Scope::FULL)?;
             let mut committed_receipt = receipt.clone();
             committed_receipt.finished_at = now_utc();
             insert_upgrade_receipt(&transaction, &committed_receipt)?;
@@ -5586,7 +5598,7 @@ impl Store {
         validate_diagnostic_artifact_invariants(&transaction, Scope::FULL)?;
         validate_admitted_report_associations_connection(&transaction, Scope::FULL)?;
         validate_status_sequence_lower_bound(&transaction, Scope::FULL)?;
-        validate_projection_invariants(&transaction)?;
+        validate_projection_invariants(&transaction, Scope::FULL)?;
         transaction.commit()?;
         store.schema_mode = StoreSchemaMode::LegacyUpgradeV12;
         validate_v12_upgrade_source_connection(&store.connection)?;
@@ -6049,7 +6061,30 @@ impl Store {
             ));
         }
         validate_evaluation_revision_shape(&self.connection, self.since_open())?;
-        let mut statement = self.connection.prepare(
+        // `refusals.evaluation_id` and `finding_events.evaluation_id` are
+        // unindexed. Evaluations newer than a captured frontier can only be
+        // named by refusals and finding events newer than it, so a page of
+        // such evaluations reads only those ranges.
+        let (refusal_range, finding_range) = match self.reference_frontier() {
+            Some(frontier)
+                if after_evaluation_sequence.unwrap_or(0) >= frontier.evaluation_sequence =>
+            {
+                (
+                    format!(
+                        " AND {{alias}}.rowid > {}",
+                        frontier.max_rowid("refusals").unwrap_or(i64::MIN)
+                    ),
+                    format!(
+                        " AND {{alias}}.rowid > {}",
+                        frontier.max_rowid("finding_events").unwrap_or(i64::MIN)
+                    ),
+                )
+            }
+            _ => (String::new(), String::new()),
+        };
+        let refusal = |alias: &str| refusal_range.replace("{alias}", alias);
+        let finding = |alias: &str| finding_range.replace("{alias}", alias);
+        let mut statement = self.connection.prepare(&format!(
             "SELECT evaluation.evaluation_id, evaluation.trigger_run_id,
                     evaluation.detector_id, evaluation.detector_version,
                     evaluation.detector_digest, evaluation.evaluator_artifact_digest,
@@ -6080,14 +6115,14 @@ impl Store {
                     prior.operator_work_state, prior.severity, prior.summary,
                     evaluation.evaluation_sequence,
                     (SELECT COUNT(*) FROM refusals AS linked_refusal
-                     WHERE linked_refusal.evaluation_id = evaluation.evaluation_id),
+                     WHERE linked_refusal.evaluation_id = evaluation.evaluation_id{}),
                     (SELECT COUNT(*) FROM finding_events AS linked_finding
-                     WHERE linked_finding.evaluation_id = evaluation.evaluation_id)
+                     WHERE linked_finding.evaluation_id = evaluation.evaluation_id{})
              FROM evaluation_runs AS evaluation
              LEFT JOIN refusals AS refusal
-               ON refusal.evaluation_id = evaluation.evaluation_id
+               ON refusal.evaluation_id = evaluation.evaluation_id{}
              LEFT JOIN finding_events AS finding
-               ON finding.evaluation_id = evaluation.evaluation_id
+               ON finding.evaluation_id = evaluation.evaluation_id{}
              LEFT JOIN finding_events AS prior
                ON prior.finding_id = finding.finding_id
               AND prior.event_revision = finding.event_revision - 1
@@ -6095,7 +6130,11 @@ impl Store {
                AND evaluation.evaluation_sequence <= ?2
              ORDER BY evaluation.evaluation_sequence
              LIMIT ?3",
-        )?;
+            refusal("linked_refusal"),
+            finding("linked_finding"),
+            refusal("refusal"),
+            finding("finding"),
+        ))?;
         let rows = statement.query_map(
             params![
                 after_evaluation_sequence,
@@ -7091,7 +7130,7 @@ fn validate_v12_upgrade_source_connection(connection: &Connection) -> Result<(),
     validate_diagnostic_artifact_invariants(connection, Scope::FULL)?;
     validate_admitted_report_associations_connection(connection, Scope::FULL)?;
     validate_status_sequence_lower_bound(connection, Scope::FULL)?;
-    validate_projection_invariants(connection)?;
+    validate_projection_invariants(connection, Scope::FULL)?;
     Ok(())
 }
 
@@ -7156,7 +7195,7 @@ fn validate_v5_public_upgrade_source_connection(connection: &Connection) -> Resu
     validate_diagnostic_artifact_invariants(connection, Scope::FULL)?;
     validate_admitted_report_associations_connection(connection, Scope::FULL)?;
     validate_status_sequence_lower_bound(connection, Scope::FULL)?;
-    validate_projection_invariants(connection)
+    validate_projection_invariants(connection, Scope::FULL)
 }
 
 fn insert_upgrade_receipt(
@@ -8136,6 +8175,21 @@ fn validate_local_diagnostic_artifact_origin_modes(
             "local diagnostic artifact {artifact_id} run/evaluation linkage disagrees"
         )));
     }
+    // `trigger_run_id` is unindexed; a run newer than the frontier can only
+    // be named by evaluations newer than it, so only that range is read.
+    let any_evaluation = "EXISTS (SELECT 1 FROM evaluation_runs AS evaluation
+                          WHERE evaluation.trigger_run_id = local.run_id)";
+    let run_has_evaluation = match scope.frontier() {
+        Some(frontier) => format!(
+            "(CASE WHEN run.rowid > {} THEN EXISTS (SELECT 1 FROM evaluation_runs AS evaluation
+                  NOT INDEXED
+                  WHERE evaluation.trigger_run_id = local.run_id AND evaluation.rowid > {})
+              ELSE {any_evaluation} END)",
+            frontier.max_rowid("watcher_runs").unwrap_or(i64::MIN),
+            frontier.max_rowid("evaluation_runs").unwrap_or(i64::MIN),
+        ),
+        None => any_evaluation.to_owned(),
+    };
     let invalid_run_only_local: Option<String> = connection
         .query_row(
             &format!(
@@ -8144,10 +8198,7 @@ fn validate_local_diagnostic_artifact_origin_modes(
              JOIN watcher_runs AS run ON run.run_id = local.run_id
              WHERE {run_only_origins} AND local.evaluation_id IS NULL
                AND (
-                    EXISTS (
-                        SELECT 1 FROM evaluation_runs AS evaluation
-                        WHERE evaluation.trigger_run_id = local.run_id
-                    )
+                    {run_has_evaluation}
                  OR (
                         run.acquisition_outcome = 'response'
                     AND NOT EXISTS (
@@ -8483,7 +8534,7 @@ fn validate_v3_upgrade_source_connection(connection: &Connection) -> Result<(), 
     validate_evaluation_refusal_invariants(connection, Scope::FULL)?;
     validate_admitted_report_associations_connection(connection, Scope::FULL)?;
     validate_status_sequence_lower_bound(connection, Scope::FULL)?;
-    validate_projection_invariants(connection)
+    validate_projection_invariants(connection, Scope::FULL)
 }
 
 fn validate_v4_upgrade_source_connection(connection: &Connection) -> Result<(), StoreError> {
@@ -8552,7 +8603,7 @@ fn validate_v4_upgrade_source_connection(connection: &Connection) -> Result<(), 
     validate_evaluation_refusal_invariants(connection, Scope::FULL)?;
     validate_admitted_report_associations_connection(connection, Scope::FULL)?;
     validate_status_sequence_lower_bound(connection, Scope::FULL)?;
-    validate_projection_invariants(connection)
+    validate_projection_invariants(connection, Scope::FULL)
 }
 
 fn validate_admitted_report_associations_connection(
@@ -8623,7 +8674,9 @@ fn validate_admitted_report_associations_connection(
                 OR report.profile_version IS NOT admission.profile_version
                 OR report.profile_digest IS NOT admission.profile_digest
                 OR report.received_at IS NOT submission.received_at)
-             ORDER BY report.report_id LIMIT 1"
+             ORDER BY {}
+             LIMIT 1",
+                scope.order("report", "report_id")
             ),
             [],
             |row| row.get(0),
@@ -8838,8 +8891,9 @@ fn schema_fingerprint(connection: &Connection) -> Result<String, StoreError> {
 fn validate_stored_digests(connection: &Connection, scope: Scope<'_>) -> Result<(), StoreError> {
     let mut raw = connection.prepare(&format!(
         "SELECT submission_id, raw_bytes, raw_sha256 FROM raw_submissions AS submission
-         WHERE {} ORDER BY submission_id",
-        scope.new_rows("raw_submissions", "submission")
+         WHERE {} ORDER BY {}",
+        scope.new_rows("raw_submissions", "submission"),
+        scope.order("submission", "submission_id")
     ))?;
     let mut raw_rows = raw.query([])?;
     while let Some(row) = raw_rows.next()? {
@@ -8856,8 +8910,9 @@ fn validate_stored_digests(connection: &Connection, scope: Scope<'_>) -> Result<
 
     let mut reports = connection.prepare(&format!(
         "SELECT report_id, canonical_json, semantic_digest FROM admitted_reports AS report
-         WHERE {} ORDER BY report_id",
-        scope.new_rows("admitted_reports", "report")
+         WHERE {} ORDER BY {}",
+        scope.new_rows("admitted_reports", "report"),
+        scope.order("report", "report_id")
     ))?;
     let mut report_rows = reports.query([])?;
     while let Some(row) = report_rows.next()? {
@@ -9484,7 +9539,9 @@ fn validate_refusal_invariants(
                  OR (run_id IS NULL AND submission_id IS NULL
                      AND evaluation_id IS NOT NULL)
              )
-             ORDER BY refusal_id LIMIT 1"
+             ORDER BY {}
+             LIMIT 1",
+                scope.order("refusal", "refusal_id")
             ),
             [],
             |row| row.get(0),
@@ -9585,7 +9642,8 @@ fn validate_refusal_invariants(
     }
 
     let mut statement = connection.prepare(&format!(
-        "SELECT refusal_id, detail_json FROM refusals AS refusal WHERE {new_refusals} ORDER BY refusal_id"
+        "SELECT refusal_id, detail_json FROM refusals AS refusal WHERE {new_refusals} ORDER BY {}",
+        scope.order("refusal", "refusal_id")
     ))?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
@@ -9654,8 +9712,8 @@ fn validate_run_results(connection: &Connection, scope: Scope<'_>) -> Result<(),
         )));
     }
 
-    validate_admitted_evaluation_closures(connection, &runs)?;
-    validate_admitted_run_result_documents(connection, &runs)?;
+    validate_admitted_evaluation_closures(connection, scope, &runs)?;
+    validate_admitted_run_result_documents(connection, scope, &runs)?;
 
     let invalid_evaluation_trigger: Option<String> = connection
         .query_row(
@@ -9708,14 +9766,41 @@ fn run_result_scope(scope: Scope<'_>) -> String {
 /// artifact bound by its admission. This validation is shared by the atomic
 /// writer and historical reopening, so neither path can accept a semantically
 /// partial or substituted judging mechanism.
+/// Rowid lower bound for the evaluations that can name a run: a run appended
+/// after `frontier` was captured can only be named by evaluations appended
+/// after it, because evaluations reference their run and history is
+/// append-only. `None` when every evaluation must be searched.
+fn run_evaluation_bound(frontier: Option<&HistoryFrontier>, run_rowid: i64) -> Option<i64> {
+    let frontier = frontier?;
+    frontier
+        .max_rowid("watcher_runs")
+        .is_none_or(|bound| run_rowid > bound)
+        .then(|| frontier.max_rowid("evaluation_runs").unwrap_or(i64::MIN))
+}
+
+/// The evaluations of one run (`?1`), in append order, read only above
+/// `bound` when the run is newer than a captured frontier. `trigger_run_id`
+/// is not indexed in schema 13, so without a bound this scans the table.
+fn run_evaluations_sql(columns: &str, bound: Option<i64>) -> String {
+    let (hint, range) = bound.map_or_else(
+        || (String::new(), String::new()),
+        |bound| ("NOT INDEXED ".to_owned(), format!(" AND rowid > {bound}")),
+    );
+    format!(
+        "SELECT {columns} FROM evaluation_runs {hint}WHERE trigger_run_id = ?1{range} \
+         ORDER BY evaluation_sequence"
+    )
+}
+
 fn validate_admitted_evaluation_closures(
     connection: &Connection,
+    scope: Scope<'_>,
     runs: &str,
 ) -> Result<(), StoreError> {
     let admitted_runs = {
         let mut statement = connection.prepare(&format!(
             "SELECT run.run_id, admission.detector_identity_digest,
-                    admission.evaluator_artifact_digest
+                    admission.evaluator_artifact_digest, run.rowid
              FROM watcher_runs AS run
              JOIN raw_submissions AS submission ON submission.run_id = run.run_id
              JOIN admission_records AS admission
@@ -9729,19 +9814,20 @@ fn validate_admitted_evaluation_closures(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
     };
 
-    for (run_id, expected_detector_identity, expected_evaluator_artifact) in admitted_runs {
+    for (run_id, expected_detector_identity, expected_evaluator_artifact, run_rowid) in
+        admitted_runs
+    {
         let evaluations = {
-            let mut statement = connection.prepare(
-                "SELECT evaluation_id, detector_digest, evaluator_artifact_digest
-                 FROM evaluation_runs
-                 WHERE trigger_run_id = ?1
-                 ORDER BY evaluation_sequence",
-            )?;
+            let mut statement = connection.prepare(&run_evaluations_sql(
+                "evaluation_id, detector_digest, evaluator_artifact_digest",
+                run_evaluation_bound(scope.frontier(), run_rowid),
+            ))?;
             statement
                 .query_map([&run_id], |row| {
                     Ok((
@@ -9788,12 +9874,13 @@ fn validate_admitted_evaluation_closures(
 
 fn validate_admitted_run_result_documents(
     connection: &Connection,
+    scope: Scope<'_>,
     runs: &str,
 ) -> Result<(), StoreError> {
     let admitted_results = {
         let mut statement = connection.prepare(&format!(
             "SELECT run.run_id, run.instance_id, report.report_id,
-                    report.report_status, report.semantic_digest, status.detail_json
+                    report.report_status, report.semantic_digest, status.detail_json, run.rowid
              FROM watcher_runs AS run
              JOIN raw_submissions AS submission ON submission.run_id = run.run_id
              JOIN admitted_reports AS report
@@ -9811,17 +9898,19 @@ fn validate_admitted_run_result_documents(
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, Vec<u8>>(5)?,
+                    row.get::<_, i64>(6)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?
     };
-    for (run_id, instance_id, report_id, report_status, semantic_digest, detail) in admitted_results
+    for (run_id, instance_id, report_id, report_status, semantic_digest, detail, run_rowid) in
+        admitted_results
     {
         let evaluations = {
-            let mut statement = connection.prepare(
-                "SELECT detail_json FROM evaluation_runs
-                 WHERE trigger_run_id = ?1 ORDER BY evaluation_sequence",
-            )?;
+            let mut statement = connection.prepare(&run_evaluations_sql(
+                "detail_json",
+                run_evaluation_bound(scope.frontier(), run_rowid),
+            ))?;
             statement
                 .query_map([&run_id], |row| row.get::<_, Vec<u8>>(0))?
                 .collect::<Result<Vec<_>, _>>()?
@@ -10142,8 +10231,9 @@ fn validate_evaluation_refusal_invariants(
                       AND prior.condition_name = event.condition_name
                       AND prior.basis_json = event.basis_json
                 )))
-             ORDER BY event.event_id
-             LIMIT 1"
+             ORDER BY {}
+             LIMIT 1",
+                scope.order("event", "event_id")
             ),
             [],
             |row| row.get(0),
@@ -10224,8 +10314,9 @@ fn validate_evaluation_refusal_invariants(
     }
 
     let mut evaluations = connection.prepare(&format!(
-        "SELECT evaluation_id, detail_json FROM evaluation_runs AS evaluation WHERE {} ORDER BY evaluation_id",
-        scope.new_rows("evaluation_runs", "evaluation")
+        "SELECT evaluation_id, detail_json FROM evaluation_runs AS evaluation WHERE {} ORDER BY {}",
+        scope.new_rows("evaluation_runs", "evaluation"),
+        scope.order("evaluation", "evaluation_id")
     ))?;
     let mut rows = evaluations.query([])?;
     while let Some(row) = rows.next()? {
@@ -10244,21 +10335,23 @@ fn validate_evaluation_revision_shape(
     connection: &Connection,
     scope: Scope<'_>,
 ) -> Result<(), StoreError> {
-    // Per-row revision bounds read whole rows, so they cover only the scope;
-    // sequence and lineage contiguity below are index-only aggregates over
-    // the complete lineage.
+    // Per-row revision bounds cover only the scope; in scope the rowid range
+    // drives the scan (NOT INDEXED keeps SQLite from walking a whole index).
+    let not_indexed = if scope.is_full() { "" } else { "NOT INDEXED" };
     let invalid_revision: Option<(String, i64)> = connection
         .query_row(
             &format!(
                 "SELECT identity, revision FROM (
                  SELECT evaluation_id AS identity, evaluation_revision AS revision
-                 FROM evaluation_runs AS evaluation WHERE {} AND evaluation_revision <= 0
+                 FROM evaluation_runs AS evaluation {not_indexed}
+                 WHERE {} AND evaluation_revision <= 0
                  UNION ALL
                  SELECT event_id AS identity, event_revision AS revision
-                 FROM finding_events AS event WHERE {} AND event_revision <= 0
+                 FROM finding_events AS event {not_indexed} WHERE {} AND event_revision <= 0
                  UNION ALL
                  SELECT event_id AS identity, evaluation_revision AS revision
-                 FROM finding_events AS event WHERE {} AND evaluation_revision <= 0
+                 FROM finding_events AS event {not_indexed}
+                 WHERE {} AND evaluation_revision <= 0
              ) ORDER BY identity LIMIT 1",
                 scope.new_rows("evaluation_runs", "evaluation"),
                 scope.new_rows("finding_events", "event"),
@@ -10272,6 +10365,9 @@ fn validate_evaluation_revision_shape(
         return Err(StoreError::Integrity(format!(
             "evaluation/finding {identity} has impossible durable revision {revision}"
         )));
+    }
+    if let Some(frontier) = scope.frontier() {
+        return validate_evaluation_revision_shape_since(connection, frontier);
     }
     let sequence_shape: (i64, i64, i64) = connection.query_row(
         "SELECT COALESCE(MIN(evaluation_sequence), 0),
@@ -10315,7 +10411,156 @@ fn validate_evaluation_revision_shape(
     Ok(())
 }
 
-fn validate_projection_invariants(connection: &Connection) -> Result<(), StoreError> {
+/// Sequence and lineage contiguity for evaluations beyond a certified
+/// frontier, whose covered prefix is contiguous: the new evaluations must
+/// continue the append sequence exactly, and each lineage's new revisions must
+/// continue its covered revisions without a gap or overlap. Index range reads
+/// only, O(new rows).
+fn validate_evaluation_revision_shape_since(
+    connection: &Connection,
+    frontier: &HistoryFrontier,
+) -> Result<(), StoreError> {
+    let bound = frontier.max_rowid("evaluation_runs").unwrap_or(i64::MIN);
+    let covered = frontier.evaluation_sequence;
+    let (count, minimum, maximum): (i64, Option<i64>, Option<i64>) = connection.query_row(
+        "SELECT COUNT(*), MIN(evaluation_sequence), MAX(evaluation_sequence)
+         FROM evaluation_runs NOT INDEXED WHERE rowid > ?1",
+        [bound],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let (beyond_covered, highest): (i64, Option<i64>) = connection.query_row(
+        "SELECT (SELECT COUNT(*) FROM evaluation_runs WHERE evaluation_sequence > ?1),
+                (SELECT MAX(evaluation_sequence) FROM evaluation_runs)",
+        [covered],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let exact = beyond_covered == count
+        && (count == 0
+            || (minimum == Some(covered + 1)
+                && maximum == Some(covered + count)
+                && highest == maximum));
+    if !exact {
+        return Err(StoreError::Integrity(format!(
+            "evaluation append sequence does not continue the validated sequence {covered}: \
+             {count} new rows span {minimum:?}..{maximum:?}"
+        )));
+    }
+    let lineages: Vec<(String, String, i64, i64, i64)> = connection
+        .prepare(
+            "SELECT detector_id, detector_version, MIN(evaluation_revision),
+                    MAX(evaluation_revision), COUNT(*)
+             FROM evaluation_runs NOT INDEXED WHERE rowid > ?1
+             GROUP BY detector_id, detector_version
+             ORDER BY detector_id, detector_version",
+        )?
+        .query_map([bound], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+    for (detector_id, detector_version, minimum, maximum, count) in lineages {
+        let (from_minimum, predecessor): (i64, Option<i64>) = connection.query_row(
+            "SELECT (SELECT COUNT(*) FROM evaluation_runs
+                     WHERE detector_id = ?1 AND detector_version = ?2
+                       AND evaluation_revision >= ?3),
+                    (SELECT rowid FROM evaluation_runs
+                     WHERE detector_id = ?1 AND detector_version = ?2
+                       AND evaluation_revision = ?3 - 1)",
+            params![detector_id, detector_version, minimum],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let continues = maximum - minimum + 1 == count
+            && from_minimum == count
+            && if minimum == 1 {
+                predecessor.is_none()
+            } else {
+                predecessor.is_some_and(|rowid| rowid <= bound)
+            };
+        if !continues {
+            return Err(StoreError::Integrity(format!(
+                "evaluation lineage {detector_id}/{detector_version} new revisions \
+                 {minimum}..{maximum} across {count} rows do not continue its validated revisions"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Current-state projections beyond a certified frontier: every current
+/// pointer selects the latest event of its component or finding (one index
+/// probe per pointer), and every new event's component or finding has one.
+/// Bindings are configuration-scale and are checked in full.
+fn validate_projection_invariants_since(
+    connection: &Connection,
+    frontier: &HistoryFrontier,
+) -> Result<(), StoreError> {
+    let status_bound = frontier.max_rowid("status_events").unwrap_or(i64::MIN);
+    let finding_bound = frontier.max_rowid("finding_events").unwrap_or(i64::MIN);
+    let stale_status: Option<String> = connection
+        .query_row(
+            "SELECT current.component_id FROM status_current AS current
+             LEFT JOIN status_events AS selected
+               ON selected.status_event_id = current.latest_status_event_id
+             WHERE selected.status_event_id IS NULL
+                OR selected.component_kind <> current.component_kind
+                OR selected.component_id <> current.component_id
+                OR selected.status_sequence <> (
+                    SELECT MAX(latest.status_sequence) FROM status_events AS latest
+                    WHERE latest.component_kind = current.component_kind
+                      AND latest.component_id = current.component_id)
+             UNION ALL
+             SELECT event.component_id FROM status_events AS event
+             WHERE event.rowid > ?1 AND NOT EXISTS (
+                 SELECT 1 FROM status_current AS current
+                 WHERE current.component_kind = event.component_kind
+                   AND current.component_id = event.component_id)
+             LIMIT 1",
+            [status_bound],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(component) = stale_status {
+        return Err(StoreError::Integrity(format!(
+            "status_current is stale or inconsistent for component {component}"
+        )));
+    }
+    let stale_finding: Option<String> = connection
+        .query_row(
+            "SELECT current.finding_id FROM finding_current AS current
+             LEFT JOIN finding_events AS selected
+               ON selected.event_id = current.latest_event_id
+             WHERE selected.event_id IS NULL
+                OR selected.finding_id <> current.finding_id
+                OR selected.event_revision <> (
+                    SELECT MAX(latest.event_revision) FROM finding_events AS latest
+                    WHERE latest.finding_id = current.finding_id)
+             UNION ALL
+             SELECT event.finding_id FROM finding_events AS event
+             WHERE event.rowid > ?1 AND NOT EXISTS (
+                 SELECT 1 FROM finding_current AS current
+                 WHERE current.finding_id = event.finding_id)
+             LIMIT 1",
+            [finding_bound],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(finding) = stale_finding {
+        return Err(StoreError::Integrity(format!(
+            "finding_current is stale or inconsistent for finding {finding}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_projection_invariants(
+    connection: &Connection,
+    scope: Scope<'_>,
+) -> Result<(), StoreError> {
     let bindings_without_intent: i64 = connection.query_row(
         "SELECT COUNT(*) FROM instance_binding_events AS binding
          WHERE NOT EXISTS (
@@ -10369,6 +10614,9 @@ fn validate_projection_invariants(connection: &Connection) -> Result<(), StoreEr
         )));
     }
 
+    if let Some(frontier) = scope.frontier() {
+        return validate_projection_invariants_since(connection, frontier);
+    }
     let stale_findings: i64 = connection.query_row(
         "SELECT COUNT(*) FROM finding_events AS event
          WHERE NOT EXISTS (
