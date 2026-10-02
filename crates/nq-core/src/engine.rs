@@ -10226,25 +10226,36 @@ fn status_from_row_v2(
 
 /// Replace the one-time `notification/outbox` initialization row with counts
 /// read from retained delivery custody when any delivery record exists. This
-/// is computed at export time and writes nothing. Only closed reason fields of
-/// the newest failure are projected; free-text destination messages stay in
+/// is computed at export time and writes nothing. Failures are judged per
+/// route and per v2 condition, so an acceptance elsewhere cannot hide them.
+/// Only closed reason fields are projected; destination free text stays in
 /// `notification inspect`.
 fn project_notification_delivery_status(
     store: &Store,
     components: &mut Vec<ComponentStatusV3>,
 ) -> Result<(), EngineError> {
+    const MAX_LISTED_FAILURES: usize = 10;
     let summary = store.notification_delivery_summary()?;
     if summary.total() == 0 {
         return Ok(());
     }
-    let newest_failure = match &summary.newest_failure {
-        Some(failure) => {
+    let mut routes = serde_json::Map::new();
+    let mut unresolved_total = 0usize;
+    let mut in_flight = 0u64;
+    for (route, counts) in &summary.routes {
+        unresolved_total += counts.unresolved.len();
+        in_flight += counts.pending + counts.claimed_without_outcome;
+        let mut failures = Vec::new();
+        for failure in counts.unresolved.iter().rev().take(MAX_LISTED_FAILURES) {
             let detail: serde_json::Value =
                 serde_json::from_slice(&failure.detail_json).map_err(|_| {
                     EngineError::Invariant("notification event detail is not JSON".into())
                 })?;
             let mut projected = serde_json::Map::new();
             projected.insert("notification_id".into(), json!(failure.notification_id));
+            if let Some(condition) = &failure.condition {
+                projected.insert("condition".into(), json!(condition));
+            }
             projected.insert("outcome".into(), json!(failure.outcome));
             projected.insert("occurred_at".into(), json!(failure.occurred_at));
             for field in ["reason", "http_status", "retry_class"] {
@@ -10254,20 +10265,29 @@ fn project_notification_delivery_status(
                     projected.insert(field.into(), value.clone());
                 }
             }
-            serde_json::Value::Object(projected)
+            failures.push(serde_json::Value::Object(projected));
         }
-        None => serde_json::Value::Null,
-    };
-    let failure_unresolved = summary.newest_failure.as_ref().is_some_and(|failure| {
-        summary
-            .newest_accepted_at
-            .as_deref()
-            .is_none_or(|accepted| failure.occurred_at.as_str() > accepted)
-    });
-    let (state, code) = if failure_unresolved {
+        routes.insert(
+            route.clone(),
+            json!({
+                "counts": {
+                    "pending": counts.pending,
+                    "claimed_without_outcome": counts.claimed_without_outcome,
+                    "refused": counts.refused,
+                    "failed": counts.failed,
+                    "unknown": counts.unknown,
+                    "accepted": counts.accepted,
+                },
+                "unresolved_failure_count": counts.unresolved.len(),
+                "unresolved_failures": failures,
+                "newest_accepted_at": counts.newest_accepted_at,
+            }),
+        );
+    }
+    let (state, code) = if unresolved_total > 0 {
         (HealthState::Degraded, "delivery_failure_unresolved")
-    } else if summary.pending > 0 {
-        (HealthState::Degraded, "delivery_pending")
+    } else if in_flight > 0 {
+        (HealthState::Healthy, "delivery_in_flight")
     } else {
         (HealthState::Healthy, "delivery_custody_current")
     };
@@ -10282,15 +10302,8 @@ fn project_notification_delivery_status(
         detail: ComponentStatusDetailV3::Diagnostic {
             value: json!({
                 "source": "retained_delivery_custody_at_export",
-                "counts": {
-                    "pending": summary.pending,
-                    "refused": summary.refused,
-                    "failed": summary.failed,
-                    "unknown": summary.unknown,
-                    "accepted": summary.accepted,
-                },
-                "newest_failure": newest_failure,
-                "newest_accepted_at": summary.newest_accepted_at,
+                "unresolved_failure_count": unresolved_total,
+                "routes": routes,
             }),
         },
         observed_at: Utc::now(),

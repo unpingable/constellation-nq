@@ -4470,31 +4470,60 @@ pub struct NotificationDeliveryStatus {
     pub event_count: u32,
     pub delivery_state: String,
 }
-/// Read-time counts over retained notification delivery custody.
+/// Read-time counts over retained notification delivery custody, per route.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct NotificationDeliverySummary {
-    pub pending: u64,
-    pub refused: u64,
-    pub failed: u64,
-    pub unknown: u64,
-    pub accepted: u64,
-    pub newest_failure: Option<NotificationDeliveryFailure>,
-    pub newest_accepted_at: Option<String>,
+    pub routes: BTreeMap<String, NotificationRouteDeliverySummary>,
 }
 
 impl NotificationDeliverySummary {
     /// Number of retained delivery records.
     #[must_use]
     pub fn total(&self) -> u64 {
-        self.pending + self.refused + self.failed + self.unknown + self.accepted
+        self.routes
+            .values()
+            .map(NotificationRouteDeliverySummary::total)
+            .sum()
     }
 }
 
-/// The newest failed or uncertain delivery event; a claim without a terminal
-/// outcome is reported as uncertain.
+/// Counts and unresolved failures for one route reference.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct NotificationRouteDeliverySummary {
+    /// Retained without a claim.
+    pub pending: u64,
+    /// Claimed without a terminal outcome: in flight, or interrupted.
+    pub claimed_without_outcome: u64,
+    pub refused: u64,
+    pub failed: u64,
+    pub unknown: u64,
+    pub accepted: u64,
+    pub newest_accepted_at: Option<String>,
+    /// For each condition (the route, plus the v2 condition when present)
+    /// whose newest terminal outcome is a failure, that failure. A refusal
+    /// counts, except the deliberate network-disabled refusal.
+    pub unresolved: Vec<NotificationDeliveryFailure>,
+}
+
+impl NotificationRouteDeliverySummary {
+    /// Number of retained delivery records on this route.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.pending
+            + self.claimed_without_outcome
+            + self.refused
+            + self.failed
+            + self.unknown
+            + self.accepted
+    }
+}
+
+/// The newest failed, uncertain or refused outcome of one condition.
 #[derive(Clone, Debug, Serialize)]
 pub struct NotificationDeliveryFailure {
     pub notification_id: String,
+    /// `site:component:rule[:target_class]` for a v2 condition.
+    pub condition: Option<String>,
     pub outcome: String,
     pub occurred_at: String,
     pub detail_json: Vec<u8>,
@@ -6200,9 +6229,9 @@ impl Store {
             .transpose()
     }
 
-    /// Summarize retained delivery custody at read time. It derives counts
-    /// from the existing status view and the newest uncertain or failed event;
-    /// it records nothing.
+    /// Summarize retained delivery custody per route at read time. It reads
+    /// the existing status view and every terminal event (no index; the cost
+    /// grows with retained deliveries) and records nothing.
     pub fn notification_delivery_summary(&self) -> Result<NotificationDeliverySummary, StoreError> {
         let mut summary = NotificationDeliverySummary::default();
         // Older supported stores, read before migration, have no delivery custody.
@@ -6215,24 +6244,27 @@ impl Store {
             return Ok(summary);
         }
         let mut statement = self.connection.prepare(
-            "SELECT event_count, delivery_state, COUNT(*) FROM public_notification_delivery_status_v1 GROUP BY event_count, delivery_state",
+            "SELECT route_reference, event_count, delivery_state, COUNT(*) FROM public_notification_delivery_status_v1 GROUP BY route_reference, event_count, delivery_state",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
-                row.get::<_, u32>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, u64>(2)?,
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u64>(3)?,
             ))
         })?;
         for row in rows {
-            let (event_count, state, count) = row?;
-            let slot = match notification_delivery_state(event_count, state).as_str() {
-                "pending" => &mut summary.pending,
-                "refused" => &mut summary.refused,
-                "failed" => &mut summary.failed,
-                "unknown" => &mut summary.unknown,
-                "accepted" => &mut summary.accepted,
-                other => {
+            let (route, event_count, state, count) = row?;
+            let route = summary.routes.entry(route).or_default();
+            let slot = match (state.as_str(), event_count) {
+                ("pending", 0) => &mut route.pending,
+                ("pending", _) => &mut route.claimed_without_outcome,
+                ("refused", _) => &mut route.refused,
+                ("failed", _) => &mut route.failed,
+                ("unknown", _) => &mut route.unknown,
+                ("accepted", _) => &mut route.accepted,
+                (other, _) => {
                     return Err(StoreError::Invariant(format!(
                         "unsupported notification delivery state {other}"
                     )));
@@ -6240,27 +6272,76 @@ impl Store {
             };
             *slot += count;
         }
-        summary.newest_failure = self
-            .connection
-            .query_row(
-                "SELECT e.notification_id, CASE WHEN e.outcome = 'claimed' THEN 'unknown' ELSE e.outcome END, e.occurred_at, CASE WHEN e.outcome = 'claimed' THEN CAST('{\"reason\":\"claimed_without_terminal_outcome\"}' AS BLOB) ELSE e.detail_json END FROM notification_delivery_events AS e WHERE e.outcome IN ('failed', 'unknown') OR (e.outcome = 'claimed' AND NOT EXISTS (SELECT 1 FROM notification_delivery_events AS t WHERE t.notification_id = e.notification_id AND t.event_number > e.event_number)) ORDER BY e.occurred_at DESC, e.rowid DESC LIMIT 1",
-                [],
-                |row| {
-                    Ok(NotificationDeliveryFailure {
-                        notification_id: row.get(0)?,
-                        outcome: row.get(1)?,
-                        occurred_at: row.get(2)?,
-                        detail_json: row.get(3)?,
-                    })
-                },
-            )
-            .optional()?;
-        summary.newest_accepted_at = self.connection.query_row(
-            "SELECT MAX(occurred_at) FROM notification_delivery_events WHERE outcome = 'accepted'",
-            [],
-            |row| row.get(0),
+        let mut statement = self.connection.prepare(
+            "SELECT i.route_reference, i.notification_id, e.outcome, e.occurred_at, e.detail_json, \
+                CASE WHEN json_extract(CAST(i.intent_json AS TEXT), '$.schema') = 'nq.notification_delivery_intent.v2' \
+                  THEN json_extract(CAST(i.intent_json AS TEXT), '$.condition.site') || ':' || json_extract(CAST(i.intent_json AS TEXT), '$.condition.component') || ':' || json_extract(CAST(i.intent_json AS TEXT), '$.condition.rule') || COALESCE(':' || json_extract(CAST(i.intent_json AS TEXT), '$.condition.target_class'), '') END \
+             FROM notification_delivery_events AS e JOIN notification_delivery_intents AS i ON i.notification_id = e.notification_id \
+             WHERE e.outcome IN ('failed', 'unknown', 'accepted') \
+                OR (e.outcome = 'refused' AND json_extract(CAST(e.detail_json AS TEXT), '$.reason') IS NOT 'network_dispatch_not_explicitly_enabled') \
+             ORDER BY e.occurred_at, e.rowid",
         )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                NotificationDeliveryFailure {
+                    notification_id: row.get(1)?,
+                    outcome: row.get(2)?,
+                    occurred_at: row.get(3)?,
+                    detail_json: row.get(4)?,
+                    condition: row.get(5)?,
+                },
+            ))
+        })?;
+        let mut newest: BTreeMap<(String, Option<String>), NotificationDeliveryFailure> =
+            BTreeMap::new();
+        for row in rows {
+            let (route, event) = row?;
+            if event.outcome == "accepted" {
+                summary
+                    .routes
+                    .entry(route.clone())
+                    .or_default()
+                    .newest_accepted_at = Some(event.occurred_at.clone());
+            }
+            newest.insert((route, event.condition.clone()), event);
+        }
+        for ((route, _), event) in newest {
+            if event.outcome != "accepted" {
+                summary
+                    .routes
+                    .entry(route)
+                    .or_default()
+                    .unresolved
+                    .push(event);
+            }
+        }
         Ok(summary)
+    }
+
+    /// Name the newest record created after `notification_id` on the same
+    /// route for the same v2 condition, if any.
+    pub fn notification_delivery_newer_same_condition(
+        &self,
+        notification_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT n.notification_id FROM notification_delivery_intents AS o \
+                 JOIN notification_delivery_intents AS n ON n.route_reference = o.route_reference AND n.notification_id != o.notification_id \
+                   AND (n.created_at > o.created_at OR (n.created_at = o.created_at AND n.rowid > o.rowid)) \
+                 WHERE o.notification_id = ?1 \
+                   AND json_extract(CAST(n.intent_json AS TEXT), '$.schema') = 'nq.notification_delivery_intent.v2' \
+                   AND json_extract(CAST(n.intent_json AS TEXT), '$.condition.site') = json_extract(CAST(o.intent_json AS TEXT), '$.condition.site') \
+                   AND json_extract(CAST(n.intent_json AS TEXT), '$.condition.component') = json_extract(CAST(o.intent_json AS TEXT), '$.condition.component') \
+                   AND json_extract(CAST(n.intent_json AS TEXT), '$.condition.rule') = json_extract(CAST(o.intent_json AS TEXT), '$.condition.rule') \
+                   AND json_extract(CAST(n.intent_json AS TEXT), '$.condition.target_class') IS json_extract(CAST(o.intent_json AS TEXT), '$.condition.target_class') \
+                 ORDER BY n.created_at DESC, n.rowid DESC LIMIT 1",
+                [notification_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
     }
 
     /// Page every legacy/general outbox status without unbounded materialization.

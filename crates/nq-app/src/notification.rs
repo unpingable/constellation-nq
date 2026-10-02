@@ -169,8 +169,20 @@ fn per_event_identity(value: &str) -> Option<&'static str> {
     None
 }
 
-fn condition_token(label: &str, value: &str, maximum: usize) -> Result<()> {
-    if let Some(kind) = per_event_identity(value) {
+/// Submission applies the current closed registry and the per-event and
+/// credential heuristics. Reopening retained history checks structure only, so
+/// a later registry or heuristic change cannot make append-only custody
+/// unreadable.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Validation {
+    Submission,
+    Retained,
+}
+
+fn condition_token(label: &str, value: &str, maximum: usize, validation: Validation) -> Result<()> {
+    if validation == Validation::Submission
+        && let Some(kind) = per_event_identity(value)
+    {
         bail!(
             "notification condition {label} is refused: it looks like {kind}; a condition names a stable class, not an event"
         );
@@ -223,7 +235,7 @@ fn reject_secret_like_keys(value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn validate_pagerduty_fields(fields: &PagerDutyFields) -> Result<()> {
+fn validate_pagerduty_fields(fields: &PagerDutyFields, validation: Validation) -> Result<()> {
     if !matches!(fields.action.as_str(), "trigger" | "resolve") {
         bail!("notification action must be trigger or resolve");
     }
@@ -234,17 +246,19 @@ fn validate_pagerduty_fields(fields: &PagerDutyFields) -> Result<()> {
         bail!("notification severity must be critical, error, warning or info");
     }
     let condition = &fields.condition;
-    condition_token("site", &condition.site, 64)?;
-    condition_token("component", &condition.component, 64)?;
-    condition_token("rule", &condition.rule, 64)?;
-    if !PAGERDUTY_COMPONENTS.contains(&condition.component.as_str()) {
+    condition_token("site", &condition.site, 64, validation)?;
+    condition_token("component", &condition.component, 64, validation)?;
+    condition_token("rule", &condition.rule, 64, validation)?;
+    if validation == Validation::Submission
+        && !PAGERDUTY_COMPONENTS.contains(&condition.component.as_str())
+    {
         bail!("notification condition component is not in the closed component set");
     }
-    if !PAGERDUTY_RULES.contains(&condition.rule.as_str()) {
+    if validation == Validation::Submission && !PAGERDUTY_RULES.contains(&condition.rule.as_str()) {
         bail!("notification condition rule is not a beta alert registry anchor");
     }
     if let Some(target_class) = &condition.target_class {
-        condition_token("target_class", target_class, 48)?;
+        condition_token("target_class", target_class, 48, validation)?;
     }
     if let Some(url) = &fields.runbook_url
         && (!url.starts_with("https://")
@@ -267,7 +281,9 @@ fn validate_pagerduty_fields(fields: &PagerDutyFields) -> Result<()> {
         {
             bail!("notification details exceed {PAGERDUTY_DETAILS_MAX_BYTES} bytes");
         }
-        reject_secret_like_keys(details)?;
+        if validation == Validation::Submission {
+            reject_secret_like_keys(details)?;
+        }
     }
     Ok(())
 }
@@ -317,13 +333,24 @@ fn read_intent(
     Ok((intent, pager, document))
 }
 
-fn parse_submitted_intent(value: Value) -> Result<Intent> {
-    parse_submitted(value).map(|(intent, _)| intent)
+fn parse_retained_intent(value: Value) -> Result<Intent> {
+    parse_intent_value(value, Validation::Retained).map(|(intent, _)| intent)
+}
+
+fn parse_submitted(value: Value) -> Result<(Intent, Option<PagerDutyFields>)> {
+    parse_intent_value(value, Validation::Submission)
+}
+
+fn parse_retained(value: Value) -> Result<(Intent, Option<PagerDutyFields>)> {
+    parse_intent_value(value, Validation::Retained)
 }
 
 /// Parse a v1 intent, or a v2 intent as its v1 fields plus the `PagerDuty`
 /// fields. Both keep closed field sets.
-fn parse_submitted(value: Value) -> Result<(Intent, Option<PagerDutyFields>)> {
+fn parse_intent_value(
+    value: Value,
+    validation: Validation,
+) -> Result<(Intent, Option<PagerDutyFields>)> {
     match value.get("schema").and_then(Value::as_str) {
         Some(INTENT_V1) => Ok((parse_intent_fields(value, 512)?, None)),
         Some(INTENT_V2) => {
@@ -338,7 +365,7 @@ fn parse_submitted(value: Value) -> Result<(Intent, Option<PagerDutyFields>)> {
                 }
             }
             let pager: PagerDutyFields = serde_json::from_value(Value::Object(added))?;
-            validate_pagerduty_fields(&pager)?;
+            validate_pagerduty_fields(&pager, validation)?;
             Ok((
                 parse_intent_fields(Value::Object(common), 1024)?,
                 Some(pager),
@@ -422,9 +449,9 @@ pub(crate) fn reopen_retained_intent(document: &CanonicalDocument) -> Result<Int
         {
             bail!("retained local inbox directory binding is invalid");
         }
-        return parse_submitted_intent(inner);
+        return parse_retained_intent(inner);
     }
-    parse_submitted_intent(value)
+    parse_retained_intent(value)
 }
 
 fn replay_nightshift(route: &NotificationRouteConfig, intent: &Intent) -> Result<()> {
@@ -1523,6 +1550,13 @@ fn prepare_resubmission(
     if status.delivery_state == "accepted" {
         bail!("notification was accepted by its destination; resubmit is refused");
     }
+    // Only the newest record for a condition may be resent: an older trigger
+    // would reopen a resolved alert, and an older resolve would close a newer one.
+    if let Some(newer) = store.notification_delivery_newer_same_condition(notification_id)? {
+        bail!(
+            "notification {newer} is a later record for the same condition on this route; only the newest record for a condition may be resubmitted"
+        );
+    }
     if value.get("stable_event_id").and_then(Value::as_str) == Some(stable_event_id) {
         bail!("resubmit requires a new stable_event_id");
     }
@@ -1563,7 +1597,7 @@ pub(crate) fn inspect(config: &NqConfig, id: Option<&str>) -> Result<Value> {
         if intent.get("schema").and_then(Value::as_str) != Some(INTENT_V2) {
             continue;
         }
-        let (_, Some(pager)) = parse_submitted(intent)? else {
+        let (_, Some(pager)) = parse_retained(intent)? else {
             continue;
         };
         let last_event = store
@@ -1589,6 +1623,28 @@ pub(crate) fn inspect(config: &NqConfig, id: Option<&str>) -> Result<Value> {
         });
     }
     Ok(value)
+}
+
+/// A retained v2 intent that current submission validation would refuse (a
+/// retired rule anchor and a credential-like details key), for history tests.
+#[cfg(test)]
+pub(crate) fn historical_pagerduty_intent(route: &str, stable_event_id: &str) -> Value {
+    json!({
+        "schema":INTENT_V2,
+        "attention_kind":"operator_assertion",
+        "stable_event_id":stable_event_id,
+        "attention_policy_id":"policy-1",
+        "attention_policy_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "transition_id":"transition-1",
+        "route_reference":route,
+        "destination_identity":format!("pagerduty:{route}"),
+        "summary":"historical condition",
+        "inspection_reference":"record:1",
+        "action":"trigger",
+        "condition":{"site":"crow-lab","component":"docket","rule":"docket-not-ready","target_class":"batch-20261002"},
+        "severity":"critical",
+        "details":{"api_token_name":"historical"},
+    })
 }
 
 #[cfg(test)]
@@ -3342,6 +3398,42 @@ mod tests {
             .unwrap()
     }
 
+    fn notification_detail(config: &NqConfig) -> (nq_core::public::ComponentStatusV3, Value) {
+        let component = notification_component(config);
+        let nq_core::public::ComponentStatusDetailV3::Diagnostic { value } = &component.detail
+        else {
+            panic!("notification status is a diagnostic")
+        };
+        let value = value.clone();
+        (component, value)
+    }
+
+    async fn submit_pd(
+        config: &NqConfig,
+        root: &TempDir,
+        intent: Value,
+        enable_network: bool,
+        result: TransportResult,
+    ) -> Value {
+        let path = write_intent(root, intent);
+        submit_with_dispatch(config, &path, "pd.ops", enable_network, routing_key, |_| {
+            Ok(move |_, _, _| async move { Ok(result) })
+        })
+        .await
+        .unwrap()
+    }
+
+    fn rate_limited() -> TransportResult {
+        reported(
+            "failed",
+            json!({"http_status":429,"reason":"rate_limited","retry_class":"retryable","pagerduty_message":"Requests are arriving too quickly"}),
+        )
+    }
+
+    fn accepted() -> TransportResult {
+        reported("accepted", json!({"http_status":202}))
+    }
+
     #[tokio::test]
     async fn status_export_reflects_retained_delivery_outcomes() {
         let root = TempDir::new().unwrap();
@@ -3359,57 +3451,203 @@ mod tests {
         drop(store);
         assert_eq!(notification_component(&config).code, "outbox_empty");
 
-        let path = write_intent(&root, pagerduty_intent("trigger", "event-1", "inspect"));
-        submit_with_dispatch(&config, &path, "pd.ops", true, routing_key, |_| {
-            Ok(|_, _, _| async {
-                Ok(reported(
-                    "failed",
-                    json!({"http_status":429,"reason":"rate_limited","retry_class":"retryable","pagerduty_message":"Requests are arriving too quickly"}),
-                ))
-            })
-        })
-        .await
-        .unwrap();
-        let component = notification_component(&config);
+        // A deliberate network-disabled refusal is not a failure.
+        submit_pd(
+            &config,
+            &root,
+            pagerduty_intent("trigger", "event-0", "inspect"),
+            false,
+            accepted(),
+        )
+        .await;
+        assert_eq!(
+            notification_component(&config).code,
+            "delivery_custody_current"
+        );
+
+        submit_pd(
+            &config,
+            &root,
+            pagerduty_intent("trigger", "event-1", "inspect"),
+            true,
+            rate_limited(),
+        )
+        .await;
+        let (component, value) = notification_detail(&config);
         assert_eq!(component.state, nq_core::public::HealthState::Degraded);
         assert_eq!(component.code, "delivery_failure_unresolved");
-        let nq_core::public::ComponentStatusDetailV3::Diagnostic { value } = &component.detail
-        else {
-            panic!("notification status is a diagnostic")
-        };
+        let route = &value["routes"]["pd.ops"];
         assert_eq!(
-            value["counts"],
-            json!({"pending":0,"refused":0,"failed":1,"unknown":0,"accepted":0})
+            route["counts"],
+            json!({"pending":0,"claimed_without_outcome":0,"refused":1,"failed":1,"unknown":0,"accepted":0})
         );
-        assert_eq!(value["newest_failure"]["reason"], "rate_limited");
-        assert_eq!(value["newest_failure"]["http_status"], 429);
-        assert!(value["newest_failure"].get("pagerduty_message").is_none());
+        let failure = &route["unresolved_failures"][0];
+        assert_eq!(failure["reason"], "rate_limited");
+        assert_eq!(failure["http_status"], 429);
+        assert_eq!(
+            failure["condition"],
+            "crow-lab:nq:nq-no-fresh-acquisition:demo"
+        );
+        assert!(failure.get("pagerduty_message").is_none());
 
-        let path = write_intent(&root, pagerduty_intent("trigger", "event-2", "inspect"));
-        submit_with_dispatch(&config, &path, "pd.ops", true, routing_key, |_| {
-            Ok(|_, _, _| async { Ok(reported("accepted", json!({"http_status":202}))) })
+        // An accepted delivery on another route or for another condition does
+        // not hide the failed trigger.
+        let slack_path = write_intent(&root, intent("check storage", "operator_assertion", None));
+        submit_with_dispatch(&config, &slack_path, "ops.primary", true, endpoint, |_| {
+            Ok(|_, _, _| async { Ok(TransportResult::Accepted(200)) })
         })
         .await
         .unwrap();
-        let path = write_intent(&root, pagerduty_intent("trigger", "event-3", "inspect"));
-        submit_with_dispatch(&config, &path, "pd.ops", false, routing_key, |_| {
-            Ok(|_, _, _| async { panic!("network disabled") })
-        })
-        .await
-        .unwrap();
-        let component = notification_component(&config);
+        let mut other = pagerduty_intent("trigger", "event-2", "inspect");
+        other["condition"]["target_class"] = json!("other");
+        submit_pd(&config, &root, other, true, accepted()).await;
+        let (component, value) = notification_detail(&config);
+        assert_eq!(component.code, "delivery_failure_unresolved");
+        assert_eq!(value["unresolved_failure_count"], 1);
+        assert_eq!(
+            value["routes"]["ops.primary"]["unresolved_failure_count"],
+            0
+        );
+
+        // A later acceptance for the same condition resolves it.
+        submit_pd(
+            &config,
+            &root,
+            pagerduty_intent("trigger", "event-3", "inspect"),
+            true,
+            accepted(),
+        )
+        .await;
+        let (component, value) = notification_detail(&config);
         assert_eq!(component.state, nq_core::public::HealthState::Healthy);
         assert_eq!(component.code, "delivery_custody_current");
-        let nq_core::public::ComponentStatusDetailV3::Diagnostic { value } = &component.detail
-        else {
-            panic!("notification status is a diagnostic")
-        };
-        assert_eq!(
-            value["counts"],
-            json!({"pending":0,"refused":1,"failed":1,"unknown":0,"accepted":1})
-        );
-        assert_eq!(value["newest_failure"]["outcome"], "failed");
-        assert!(value["newest_accepted_at"].is_string());
+        assert_eq!(value["routes"]["pd.ops"]["counts"]["accepted"], 2);
+        assert!(value["routes"]["pd.ops"]["newest_accepted_at"].is_string());
         assert_routing_key_absent(&config);
+    }
+
+    #[tokio::test]
+    async fn status_export_degrades_on_key_refusal_and_not_on_an_in_flight_claim() {
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let path = write_intent(&root, pagerduty_intent("trigger", "event-1", "inspect"));
+        submit_with_dispatch(
+            &config,
+            &path,
+            "pd.ops",
+            true,
+            |_| bail!("unset"),
+            |_| Ok(|_, _, _| async { panic!("refused before dispatch") }),
+        )
+        .await
+        .unwrap();
+        let (component, value) = notification_detail(&config);
+        assert_eq!(component.code, "delivery_failure_unresolved");
+        assert_eq!(
+            value["routes"]["pd.ops"]["unresolved_failures"][0]["reason"],
+            "routing_key_unavailable"
+        );
+
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let path = write_intent(&root, pagerduty_intent("trigger", "event-1", "inspect"));
+        assert!(
+            submit_with_dispatch(&config, &path, "pd.ops", true, routing_key, |_| {
+                Ok(|_, _, _| async { bail!("still in flight") })
+            })
+            .await
+            .is_err()
+        );
+        let (component, value) = notification_detail(&config);
+        assert_eq!(component.state, nq_core::public::HealthState::Healthy);
+        assert_eq!(component.code, "delivery_in_flight");
+        assert_eq!(
+            value["routes"]["pd.ops"]["counts"]["claimed_without_outcome"],
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn resubmit_refuses_an_older_trigger_after_an_accepted_resolve() {
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let trigger = submit_pd(
+            &config,
+            &root,
+            pagerduty_intent("trigger", "event-1", "inspect"),
+            true,
+            reported("unknown", json!({"reason":"timeout_after_dispatch"})),
+        )
+        .await;
+        let resolve = submit_pd(
+            &config,
+            &root,
+            pagerduty_intent("resolve", "event-2", "cleared"),
+            true,
+            accepted(),
+        )
+        .await;
+        let error = prepare_resubmission(
+            &config,
+            trigger["notification_id"].as_str().unwrap(),
+            "event-1-r1",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(resolve["notification_id"].as_str().unwrap()),
+            "{error}"
+        );
+        assert!(error.contains("only the newest record"));
+    }
+
+    #[tokio::test]
+    async fn resubmit_refuses_an_older_resolve_after_an_accepted_trigger() {
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let resolve = submit_pd(
+            &config,
+            &root,
+            pagerduty_intent("resolve", "event-1", "cleared"),
+            true,
+            reported("failed", json!({"reason":"connect_failed"})),
+        )
+        .await;
+        // A different condition on the same route does not block resubmission.
+        let mut other = pagerduty_intent("trigger", "event-2", "inspect");
+        other["condition"]["target_class"] = json!("other");
+        submit_pd(&config, &root, other, true, accepted()).await;
+        let resolve_id = resolve["notification_id"].as_str().unwrap();
+        assert!(prepare_resubmission(&config, resolve_id, "event-1-r1").is_ok());
+        let trigger = submit_pd(
+            &config,
+            &root,
+            pagerduty_intent("trigger", "event-3", "recurred"),
+            true,
+            accepted(),
+        )
+        .await;
+        let error = prepare_resubmission(&config, resolve_id, "event-1-r2")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(trigger["notification_id"].as_str().unwrap()),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn retained_v2_history_reopens_outside_the_current_registry() {
+        let value = historical_pagerduty_intent("pd.ops", "event-1");
+        assert!(parse_submitted(value.clone()).is_err());
+        let document = CanonicalDocument::from_serializable(&value).unwrap();
+        assert_eq!(
+            reopen_retained_intent(&document).unwrap().stable_event_id,
+            "event-1"
+        );
+        let mut malformed = value;
+        malformed["condition"]["site"] = json!("Not A Token");
+        let document = CanonicalDocument::from_serializable(&malformed).unwrap();
+        assert!(reopen_retained_intent(&document).is_err());
     }
 }

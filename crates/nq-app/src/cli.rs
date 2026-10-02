@@ -464,7 +464,8 @@ pub enum NotificationCommand {
     /// Submit a new record for the same condition as a retained pagerduty (v2)
     /// record that was not accepted, under a new event identity. The original
     /// record keeps its outcome; the shared dedup key makes the send
-    /// idempotent at the destination.
+    /// idempotent at the destination. Only the newest record for a condition
+    /// may be resubmitted.
     Resubmit {
         /// Retained record to re-derive the intent from.
         #[arg(long)]
