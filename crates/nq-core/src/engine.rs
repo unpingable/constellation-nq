@@ -8331,12 +8331,12 @@ fn engine_semantic_state(
 /// to write it is reported and leaves the previous watermark in place.
 fn validate_engine_open_history(store: &Store) -> Result<(), EngineError> {
     validate_core_history_since_open(store)?;
-    let semantic = match (engine_core_frontier(store), engine_semantic_state(store)) {
-        (_, Some((frontier, state))) => validate_semantic_planes_since(store, frontier, state),
-        (None, None) => validate_semantic_planes_in_full(store),
-        // Not certified (for example after an earlier failure): attempt
-        // the full certification again rather than leaving it withdrawn.
-        (Some(_), None) => validate_semantic_planes_in_full(store),
+    let semantic = match engine_semantic_state(store) {
+        Some((frontier, state)) => validate_semantic_planes_since(store, frontier, state),
+        // No watermark, or one whose semantic certification was withdrawn
+        // by an earlier failure: attempt the full certification again
+        // rather than leaving it withdrawn.
+        None => validate_semantic_planes_in_full(store),
     };
     let certification = match semantic {
         Ok(state) => nq_store::SemanticCertification::Established(state),
