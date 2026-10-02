@@ -854,6 +854,58 @@ mod tests {
     }
 
     #[test]
+    fn terminal_pagerduty_record_outside_the_current_registry_is_transferable() {
+        let (_root, mut store) = store();
+        let intent = document(crate::notification::historical_pagerduty_intent(
+            "pd.ops", "event-1",
+        ));
+        let payload = document(json!({"dedup_key":"fixture","event_action":"trigger"}));
+        store
+            .retain_notification_delivery(
+                &NotificationInput {
+                    notification_id: "pagerduty-failed".into(),
+                    idempotency_key: "event-1:pagerduty:pd.ops".into(),
+                    finding_event_id: None,
+                    destination_kind: "pagerduty".into(),
+                    payload: payload.clone(),
+                    available_at: "2026-09-14T11:00:00Z".into(),
+                    max_attempts: 1,
+                    created_at: "2026-09-14T11:00:00Z".into(),
+                },
+                &NotificationDeliveryIntentInput {
+                    notification_id: "pagerduty-failed".into(),
+                    stable_event_id: "event-1".into(),
+                    attention_kind: "operator_assertion".into(),
+                    attention_receipt_digest: None,
+                    attention_policy_id: "policy-1".into(),
+                    attention_policy_digest: format!("sha256:{}", "b".repeat(64)),
+                    transition_id: "transition-1".into(),
+                    route_reference: "pd.ops".into(),
+                    destination_identity: "pagerduty:pd.ops".into(),
+                    content_digest: payload.digest().into(),
+                    intent,
+                    created_at: "2026-09-14T11:00:00Z".into(),
+                },
+            )
+            .expect("retain historical pagerduty record");
+        for (number, outcome) in [(1, "claimed"), (2, "failed")] {
+            store
+                .append_notification_delivery_event(&NotificationDeliveryEventInput {
+                    notification_id: "pagerduty-failed".into(),
+                    event_number: number,
+                    occurred_at: format!("2026-09-14T11:01:0{number}Z"),
+                    outcome: outcome.into(),
+                    detail: document(json!({"reason":"server_error"})),
+                })
+                .expect("append event");
+        }
+        let report = inspect_store(&store, parse_time(AT, "at").unwrap(), AT.into()).unwrap();
+        assert!(report.eligible);
+        assert_eq!(report.notifications.len(), 1);
+        assert_eq!(report.notifications[0].delivery_state, "failed");
+    }
+
+    #[test]
     fn pending_and_claimed_notification_states_refuse() {
         let (_root, mut store) = store();
         notification(&mut store, "notification-pending");

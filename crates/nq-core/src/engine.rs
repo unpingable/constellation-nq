@@ -8802,6 +8802,7 @@ pub fn status_snapshot_v3(store: &Store) -> Result<StatusSnapshotV3, EngineError
             },
         });
     }
+    project_notification_delivery_status(store, &mut components)?;
     components.sort_by(|left, right| (&left.kind, &left.id).cmp(&(&right.kind, &right.id)));
     Ok(StatusSnapshotV3 {
         schema: STATUS_SNAPSHOT_V3_SCHEMA.into(),
@@ -10221,6 +10222,97 @@ fn status_from_row_v2(
         &row.detail_json,
         &row.observed_at,
     )
+}
+
+/// Replace the one-time `notification/outbox` initialization row with counts
+/// read from retained delivery custody when any delivery record exists. This
+/// is computed at export time and writes nothing. Failures are judged per
+/// route and per v2 condition, so an acceptance elsewhere cannot hide them.
+/// Only closed reason fields are projected; destination free text stays in
+/// `notification inspect`.
+fn project_notification_delivery_status(
+    store: &Store,
+    components: &mut Vec<ComponentStatusV3>,
+) -> Result<(), EngineError> {
+    const MAX_LISTED_FAILURES: usize = 10;
+    // The longest route timeout (60 s) plus a margin: a claim older than this
+    // has no live send behind it.
+    const CLAIM_STALE_AFTER: Duration = Duration::seconds(120);
+    let summary = store.notification_delivery_summary(Utc::now() - CLAIM_STALE_AFTER)?;
+    if summary.total() == 0 {
+        return Ok(());
+    }
+    let mut routes = serde_json::Map::new();
+    let mut unresolved_total = 0usize;
+    let mut in_flight = 0u64;
+    for (route, counts) in &summary.routes {
+        unresolved_total += counts.unresolved.len();
+        in_flight += counts.pending + counts.claimed_without_outcome;
+        let mut failures = Vec::new();
+        // Newest first.
+        for failure in counts.unresolved.iter().rev().take(MAX_LISTED_FAILURES) {
+            let detail: serde_json::Value =
+                serde_json::from_slice(&failure.detail_json).map_err(|_| {
+                    EngineError::Invariant("notification event detail is not JSON".into())
+                })?;
+            let mut projected = serde_json::Map::new();
+            projected.insert("notification_id".into(), json!(failure.notification_id));
+            if let Some(condition) = &failure.condition {
+                projected.insert("condition".into(), json!(condition));
+            }
+            projected.insert("outcome".into(), json!(failure.outcome));
+            projected.insert("occurred_at".into(), json!(failure.occurred_at));
+            for field in ["reason", "http_status", "retry_class"] {
+                if let Some(value) = detail.get(field)
+                    && (value.is_u64() || value.as_str().is_some_and(|text| text.len() <= 64))
+                {
+                    projected.insert(field.into(), value.clone());
+                }
+            }
+            failures.push(serde_json::Value::Object(projected));
+        }
+        routes.insert(
+            route.clone(),
+            json!({
+                "counts": {
+                    "pending": counts.pending,
+                    "claimed_without_outcome": counts.claimed_without_outcome,
+                    "refused": counts.refused,
+                    "failed": counts.failed,
+                    "unknown": counts.unknown,
+                    "accepted": counts.accepted,
+                },
+                "unresolved_failure_count": counts.unresolved.len(),
+                "unresolved_failures": failures,
+                "newest_accepted_at": counts.newest_accepted_at,
+            }),
+        );
+    }
+    let (state, code) = if unresolved_total > 0 {
+        (HealthState::Degraded, "delivery_failure_unresolved")
+    } else if in_flight > 0 {
+        (HealthState::Healthy, "delivery_in_flight")
+    } else {
+        (HealthState::Healthy, "delivery_custody_current")
+    };
+    components.retain(|component| {
+        !(component.kind == ComponentKind::Notification && component.id == "outbox")
+    });
+    components.push(ComponentStatusV3 {
+        kind: ComponentKind::Notification,
+        id: "outbox".into(),
+        state,
+        code: code.into(),
+        detail: ComponentStatusDetailV3::Diagnostic {
+            value: json!({
+                "source": "retained_delivery_custody_at_export",
+                "unresolved_failure_count": unresolved_total,
+                "routes": routes,
+            }),
+        },
+        observed_at: Utc::now(),
+    });
+    Ok(())
 }
 
 fn status_from_row_v3(

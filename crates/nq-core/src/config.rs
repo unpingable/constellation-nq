@@ -84,6 +84,10 @@ pub struct NotificationRouteConfig {
     /// Environment variable name holding an HTTPS endpoint at dispatch time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_secret_locator: Option<String>,
+    /// Environment variable name holding a `PagerDuty` Events API v2 routing
+    /// key. It is read only at an enabled dispatch boundary and never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_key_env: Option<String>,
     /// Descriptor-validated local inbox root for the `local_file` transport.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_inbox_directory: Option<PathBuf>,
@@ -107,13 +111,16 @@ pub struct NightshiftAttentionReplayConfig {
     pub execution_account: String,
 }
 
-/// The only initial destination projections.
+/// The closed set of destination projections.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationTransportKind {
     Slack,
     Discord,
     LocalFile,
+    /// `PagerDuty` Events API v2 with a fixed endpoint and an environment routing key.
+    #[serde(rename = "pagerduty")]
+    PagerDuty,
 }
 
 fn default_notification_timeout_ms() -> u64 {
@@ -445,6 +452,14 @@ impl NqConfig {
                     "duplicate route reference",
                 ));
             }
+            if route.routing_key_env.is_some()
+                && route.transport != NotificationTransportKind::PagerDuty
+            {
+                return Err(invalid(
+                    format!("{base}.routing_key_env"),
+                    "is only accepted for a pagerduty route",
+                ));
+            }
             match route.transport {
                 NotificationTransportKind::Slack | NotificationTransportKind::Discord => {
                     let locator = route.endpoint_secret_locator.as_deref().ok_or_else(|| {
@@ -458,6 +473,35 @@ impl NqConfig {
                         return Err(invalid(
                             format!("{base}.endpoint_secret_locator"),
                             "must be a bounded *_URL environment-variable name",
+                        ));
+                    }
+                    if route.local_inbox_directory.is_some() {
+                        return Err(invalid(
+                            format!("{base}.local_inbox_directory"),
+                            "is only accepted for a local_file route",
+                        ));
+                    }
+                }
+                NotificationTransportKind::PagerDuty => {
+                    let locator = route.routing_key_env.as_deref().ok_or_else(|| {
+                        invalid(
+                            format!("{base}.routing_key_env"),
+                            "is required for a pagerduty route",
+                        )
+                    })?;
+                    if !valid_env_key(locator)
+                        || locator.len() > 128
+                        || !locator.ends_with("_ROUTING_KEY")
+                    {
+                        return Err(invalid(
+                            format!("{base}.routing_key_env"),
+                            "must be a bounded *_ROUTING_KEY environment-variable name",
+                        ));
+                    }
+                    if route.endpoint_secret_locator.is_some() {
+                        return Err(invalid(
+                            format!("{base}.endpoint_secret_locator"),
+                            "is not accepted for a pagerduty route; its endpoint is fixed",
                         ));
                     }
                     if route.local_inbox_directory.is_some() {
@@ -1163,6 +1207,41 @@ max_response_bytes = 1024
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn pagerduty_route_requires_a_routing_key_locator_and_fixed_endpoint() {
+        let route = r#"
+
+[[notification_routes]]
+reference = "pagerduty-test"
+transport = "pagerduty"
+routing_key_env = "NQ_PAGERDUTY_TEST_ROUTING_KEY"
+"#;
+        let configured = NqConfig::from_toml(&(minimal() + route)).expect("pagerduty route");
+        assert_eq!(
+            configured.notification_routes[0].transport,
+            NotificationTransportKind::PagerDuty
+        );
+        for bad in [
+            route.replace(
+                "routing_key_env = \"NQ_PAGERDUTY_TEST_ROUTING_KEY\"",
+                "",
+            ),
+            route.replace("_ROUTING_KEY\"", "_KEY\""),
+            route.replace("NQ_PAGERDUTY_TEST_ROUTING_KEY", "nq-lower_ROUTING_KEY"),
+            route.replace(
+                "routing_key_env = \"NQ_PAGERDUTY_TEST_ROUTING_KEY\"",
+                "routing_key_env = \"NQ_PAGERDUTY_TEST_ROUTING_KEY\"\nendpoint_secret_locator = \"NQ_PD_URL\"",
+            ),
+            route.replace(
+                "routing_key_env = \"NQ_PAGERDUTY_TEST_ROUTING_KEY\"",
+                "routing_key_env = \"NQ_PAGERDUTY_TEST_ROUTING_KEY\"\nlocal_inbox_directory = \"/var/lib/nq/inbox\"",
+            ),
+            route.replace("transport = \"pagerduty\"", "transport = \"slack\"\nendpoint_secret_locator = \"NQ_OPS_URL\""),
+        ] {
+            assert!(NqConfig::from_toml(&(minimal() + &bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -2200,6 +2200,69 @@ mod tests {
     }
 
     #[test]
+    fn archive_reopens_a_pagerduty_record_outside_the_current_registry() {
+        let dir = tempfile::tempdir().expect("dir");
+        let archive = valid_archive(dir.path());
+        let database = archive.join("db/nq.db");
+        let intent = canonical(&crate::notification::historical_pagerduty_intent(
+            "pd.ops", "event-1",
+        ));
+        let payload =
+            canonical(&serde_json::json!({"dedup_key":"fixture","event_action":"trigger"}));
+        let mut store = Store::open(&database).expect("store");
+        store
+            .retain_notification_delivery(
+                &nq_store::NotificationInput {
+                    notification_id: "pagerduty-notification".into(),
+                    idempotency_key: "event-1:pagerduty:pd.ops".into(),
+                    finding_event_id: None,
+                    destination_kind: "pagerduty".into(),
+                    payload: payload.clone(),
+                    available_at: "2026-09-14T00:00:00Z".into(),
+                    max_attempts: 1,
+                    created_at: "2026-09-14T00:00:00Z".into(),
+                },
+                &nq_store::NotificationDeliveryIntentInput {
+                    notification_id: "pagerduty-notification".into(),
+                    stable_event_id: "event-1".into(),
+                    attention_kind: "operator_assertion".into(),
+                    attention_receipt_digest: None,
+                    attention_policy_id: "policy-1".into(),
+                    attention_policy_digest: format!("sha256:{}", "b".repeat(64)),
+                    transition_id: "transition-1".into(),
+                    route_reference: "pd.ops".into(),
+                    destination_identity: "pagerduty:pd.ops".into(),
+                    content_digest: payload.digest().to_owned(),
+                    intent,
+                    created_at: "2026-09-14T00:00:00Z".into(),
+                },
+            )
+            .expect("retain historical pagerduty record");
+        for (number, outcome) in [(1, "claimed"), (2, "accepted")] {
+            store
+                .append_notification_delivery_event(&nq_store::NotificationDeliveryEventInput {
+                    notification_id: "pagerduty-notification".into(),
+                    event_number: number,
+                    occurred_at: format!("2026-09-14T00:00:0{number}Z"),
+                    outcome: outcome.into(),
+                    detail: canonical(&serde_json::json!({"transport":"pagerduty"})),
+                })
+                .expect("append event");
+        }
+        drop(store);
+        reseal_after_database_change(&archive);
+        let report = verify_archive(&archive).expect("historical v2 record reopens");
+        assert_eq!(
+            report.historical_notification_delivery_intents_verified,
+            Some(1)
+        );
+        assert_eq!(
+            report.historical_notification_delivery_events_verified,
+            Some(2)
+        );
+    }
+
+    #[test]
     fn archive_refuses_saved_check_terminal_binding_drift() {
         let dir = tempfile::tempdir().expect("dir");
         let archive = valid_archive(dir.path());
