@@ -58,6 +58,12 @@ const PAGERDUTY_RULES: [&str; 17] = [
     "build-identity",
 ];
 const V2_FIELDS: [&str; 5] = ["action", "condition", "severity", "runbook_url", "details"];
+/// The closed response classes an evaluator assigns. Only `page` may reach an
+/// interruption channel; NQ never derives the class from any other field.
+const RESPONSE_CLASSES: [&str; 3] = ["informational", "attention", "page"];
+/// The retained refusal for an intent on a `PagerDuty` route whose
+/// `response_class` is not `page`, including a legacy v2 intent without one.
+const RESPONSE_CLASS_NOT_PAGE: &str = "response_class_not_page";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,6 +80,19 @@ pub(crate) struct Intent {
     summary: String,
     inspection_reference: String,
     owner_receipt: Option<Value>,
+    /// Absent in v1 means `attention`. Absent in v2 is a pre-0.2.2 legacy
+    /// record: readable, never sent.
+    response_class: Option<String>,
+}
+
+impl Intent {
+    fn response_class(&self) -> &str {
+        self.response_class.as_deref().unwrap_or("attention")
+    }
+
+    fn is_page(&self) -> bool {
+        self.response_class.as_deref() == Some("page")
+    }
 }
 
 /// The stable condition a `PagerDuty` alert is about. It deliberately excludes
@@ -399,6 +418,11 @@ fn parse_intent_fields(value: Value, summary_maximum: usize) -> Result<Intent> {
         ),
     ] {
         bounded(name, value, maximum)?;
+    }
+    if let Some(class) = &intent.response_class
+        && !RESPONSE_CLASSES.contains(&class.as_str())
+    {
+        bail!("notification response_class must be informational, attention or page");
     }
     match intent.attention_kind.as_str() {
         "operator_assertion"
@@ -739,8 +763,10 @@ fn retained_duplicate(
 
 fn render(route: &NotificationRouteConfig, intent: &Intent) -> Result<CanonicalDocument> {
     let text = format!(
-        "Attention required: {}\nInspect: {}",
-        intent.summary, intent.inspection_reference
+        "[{}] Attention required: {}\nInspect: {}",
+        intent.response_class(),
+        intent.summary,
+        intent.inspection_reference
     );
     let payload = match route.transport {
         NotificationTransportKind::Slack => json!({"text": text}),
@@ -979,7 +1005,7 @@ fn render_local_inbox(intent: &Intent, binding: &CanonicalDocument) -> Result<Ca
     Ok(CanonicalDocument::from_serializable(&json!({
         "schema":"nq.local-inbox-message/v1",
         "stable_event_id":intent.stable_event_id,
-        "summary":intent.summary,
+        "summary":format!("[{}] {}", intent.response_class(), intent.summary),
         "inspection_reference":intent.inspection_reference,
         "route_reference":intent.route_reference,
         "destination_identity":intent.destination_identity,
@@ -1329,7 +1355,14 @@ where
     if let Some(existing) = retained_duplicate(config, route, &intent, &intent_document)? {
         return Ok(existing);
     }
-    replay_nightshift(route, &intent)?;
+    // Page eligibility is the evaluator's explicit decision. It is not
+    // inferred from action, severity or condition, and a resolve is page-class.
+    // A non-page intent is refused whatever its owner receipt would replay to,
+    // so replay runs only for intents that could be sent.
+    let not_page = pagerduty && !intent.is_page();
+    if !not_page {
+        replay_nightshift(route, &intent)?;
+    }
     let owner_receipt = intent.owner_receipt.clone();
     let payload = match pager {
         Some(pager) => render_pagerduty(&intent, pager, &intent_document)?,
@@ -1377,6 +1410,9 @@ where
                 "delivery_state": existing.delivery_state,
             }));
         }
+    }
+    if not_page {
+        return retain_refusal(&mut store, &notification_id, now, RESPONSE_CLASS_NOT_PAGE);
     }
     if refuse_expired_saved_check(&mut store, &notification_id, owner_receipt.as_ref())? {
         return Ok(json!({"notification_id":notification_id,"delivery_state":"refused"}));
@@ -1597,7 +1633,7 @@ pub(crate) fn inspect(config: &NqConfig, id: Option<&str>) -> Result<Value> {
         if intent.get("schema").and_then(Value::as_str) != Some(INTENT_V2) {
             continue;
         }
-        let (_, Some(pager)) = parse_retained(intent)? else {
+        let (intent, Some(pager)) = parse_retained(intent)? else {
             continue;
         };
         let last_event = store
@@ -1618,6 +1654,7 @@ pub(crate) fn inspect(config: &NqConfig, id: Option<&str>) -> Result<Value> {
             .transpose()?;
         value[index]["pagerduty"] = json!({
             "action":pager.action,
+            "response_class":intent.response_class,
             "dedup_key":dedup_key(&pager.condition),
             "last_event":last_event,
         });
@@ -1999,6 +2036,7 @@ mod tests {
             summary: "check storage".into(),
             inspection_reference: "record:1".into(),
             owner_receipt: None,
+            response_class: None,
         };
         let slack: Value = serde_json::from_slice(
             render(&route(NotificationTransportKind::Slack), &intent)
@@ -2014,11 +2052,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             slack,
-            json!({"text":"Attention required: check storage\nInspect: record:1"})
+            json!({"text":"[attention] Attention required: check storage\nInspect: record:1"})
         );
         assert_eq!(
             discord,
-            json!({"content":"Attention required: check storage\nInspect: record:1"})
+            json!({"content":"[attention] Attention required: check storage\nInspect: record:1"})
         );
     }
 
@@ -2044,6 +2082,7 @@ mod tests {
         .expect("message JSON");
         assert_eq!(message["schema"], "nq.local-inbox-message/v1");
         assert_eq!(message["stable_event_id"], "event-1");
+        assert_eq!(message["summary"], "[attention] check storage");
         assert_eq!(
             message["delivery_statement"],
             "local file retained; human receipt is not established"
@@ -2746,6 +2785,7 @@ mod tests {
             "inspection_reference":"record:1",
             "action":action,
             "condition":{"site":"crow-lab","component":"nq","rule":"nq-no-fresh-acquisition","target_class":"demo"},
+            "response_class":"page",
             "severity":"critical",
             "runbook_url":"https://runbooks.example/beta#nq-no-fresh-acquisition",
             "details":{"newest_artifact_age_seconds":900},
@@ -3634,6 +3674,184 @@ mod tests {
             error.contains(trigger["notification_id"].as_str().unwrap()),
             "{error}"
         );
+    }
+
+    #[test]
+    fn v1_response_class_is_closed_optional_and_rendered_as_a_prefix() {
+        for (class, prefix) in [
+            (None, "attention"),
+            (Some("informational"), "informational"),
+            (Some("attention"), "attention"),
+            (Some("page"), "page"),
+        ] {
+            let mut value = intent("check storage", "operator_assertion", None);
+            if let Some(class) = class {
+                value["response_class"] = json!(class);
+            }
+            let (intent, pager) = parse_submitted(value).unwrap();
+            assert!(pager.is_none());
+            for (transport, field) in [
+                (NotificationTransportKind::Slack, "text"),
+                (NotificationTransportKind::Discord, "content"),
+            ] {
+                let rendered: Value =
+                    serde_json::from_slice(render(&route(transport), &intent).unwrap().as_bytes())
+                        .unwrap();
+                assert_eq!(
+                    rendered[field],
+                    format!("[{prefix}] Attention required: check storage\nInspect: record:1")
+                );
+            }
+            let binding = CanonicalDocument::from_serializable(&json!({})).unwrap();
+            let local: Value =
+                serde_json::from_slice(render_local_inbox(&intent, &binding).unwrap().as_bytes())
+                    .unwrap();
+            assert_eq!(local["summary"], format!("[{prefix}] check storage"));
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_response_class_is_refused_before_custody() {
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let mut v1 = intent("check storage", "operator_assertion", None);
+        v1["response_class"] = json!("urgent");
+        let mut v2 = pagerduty_intent("trigger", "event-1", "inspect");
+        v2["response_class"] = json!("Page");
+        for (value, route) in [(v1, "ops.primary"), (v2, "pd.ops")] {
+            let path = write_intent(&root, value);
+            let error = submit_with_dispatch(
+                &config,
+                &path,
+                route,
+                true,
+                |_| panic!("no secret resolution for a malformed intent"),
+                |_| Ok(|_, _, _| async { panic!("no dispatch for a malformed intent") }),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("response_class must be"));
+        }
+        assert_eq!(inspect(&config, None).unwrap(), json!([]));
+    }
+
+    #[tokio::test]
+    async fn pagerduty_refuses_non_page_intents_as_retained_refusals() {
+        let mut cases = Vec::new();
+        for action in ["trigger", "resolve"] {
+            for class in [None, Some("informational"), Some("attention")] {
+                cases.push((action, class));
+            }
+        }
+        for (action, class) in cases {
+            let root = TempDir::new().unwrap();
+            let config = pagerduty_config(&root);
+            let mut value = pagerduty_intent(action, "event-1", "inspect");
+            match class {
+                Some(class) => value["response_class"] = json!(class),
+                None => {
+                    value.as_object_mut().unwrap().remove("response_class");
+                }
+            }
+            let path = write_intent(&root, value);
+            let result = submit_with_dispatch(
+                &config,
+                &path,
+                "pd.ops",
+                true,
+                |_| panic!("no routing key resolution for a non-page intent"),
+                |_| Ok(|_, _, _| async { panic!("no network call for a non-page intent") }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["delivery_state"], "refused", "{action} {class:?}");
+            let status = inspect(&config, result["notification_id"].as_str()).unwrap();
+            assert_eq!(
+                status[0]["pagerduty"]["last_event"]["detail"]["reason"],
+                RESPONSE_CLASS_NOT_PAGE
+            );
+            assert_eq!(status[0]["pagerduty"]["response_class"], json!(class));
+            assert_eq!(status[0]["event_count"], 1);
+
+            let (component, detail) = notification_detail(&config);
+            assert_eq!(component.code, "delivery_failure_unresolved");
+            assert_eq!(detail["routes"]["pd.ops"]["counts"]["refused"], 1);
+            assert_eq!(
+                detail["routes"]["pd.ops"]["unresolved_failures"][0]["reason"],
+                RESPONSE_CLASS_NOT_PAGE
+            );
+            assert_routing_key_absent(&config);
+        }
+    }
+
+    #[tokio::test]
+    async fn non_page_refusal_precedes_nightshift_replay() {
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut value = pagerduty_intent("trigger", digest, "inspect");
+        value["attention_kind"] = json!("nightshift_receipt");
+        value["attention_receipt_digest"] = json!(digest);
+        value["transition_id"] = json!(digest);
+        value["owner_receipt"] = replay_bundle();
+        // The route enrolls no verifier, so any replay attempt fails.
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let path = write_intent(&root, value.clone());
+        let error = submit_with_dispatch(
+            &config,
+            &path,
+            "pd.ops",
+            true,
+            |_| panic!("no secret resolution when replay fails"),
+            |_| Ok(|_, _, _| async { panic!("no dispatch when replay fails") }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Nightshift replay is not configured")
+        );
+        assert_eq!(inspect(&config, None).unwrap(), json!([]));
+
+        value["response_class"] = json!("attention");
+        let path = write_intent(&root, value);
+        let result = submit_with_dispatch(
+            &config,
+            &path,
+            "pd.ops",
+            true,
+            |_| panic!("no secret resolution for a non-page intent"),
+            |_| Ok(|_, _, _| async { panic!("no dispatch for a non-page intent") }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["delivery_state"], "refused");
+        let status = inspect(&config, result["notification_id"].as_str()).unwrap();
+        assert_eq!(
+            status[0]["pagerduty"]["last_event"]["detail"]["reason"],
+            RESPONSE_CLASS_NOT_PAGE
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_v2_record_is_inspectable_and_its_resubmit_is_refused() {
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let mut legacy = pagerduty_intent("trigger", "event-1", "inspect");
+        legacy.as_object_mut().unwrap().remove("response_class");
+        let document = CanonicalDocument::from_serializable(&legacy).unwrap();
+        assert!(reopen_retained_intent(&document).is_ok());
+        let first = submit_pd(&config, &root, legacy, true, accepted()).await;
+        let id = first["notification_id"].as_str().unwrap();
+        let resubmitted = resubmit(&config, id, "event-1-r1", true).await.unwrap();
+        assert_eq!(resubmitted["delivery_state"], "refused");
+        assert_eq!(resubmitted["resubmitted_from"], id);
+        let status = inspect(&config, resubmitted["notification_id"].as_str()).unwrap();
+        assert_eq!(
+            status[0]["pagerduty"]["last_event"]["detail"]["reason"],
+            RESPONSE_CLASS_NOT_PAGE
+        );
+        assert_eq!(status[0]["pagerduty"]["response_class"], Value::Null);
     }
 
     #[test]
