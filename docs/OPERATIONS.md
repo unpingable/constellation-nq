@@ -734,9 +734,9 @@ revision of each lineage wins, as in the complete walk), and reopens and
 validates exactly one evaluation per lineage. The findings exports validate the
 evaluation history beyond the frontier. Their cost follows the number of
 lineages, the current status rows, and the history appended since the last
-engine open, not the store's age. The daemon's collection engine opens the
-store for every collection and advances the watermark each time, so the
-uncovered tail stays short while `nqd` runs.
+engine open, not the store's age. Each instance's freshness sweep opens an
+engine at least once a minute and advances the watermark, so the uncovered
+tail stays short while `nqd` runs.
 
 Without such a certification (no watermark, a withdrawn certification, or one
 recorded under other engine rules, as after every package upgrade until the
@@ -762,6 +762,37 @@ watermark). The `status_snapshot_work_does_not_follow_covered_history` test
 counts SQLite operations: the certified snapshot adds about 20 per covered
 collection round against 640 for the complete walk, and it decodes no covered
 evaluation other than each lineage's newest.
+
+### Collection cost over uptime
+
+`nqd` keeps one collection engine per instance for its whole uptime. Before a
+collection or freshness sweep evaluates, the engine validates the evaluation
+and finding history the new evaluations build on. Since 0.2.4 each engine
+keeps a replay cursor: the evaluation sequence it has validated through and
+the lineage state there, seeded from the certification its open established.
+Each evaluation validates only the evaluations appended since the engine's
+previous one (all of them, as before, through the same per-evaluation laws),
+plus the store-wide laws for rows beyond the frontier its own commits proved.
+The check runs inside the IMMEDIATE transaction that commits the evaluation,
+so no concurrent commit can interleave with it. Open-time validation and
+`admin validate --full` are unchanged. The evaluation history query also
+reads each evaluation's refusal and finding-event rows once per page (grouped
+joins over the rows in range) instead of scanning both tables per evaluation;
+its rows are identical and there is no schema change.
+
+Up to 0.2.3 every collection replayed the evaluation history from the
+engine's open, so its cost grew with uptime: on an operated store with ten
+instances it went from about 1 s an hour after start to about 400 s after nine
+hours (about 6,300 evaluations), and the collections' constant reads kept the
+write-ahead log from ever restarting (293 MB at stop). The replays also ran
+outside any transaction, so a concurrent commit could make them report a
+spurious integrity failure ("evaluation append sequence does not continue the
+validated sequence", or a lineage whose "new revisions ... do not continue")
+and, on an engine open, withdraw the semantic certification. Those checks now
+read one snapshot. On a copy of that store (release build), the 0.2.3
+per-collection replay took 17.5 s to 19.7 s; validating 30 evaluations behind
+the cursor takes 0.05 s, and 0.003 s once the cursor is current. Periodic
+restarts are not needed.
 
 ### Full validation
 

@@ -3543,6 +3543,31 @@ impl Store {
             &CollectionReceipt,
         ) -> Result<AdmittedCollectionCompletion<T>, E>,
     {
+        self.commit_admitted_collection_validated(collection, |_, _| Ok(()), build)
+    }
+
+    /// [`Self::commit_admitted_collection`], first running `validate` inside
+    /// the same IMMEDIATE transaction, before anything of the collection is
+    /// inserted. `validate` reads this handle, whose every read then sees
+    /// exactly the committed history the collection will build on (no other
+    /// writer can commit until this transaction ends), and receives the
+    /// append bounds of that history captured in the transaction. A
+    /// `validate` failure rolls the transaction back; an exact provider retry
+    /// returns its original commitment without calling either closure.
+    pub fn commit_admitted_collection_validated<T, E, P, F>(
+        &mut self,
+        collection: &CollectionInput,
+        validate: P,
+        build: F,
+    ) -> Result<ProviderIntakeCommit<T>, E>
+    where
+        E: From<StoreError>,
+        P: FnOnce(&Self, &HistoryFrontier) -> Result<(), E>,
+        F: FnOnce(
+            &AdmittedCollectionView<'_, '_>,
+            &CollectionReceipt,
+        ) -> Result<AdmittedCollectionCompletion<T>, E>,
+    {
         validate_collection(collection).map_err(E::from)?;
         if !is_admitted_collection(collection) {
             return Err(E::from(StoreError::Invariant(
@@ -3551,7 +3576,7 @@ impl Store {
         }
         let validated = self.validation.store_validated.clone();
         let scope = validated.as_ref().map_or(Scope::FULL, Scope::after);
-        let transaction = self.immediate_transaction().map_err(E::from)?;
+        let transaction = self.shared_immediate_transaction().map_err(E::from)?;
         if let ProviderIntakePreflight::Existing {
             acknowledgment,
             canonical_result,
@@ -3566,6 +3591,8 @@ impl Store {
                 canonical_result,
             });
         }
+        let bounds = HistoryFrontier::capture_bounds(&transaction).map_err(E::from)?;
+        validate(self, &bounds)?;
         let receipt = insert_collection(&transaction, collection).map_err(E::from)?;
         if receipt.report_sequence.is_none() || receipt.semantic_digest.is_none() {
             return Err(E::from(StoreError::Invariant(
@@ -4294,6 +4321,16 @@ impl Store {
         self.require_current_schema()?;
         self.connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StoreError::from)
+    }
+
+    /// An IMMEDIATE transaction borrowing the connection shared, so this
+    /// handle's read methods can run inside it (each then reads the
+    /// transaction's snapshot). Only the methods that create one use it;
+    /// none of the reads they call begins a transaction of its own.
+    fn shared_immediate_transaction(&self) -> Result<Transaction<'_>, StoreError> {
+        self.require_current_schema()?;
+        Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(StoreError::from)
     }
 
@@ -5112,8 +5149,9 @@ impl AssociationCounts {
 }
 
 /// Read-only semantic view of the transaction that is assembling one admitted
-/// collection. The newly inserted report is visible here, while no partial
-/// collection state is visible outside the transaction.
+/// collection (or a set of evaluations). The newly inserted report is visible
+/// here, while no partial collection state is visible outside the
+/// transaction.
 pub struct AdmittedCollectionView<'transaction, 'connection> {
     transaction: &'transaction Transaction<'connection>,
 }
@@ -5966,6 +6004,46 @@ impl Store {
         Ok(receipt)
     }
 
+    /// Commit evaluations without a triggering run, as one transaction:
+    /// `build` runs inside an IMMEDIATE transaction with this handle (whose
+    /// reads then see exactly the committed history the evaluations build
+    /// on, with no other writer able to commit until it ends) and the append
+    /// bounds captured in it, plus a view of the transaction for the
+    /// evidence and finding reads, and returns the evaluations to insert.
+    /// Any failure rolls every one back.
+    pub fn commit_evaluations_validated<T, E, F>(&mut self, build: F) -> Result<T, E>
+    where
+        E: From<StoreError>,
+        F: FnOnce(
+            &Self,
+            &AdmittedCollectionView<'_, '_>,
+            &HistoryFrontier,
+        ) -> Result<(Vec<EvaluationCommitInput>, T), E>,
+    {
+        let transaction = self.shared_immediate_transaction().map_err(E::from)?;
+        let bounds = HistoryFrontier::capture_bounds(&transaction).map_err(E::from)?;
+        let (evaluations, value) = {
+            let view = AdmittedCollectionView {
+                transaction: &transaction,
+            };
+            build(self, &view, &bounds)?
+        };
+        for input in &evaluations {
+            if input.evaluation.trigger_run_id.is_some() {
+                return Err(E::from(StoreError::Invariant(
+                    "run-triggered evaluation requires atomic admitted completion".into(),
+                )));
+            }
+            insert_evaluation(&transaction, &input.evaluation, input.finding.as_ref())
+                .map_err(E::from)?;
+        }
+        transaction
+            .commit()
+            .map_err(StoreError::from)
+            .map_err(E::from)?;
+        Ok(value)
+    }
+
     /// Read the complete stable finding projection in opaque finding-id order.
     pub fn finding_snapshots(&self) -> Result<Vec<FindingSnapshotRow>, StoreError> {
         finding_snapshots_from_connection(&self.connection)
@@ -6197,6 +6275,28 @@ impl Store {
             after_evaluation_sequence,
             through_evaluation_sequence,
             None,
+            AssociationCounts::Grouped,
+        )
+    }
+
+    /// [`Self::evaluation_refusal_history_bounded`] for a page that resumes at
+    /// or beyond `reference`: append bounds captured inside one transaction
+    /// (as [`Self::commit_admitted_collection_validated`] passes them), so
+    /// every refusal and finding event naming an evaluation newer than
+    /// `reference.evaluation_sequence` lies beyond its rowid bounds. Without
+    /// one that applies, the handle's own reference frontier is used.
+    pub fn evaluation_refusal_history_beyond(
+        &self,
+        limit: u32,
+        after_evaluation_sequence: Option<i64>,
+        through_evaluation_sequence: i64,
+        reference: Option<&HistoryFrontier>,
+    ) -> Result<Vec<EvaluationRefusalHistoryRow>, StoreError> {
+        self.evaluation_refusal_history_page(
+            limit,
+            after_evaluation_sequence,
+            through_evaluation_sequence,
+            reference,
             AssociationCounts::Grouped,
         )
     }
@@ -10706,6 +10806,15 @@ fn validate_evaluation_revision_shape(
     connection: &Connection,
     scope: Scope<'_>,
 ) -> Result<(), StoreError> {
+    // The checks below compare counts and bounds read by separate
+    // statements; outside a transaction a concurrent commit between them
+    // would read as a broken sequence. One read transaction gives them a
+    // single snapshot (it reads only, so dropping it rolls nothing back).
+    let _snapshot = if connection.is_autocommit() {
+        Some(connection.unchecked_transaction()?)
+    } else {
+        None
+    };
     // Per-row revision bounds cover only the scope; in scope the rowid range
     // drives the scan (NOT INDEXED keeps SQLite from walking a whole index).
     let not_indexed = if scope.is_full() { "" } else { "NOT INDEXED" };

@@ -932,6 +932,15 @@ impl crate::Store {
         self.validation.open_frontier.as_ref()
     }
 
+    /// The frontier through which this handle has proven the store-level
+    /// history laws: its open frontier, advanced by each of its own commits
+    /// that validates the rows beyond it. `None` when its writers validate in
+    /// full.
+    #[must_use]
+    pub fn store_validated_frontier(&self) -> Option<&HistoryFrontier> {
+        self.validation.store_validated.as_ref()
+    }
+
     /// The frontier this handle's open proved validated, or `None` when the
     /// open validated history in full (so callers must too).
     #[must_use]
