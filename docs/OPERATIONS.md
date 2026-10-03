@@ -794,6 +794,11 @@ per-collection replay took 17.5 s to 19.7 s; validating 30 evaluations behind
 the cursor takes 0.05 s, and 0.003 s once the cursor is current. Periodic
 restarts are not needed.
 
+`nqd` also stops on SIGTERM (as `systemctl stop` sends) as it does on SIGINT:
+it records its stopped status and closes every store connection, so SQLite
+checkpoints and removes the write-ahead log. Up to 0.2.3 SIGTERM killed the
+process without closing them.
+
 ### Full validation
 
 Full validation runs when no watermark exists, when it cannot be decoded, when
