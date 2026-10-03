@@ -3260,14 +3260,11 @@ impl CollectionEngine {
                             run,
                             submission: Some(submission),
                         };
+                        ensure_replay_cursor(&self.store, &mut self.replay)?;
                         let replay = &mut self.replay;
                         let committed = self.store.commit_admitted_collection_validated(
                             &collection,
-                            |store, bounds| {
-                                *replay =
-                                    Some(advance_replay_cursor(store, replay.as_ref(), bounds)?);
-                                Ok(())
-                            },
+                            |store, bounds| advance_engine_cursor(store, replay, bounds),
                             |view, receipt| {
                                 let snapshot = view.evidence_snapshot(std::slice::from_ref(
                                     &watcher.instance_id,
@@ -4096,6 +4093,7 @@ impl CollectionEngine {
             .artifact_digest()
             .as_str()
             .to_owned();
+        ensure_replay_cursor(&self.store, &mut self.replay)?;
         let replay = &mut self.replay;
         // Read, validate, prepare, and commit in one IMMEDIATE transaction,
         // so the evaluations build on exactly the history just validated.
@@ -4103,7 +4101,7 @@ impl CollectionEngine {
             .commit_evaluations_validated(|store, view, bounds| {
                 let snapshot =
                     view.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
-                *replay = Some(advance_replay_cursor(store, replay.as_ref(), bounds)?);
+                advance_engine_cursor(store, replay, bounds)?;
                 let current_findings = view.finding_snapshots()?;
                 let prepared = prepare_instance_evaluations(
                     watcher,
@@ -8347,21 +8345,27 @@ fn engine_semantic_state(
 /// frontier this open certified, or `None` when it certified none.
 fn validate_engine_open_history(store: &Store) -> Result<Option<ReplayCursor>, EngineError> {
     validate_core_history_since_open(store)?;
+    let mut evaluation = None;
     let semantic = match engine_semantic_state(store) {
-        Some((frontier, state)) => validate_semantic_planes_since(store, frontier, state),
+        Some((frontier, state)) => {
+            validate_semantic_planes_since_with(store, frontier, state, &mut evaluation)
+        }
         // No watermark, or one whose semantic certification was withdrawn
         // by an earlier failure: attempt the full certification again
         // rather than leaving it withdrawn.
-        None => validate_semantic_planes_in_full(store),
+        None => validate_semantic_planes_in_full_with(store, &mut evaluation),
     };
-    let cursor = match &semantic {
-        Ok(state) => Some(ReplayCursor {
-            through: certified_replay_bound(store)?,
-            heads: replay_heads(state)?,
-            reference: None,
-        }),
-        Err(_) => None,
-    };
+    // The evaluation history replays first; its heads seed the cursor even
+    // when a later plane withdraws the certification.
+    let cursor = evaluation
+        .map(|heads| {
+            certified_replay_bound(store).map(|through| ReplayCursor {
+                through,
+                heads,
+                reference: None,
+            })
+        })
+        .transpose()?;
     let certification = match semantic {
         Ok(state) => nq_store::SemanticCertification::Established(state),
         Err(error) => {
@@ -8445,9 +8449,20 @@ pub fn validate_referenced_diagnostic_artifact(
 /// Every semantic plane other than provider intake and diagnostic artifacts,
 /// in full; returns the finding-lineage replay state at the end of history.
 fn validate_semantic_planes_in_full(store: &Store) -> Result<nq_store::SemanticState, EngineError> {
+    validate_semantic_planes_in_full_with(store, &mut None)
+}
+
+/// [`validate_semantic_planes_in_full`], also yielding the evaluation replay
+/// heads in `evaluation` as soon as that replay succeeds, even when a later
+/// plane then fails.
+fn validate_semantic_planes_in_full_with(
+    store: &Store,
+    evaluation: &mut Option<HistoryHeads>,
+) -> Result<nq_store::SemanticState, EngineError> {
     // The evaluation history is replayed once, first; status and rejected
     // custody then read their runs' evaluations without replaying it again.
     let (_, heads) = replay_evaluation_history_in_full(store)?;
+    *evaluation = Some(heads.clone());
     validate_admitted_report_history(store)?;
     validate_watcher_run_history(store)?;
     validate_status_history_v2_with_page_size(store, 256, EvaluationHistory::AlreadyValidated)?;
@@ -8500,6 +8515,18 @@ fn validate_semantic_planes_since(
     frontier: &nq_store::HistoryFrontier,
     state: &nq_store::SemanticState,
 ) -> Result<nq_store::SemanticState, EngineError> {
+    validate_semantic_planes_since_with(store, frontier, state, &mut None)
+}
+
+/// [`validate_semantic_planes_since`], also yielding the evaluation replay
+/// heads in `evaluation` as soon as that replay succeeds, even when a later
+/// plane then fails.
+fn validate_semantic_planes_since_with(
+    store: &Store,
+    frontier: &nq_store::HistoryFrontier,
+    state: &nq_store::SemanticState,
+    evaluation: &mut Option<HistoryHeads>,
+) -> Result<nq_store::SemanticState, EngineError> {
     store.validate_admitted_report_associations_since(frontier)?;
     for report_id in store.admitted_report_ids_since(frontier)? {
         validate_admitted_report_record(store, &report_id)?;
@@ -8512,6 +8539,7 @@ fn validate_semantic_planes_since(
         state,
         certified_replay_bound(store)?,
     )?;
+    *evaluation = Some(heads.clone());
     // Status events read their runs' evaluations, which were replayed only
     // through the open frontier; later events are validated by the next open.
     let status_through = store
@@ -9824,48 +9852,68 @@ struct ReplayCursor {
     reference: Option<nq_store::HistoryFrontier>,
 }
 
-/// The evaluation and finding history a new evaluation builds on, for an
-/// engine that has replayed it through `cursor`: the store-wide laws for
-/// rows beyond the handle's store-validated frontier, then each evaluation
-/// after the cursor, replayed from the cursor's heads, through `bounds`.
-/// Without a cursor the history is validated and replayed in full. Called
-/// inside the IMMEDIATE transaction that commits the new evaluation, with the
-/// append bounds captured there, so no concurrent commit can interleave with
-/// the reads. Returns the cursor advanced to `bounds`.
-fn advance_replay_cursor(
+/// Establish a replay cursor by validating and replaying the evaluation
+/// history in full, for an engine whose open replayed none (it failed). Run
+/// in a read snapshot ([`Store::with_read_snapshot`]), never inside a write
+/// transaction, so the whole replay takes no write lock; the evaluation then
+/// validates only what was appended since, inside its own transaction.
+fn establish_replay_cursor(
     store: &Store,
-    cursor: Option<&ReplayCursor>,
     bounds: &nq_store::HistoryFrontier,
 ) -> Result<ReplayCursor, EngineError> {
-    let through = bounds.evaluation_sequence;
-    let (after, heads, reference) = if let Some(cursor) = cursor {
-        if cursor.through > through {
-            return Err(EngineError::Invariant(format!(
-                "evaluation history ends at sequence {through}, before the sequence {} this \
-                 engine already validated; the history was altered",
-                cursor.through
-            )));
-        }
-        match store.store_validated_frontier() {
-            Some(frontier) => store.validate_evaluation_history_invariants_since(frontier)?,
-            None => store.validate_evaluation_history_invariants()?,
-        }
-        (
-            Some(cursor.through),
-            cursor.heads.clone(),
-            cursor.reference.as_ref(),
-        )
-    } else {
-        store.validate_evaluation_history_invariants()?;
-        (None, HistoryHeads::default(), None)
-    };
+    store.validate_evaluation_history_invariants()?;
     let (_, heads) = visit_evaluation_history_beyond(
         store,
         nq_store::MAX_PUBLIC_QUERY_ROWS,
-        after,
+        None,
+        HistoryHeads::default(),
+        bounds.evaluation_sequence,
+        None,
+        |_, _, _, _| Ok(()),
+    )?;
+    Ok(ReplayCursor {
+        through: bounds.evaluation_sequence,
         heads,
+        reference: Some(bounds.clone()),
+    })
+}
+
+/// The evaluation and finding history a new evaluation builds on, for an
+/// engine that has replayed it through `cursor`: the store-wide laws for
+/// every row beyond the cursor's reference bounds (or, for a cursor seeded at
+/// open, beyond the open frontier, through which the open proved them), then
+/// each evaluation after the cursor, replayed from the cursor's heads,
+/// through `bounds`. Called inside the IMMEDIATE transaction that commits
+/// the new evaluation, with the append bounds captured there, so no
+/// concurrent commit can interleave with the reads; the work is proportional
+/// to what was appended since the cursor. Returns the cursor advanced to
+/// `bounds`.
+fn advance_replay_cursor(
+    store: &Store,
+    cursor: &ReplayCursor,
+    bounds: &nq_store::HistoryFrontier,
+) -> Result<ReplayCursor, EngineError> {
+    let through = bounds.evaluation_sequence;
+    if cursor.through > through {
+        return Err(EngineError::Invariant(format!(
+            "evaluation history ends at sequence {through}, before the sequence {} this \
+             engine already validated; the history was altered",
+            cursor.through
+        )));
+    }
+    // Scoped by what this cursor proved, never by a frontier other commit
+    // paths advance.
+    match cursor.reference.as_ref().or(store.open_frontier()) {
+        Some(frontier) => store.validate_evaluation_history_invariants_since(frontier)?,
+        None => store.validate_evaluation_history_invariants()?,
+    }
+    let (_, heads) = visit_evaluation_history_beyond(
+        store,
+        nq_store::MAX_PUBLIC_QUERY_ROWS,
+        Some(cursor.through),
+        cursor.heads.clone(),
         through,
-        reference,
+        cursor.reference.as_ref(),
         |_, _, _, _| Ok(()),
     )?;
     Ok(ReplayCursor {
@@ -9873,6 +9921,45 @@ fn advance_replay_cursor(
         heads,
         reference: Some(bounds.clone()),
     })
+}
+
+/// The engine's replay cursor, established outside any write transaction
+/// when its open replayed none.
+fn ensure_replay_cursor(
+    store: &Store,
+    replay: &mut Option<ReplayCursor>,
+) -> Result<(), EngineError> {
+    if replay.is_none() {
+        *replay = Some(store.with_read_snapshot(establish_replay_cursor)?);
+    }
+    Ok(())
+}
+
+/// Advance the engine's cursor inside a commit transaction.
+fn advance_engine_cursor(
+    store: &Store,
+    replay: &mut Option<ReplayCursor>,
+    bounds: &nq_store::HistoryFrontier,
+) -> Result<(), EngineError> {
+    #[cfg(test)]
+    let started = nq_store::sql_work_count();
+    let current = replay.as_ref().ok_or_else(|| {
+        EngineError::Invariant("the replay cursor is established before committing".into())
+    })?;
+    *replay = Some(advance_replay_cursor(store, current, bounds)?);
+    #[cfg(test)]
+    if let (Some(started), Some(now)) = (started, nq_store::sql_work_count()) {
+        TRANSACTION_REPLAY_WORK.with(|work| work.set(Some(now - started)));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `SQLite` work of the last cursor advance inside a commit transaction
+    /// on this thread, when work is being counted.
+    static TRANSACTION_REPLAY_WORK: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Evaluation history beyond `frontier`: the store-wide laws for new rows,
@@ -19281,7 +19368,7 @@ sys.stdout.write("\n")
                 advanced = Some(
                     store
                         .commit_evaluations_validated(|store, _, bounds| {
-                            advance_replay_cursor(store, Some(&behind), bounds)
+                            advance_replay_cursor(store, &behind, bounds)
                                 .map(|cursor| (Vec::new(), cursor))
                         })
                         .expect("advance"),
@@ -19295,11 +19382,335 @@ sys.stdout.write("\n")
             &mut || {
                 store
                     .commit_evaluations_validated(|store, _, bounds| {
-                        advance_replay_cursor(store, Some(&current), bounds)
+                        advance_replay_cursor(store, &current, bounds)
                             .map(|cursor| (Vec::new(), cursor))
                     })
                     .expect("advance");
             },
         );
+    }
+
+    /// Admitted host fixture with `synthetic` extra evaluations (ten
+    /// lineages) appended through the store, reopened as a long-lived engine.
+    fn host_fixture_with_history(
+        root: &Path,
+        genesis: &str,
+        synthetic: usize,
+    ) -> Option<(NqConfig, WatcherConfig, PathBuf)> {
+        let (mut engine, watcher, mode) =
+            admitted_host_diagnostic_fixture(root, genesis, b"watermark-evaluator")?;
+        assert!(engine.collect(&watcher).expect("collect").is_success());
+        let config = engine.config.clone();
+        drop(engine);
+        let mut store = Store::open(&config.database_path).expect("open");
+        append_synthetic_evaluations(&mut store, 0, synthetic, 10);
+        drop(store);
+        Some((config, watcher, mode))
+    }
+
+    /// An engine whose open could not replay the evaluation history (it has
+    /// no cursor) replays it in a read snapshot before its collection, never
+    /// inside the IMMEDIATE transaction: the work done under the write lock
+    /// is the same short tail whatever the history's length, and a writer
+    /// with a one-second busy timeout is never refused meanwhile.
+    #[test]
+    fn cursorless_engine_replays_outside_the_write_lock() {
+        let mut in_transaction = Vec::new();
+        for synthetic in [200usize, 3000] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let Some((config, watcher, _mode)) =
+                host_fixture_with_history(directory.path(), "genesis-cursorless", synthetic)
+            else {
+                return;
+            };
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            let (refused, attempts, work) = std::thread::scope(|scope| {
+                let writer = scope.spawn(|| {
+                    let connection =
+                        rusqlite::Connection::open(&config.database_path).expect("writer");
+                    connection
+                        .busy_timeout(std::time::Duration::from_secs(1))
+                        .expect("busy timeout");
+                    let (mut refused, mut attempts) = (0usize, 0usize);
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        attempts += 1;
+                        if connection
+                            .execute_batch("BEGIN IMMEDIATE; COMMIT;")
+                            .is_err()
+                        {
+                            refused += 1;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    (refused, attempts)
+                });
+                nq_store::start_sql_work_count();
+                let mut engine = reopen_with_test_identity(&config).expect("engine");
+                // As after an open whose evaluation replay failed.
+                engine.replay = None;
+                assert!(engine.collect(&watcher).expect("collect").is_success());
+                assert!(
+                    engine.replay.is_some(),
+                    "the collection established a cursor"
+                );
+                drop(engine);
+                let _ = nq_store::stop_sql_work_count();
+                let work = TRANSACTION_REPLAY_WORK.with(std::cell::Cell::take);
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                let (refused, attempts) = writer.join().expect("writer");
+                (
+                    refused,
+                    attempts,
+                    work.expect("advanced in the transaction"),
+                )
+            });
+            eprintln!(
+                "{synthetic} synthetic evaluations: {work} SQLite operations under the write \
+                 lock; writer refused {refused} of {attempts}"
+            );
+            assert_eq!(
+                refused, 0,
+                "a writer was refused while the history replayed"
+            );
+            in_transaction.push(work);
+        }
+        assert!(
+            in_transaction[1] <= in_transaction[0] + in_transaction[0] / 10,
+            "work under the write lock follows history: {in_transaction:?}"
+        );
+    }
+
+    /// A row another writer commits between two collections is checked by
+    /// the store-wide laws of the next commit on every path: a non-success
+    /// collection (which advances the handle's validated frontier) refuses
+    /// it, and so do the next admitted collection and a sweep, so it cannot
+    /// slip behind a frontier another commit advanced.
+    #[test]
+    fn store_laws_cover_rows_committed_between_collections() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "genesis-store-laws",
+            b"watermark-evaluator",
+        ) else {
+            return;
+        };
+        assert!(engine.collect(&watcher).expect("collect").is_success());
+        let config = engine.config.clone();
+        drop(engine);
+        let mut engine = reopen_with_test_identity(&config).expect("long-lived engine");
+        assert!(engine.collect(&watcher).expect("collect").is_success());
+        // Another writer names an already validated evaluation with a
+        // refusal its outcome does not allow; the per-row replay of new
+        // evaluations never reads it.
+        let connection = rusqlite::Connection::open(&config.database_path).expect("writer");
+        let evaluation_id: String = connection
+            .query_row(
+                "SELECT evaluation_id FROM evaluation_runs
+                 WHERE outcome <> 'cannot_evaluate' ORDER BY evaluation_sequence LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("an evaluation");
+        connection
+            .execute(
+                "INSERT INTO refusals (refusal_id, source_kind, responsible_instance_id,
+                     boundary, code, evaluation_id, detail_json, created_at)
+                 VALUES ('refusal-injected', 'profile', ?1, 'detector', 'evidence_stale', ?2,
+                         CAST('{}' AS BLOB), '2026-10-03T12:00:00.000Z')",
+                rusqlite::params![watcher.instance_id, evaluation_id],
+            )
+            .expect("inject a refusal");
+        drop(connection);
+        let profile = resolve(&watcher).expect("profile");
+        let refused = |result: Result<String, EngineError>, path: &str| match result {
+            Err(error) => assert!(
+                error.to_string().contains("typed refusals"),
+                "{path} refused for another reason: {error}"
+            ),
+            Ok(outcome) => panic!("{path} accepted the injected row: {outcome}"),
+        };
+        fs::write(&mode, "no_response\n").expect("non-success mode");
+        refused(
+            engine
+                .collect(&watcher)
+                .map(|outcome| format!("{outcome:?}")),
+            "non-success collection",
+        );
+        fs::write(&mode, "complete\n").expect("complete mode");
+        refused(
+            engine
+                .collect(&watcher)
+                .map(|outcome| format!("{outcome:?}")),
+            "admitted collection",
+        );
+        refused(
+            engine
+                .evaluate_instance(&watcher, profile, None)
+                .map(|evaluations| format!("{} evaluations", evaluations.len())),
+            "sweep",
+        );
+    }
+
+    /// A long-lived engine that only sweeps advances its validated frontier
+    /// with each sweep commit, so its sweeps stay flat.
+    #[test]
+    fn long_lived_sweeps_stay_flat() {
+        const SWEEPS: usize = 60;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((engine, watcher, _mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "genesis-sweeps",
+            b"watermark-evaluator",
+        ) else {
+            return;
+        };
+        let config = engine.config.clone();
+        drop(engine);
+        let profile = resolve(&watcher).expect("profile");
+        nq_store::start_sql_work_count();
+        let mut engine = reopen_with_test_identity(&config).expect("engine");
+        assert!(engine.collect(&watcher).expect("collect").is_success());
+        let work: Vec<u64> = (0..SWEEPS)
+            .map(|_| {
+                let before = nq_store::sql_work_count().expect("counting");
+                engine
+                    .evaluate_instance(&watcher, profile, None)
+                    .expect("sweep");
+                nq_store::sql_work_count().expect("counting") - before
+            })
+            .collect();
+        drop(engine);
+        let _ = nq_store::stop_sql_work_count();
+        let mean = |window: &[u64]| window.iter().sum::<u64>() / window.len() as u64;
+        let (early, late) = (mean(&work[2..10]), mean(&work[SWEEPS - 8..]));
+        eprintln!("sweep work early {early}, late {late} SQLite operations");
+        assert!(
+            late <= early + early / 20,
+            "sweep work follows calls since open: {work:?}"
+        );
+    }
+
+    /// Per-collection cost of one long-lived engine while nine others
+    /// collect between its collections and a seeder sweeps the history up
+    /// to each target size (default 1,000, 5,000, 20,000 evaluations).
+    /// Ignored by default: `NQ_UPTIME_TARGETS=1000,5000,20000 cargo test
+    /// -p nq-core --lib long_uptime_collection_measurement -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "builds tens of thousands of evaluations; run explicitly"]
+    #[allow(clippy::too_many_lines)]
+    fn long_uptime_collection_measurement() {
+        let targets: Vec<i64> = std::env::var("NQ_UPTIME_TARGETS")
+            .unwrap_or_else(|_| "1000,5000,20000".to_owned())
+            .split(',')
+            .map(|target| target.trim().parse().expect("target"))
+            .collect();
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (mut config, primary, _mode) = host_diagnostic_fixture(directory.path());
+        let mut watchers = vec![primary.clone()];
+        for index in 1..10 {
+            let mut watcher = primary.clone();
+            watcher.instance_id = format!("host-diagnostic.i{index}");
+            config.watchers.push(watcher.clone());
+            watchers.push(watcher);
+        }
+        let mut store = Store::initialize(&config.database_path).expect("initialize store");
+        append_profile_descriptor(&mut store, resolve(&primary).expect("host profile"))
+            .expect("profile descriptor");
+        store
+            .append_genesis(&GenesisInput {
+                genesis_id: "genesis-uptime".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: "2026-10-03T12:00:00.000Z".to_owned(),
+                detail: canonical(&json!({"source": "uptime"})).expect("detail"),
+            })
+            .expect("append genesis");
+        drop(store);
+        let mut setup = reopen_with_test_identity(&config).expect("engine");
+        for watcher in &watchers {
+            setup.watcher_action(watcher, "admit").expect("admit");
+        }
+        for watcher in &watchers {
+            assert!(setup.collect(watcher).expect("collect").is_success());
+        }
+        drop(setup);
+        let profile = resolve(&primary).expect("profile");
+        let mut others: Vec<CollectionEngine> = (1..10)
+            .map(|_| reopen_with_test_identity(&config).expect("other"))
+            .collect();
+        let mut seeder = reopen_with_test_identity(&config).expect("seeder");
+        let mut wall_engine = reopen_with_test_identity(&config).expect("wall engine");
+        nq_store::start_sql_work_count();
+        let mut ops_engine = reopen_with_test_identity(&config).expect("ops engine");
+        let latest =
+            |engine: &CollectionEngine| engine.store.latest_evaluation_sequence().expect("latest");
+        let mut next = 0usize;
+        for target in targets {
+            while latest(&seeder) < target {
+                seeder
+                    .evaluate_instance(&watchers[next % 10], profile, None)
+                    .expect("seed");
+                next += 1;
+            }
+            assert!(ops_engine.collect(&watchers[0]).expect("c").is_success());
+            assert!(wall_engine.collect(&watchers[0]).expect("c").is_success());
+            for (index, engine) in others.iter_mut().enumerate() {
+                assert!(
+                    engine
+                        .collect(&watchers[index + 1])
+                        .expect("c")
+                        .is_success()
+                );
+            }
+            let (mut ops, mut walls, mut sweeps) = (Vec::new(), Vec::new(), Vec::new());
+            for _ in 0..3 {
+                for (index, engine) in others.iter_mut().enumerate() {
+                    assert!(
+                        engine
+                            .collect(&watchers[index + 1])
+                            .expect("c")
+                            .is_success()
+                    );
+                }
+                let before = nq_store::sql_work_count().expect("counting");
+                assert!(ops_engine.collect(&watchers[0]).expect("c").is_success());
+                ops.push(nq_store::sql_work_count().expect("counting") - before);
+                let started = Instant::now();
+                assert!(wall_engine.collect(&watchers[0]).expect("c").is_success());
+                walls.push(started.elapsed().as_secs_f64());
+                let started = Instant::now();
+                wall_engine
+                    .evaluate_instance(&watchers[0], profile, None)
+                    .expect("sweep");
+                sweeps.push(started.elapsed().as_secs_f64());
+            }
+            let started = Instant::now();
+            validate_evaluation_history_before_evaluating(&wall_engine.store).expect("replay");
+            let replay_from_open = started.elapsed().as_secs_f64();
+            // No cursor: the replay runs in a read snapshot; only the tail
+            // runs under the write lock.
+            wall_engine.replay = None;
+            let started = Instant::now();
+            ensure_replay_cursor(&wall_engine.store, &mut wall_engine.replay).expect("establish");
+            let establish = started.elapsed().as_secs_f64();
+            let started = Instant::now();
+            let replay = &mut wall_engine.replay;
+            wall_engine
+                .store
+                .commit_evaluations_validated(|store, _, bounds| {
+                    advance_engine_cursor(store, replay, bounds).map(|()| (Vec::new(), ()))
+                })
+                .expect("advance");
+            let tail_under_lock = started.elapsed().as_secs_f64();
+            eprintln!(
+                "UPTIME evaluations={} collect_ops={ops:?} collect_wall={walls:.3?} \
+                 sweep_tx_wall={sweeps:.4?} replay_from_open_0.2.3={replay_from_open:.3}s \
+                 cursorless_establish_unlocked={establish:.3}s \
+                 cursorless_tail_under_lock={tail_under_lock:.4}s",
+                latest(&seeder)
+            );
+        }
+        let _ = nq_store::stop_sql_work_count();
     }
 }

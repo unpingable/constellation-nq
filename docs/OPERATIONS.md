@@ -769,16 +769,23 @@ evaluation other than each lineage's newest.
 collection or freshness sweep evaluates, the engine validates the evaluation
 and finding history the new evaluations build on. Since 0.2.4 each engine
 keeps a replay cursor: the evaluation sequence it has validated through and
-the lineage state there, seeded from the certification its open established.
-Each evaluation validates only the evaluations appended since the engine's
-previous one (all of them, as before, through the same per-evaluation laws),
-plus the store-wide laws for rows beyond the frontier its own commits proved.
-The check runs inside the IMMEDIATE transaction that commits the evaluation,
-so no concurrent commit can interleave with it. Open-time validation and
-`admin validate --full` are unchanged. The evaluation history query also
-reads each evaluation's refusal and finding-event rows once per page (grouped
-joins over the rows in range) instead of scanning both tables per evaluation;
-its rows are identical and there is no schema change.
+the lineage state there. The cursor is seeded from the evaluation-history
+replay its open performs (even when a later plane then withdraws the semantic
+certification). Each evaluation then validates, inside the IMMEDIATE
+transaction that commits it, only what was appended since the cursor: every
+new evaluation through the same per-evaluation laws as before, and the
+store-wide evaluation, refusal, and finding laws for every row beyond the
+append bounds the cursor last recorded, whichever writer or commit path added
+it. Every commit that advances a handle's validated frontier (admitted,
+non-success, and sweep commits) now checks those laws for the rows it passes.
+An engine whose open could not replay the evaluation history replays it in
+full in a read snapshot, without the write lock, and then validates only the
+tail under it. Open-time validation and `admin validate --full` are
+unchanged. The evaluation history query reads only the refusal and
+finding-event rows of each page's evaluations (grouped joins) instead of
+scanning both tables per evaluation, with identical rows, and run-to-
+evaluation lookups read only the evaluations appended since the handle's last
+commit. There is no schema change.
 
 Up to 0.2.3 every collection replayed the evaluation history from the
 engine's open, so its cost grew with uptime: on an operated store with ten
@@ -789,15 +796,36 @@ outside any transaction, so a concurrent commit could make them report a
 spurious integrity failure ("evaluation append sequence does not continue the
 validated sequence", or a lineage whose "new revisions ... do not continue")
 and, on an engine open, withdraw the semantic certification. Those checks now
-read one snapshot. On a copy of that store (release build), the 0.2.3
-per-collection replay took 17.5 s to 19.7 s; validating 30 evaluations behind
-the cursor takes 0.05 s, and 0.003 s once the cursor is current. Periodic
-restarts are not needed.
+read one snapshot.
+
+Measured with ten long-lived host-diagnostic engines collecting in turn and a
+sweeper growing the history (debug assertions, optimization level 2), one
+engine's collection took 21,500, 21,700, and 21,800 SQLite operations
+(0.13 s to 0.15 s, helper execution included) at 1,000, 5,000, and 20,000
+evaluations; a sweep's transaction held the write lock 6 ms to 8 ms. The
+0.2.3 per-collection replay took 0.5 s, 2.5 s to 2.8 s, and 10 s to 15 s at
+those sizes. An engine
+without a cursor spends that replay once, unlocked, and then holds the lock
+about 2.5 ms. On a copy of the incident store (6,311 evaluations, release
+build), the 0.2.3 per-collection replay took 17.5 s to 19.7 s; validating 30
+evaluations behind the cursor took 0.05 s, and 0.003 s once current. Periodic
+restarts are not needed. What a collection's own evaluation reads (for
+example a profile that reads every retained report of its instance) is not
+bounded by this change.
+
+The cursor detects a history shorter than the sequence it has validated, but
+not a store replaced in place with a different history of the same or greater
+length: rows at or below the cursor are revalidated only by the next engine
+open (as rows at or below the open frontier were before 0.2.4). After
+restoring or replacing the database file, restart `nqd`.
 
 `nqd` also stops on SIGTERM (as `systemctl stop` sends) as it does on SIGINT:
-it records its stopped status and closes every store connection, so SQLite
+it records its stopped status and closes its store connections, so SQLite
 checkpoints and removes the write-ahead log. Up to 0.2.3 SIGTERM killed the
-process without closing them.
+process without closing them. A collection already running in a helper is
+not interrupted: the process exits after it finishes, which can follow the
+`stopped` record, and systemd's `TimeoutStopSec` (45 s in the packaged unit)
+bounds the wait, after which SIGKILL rolls back any open transaction.
 
 ### Full validation
 
