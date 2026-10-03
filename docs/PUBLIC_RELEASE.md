@@ -2,14 +2,15 @@
 
 ## NQ 0.2.1 source candidate
 
-The source tree is version 0.2.1, an unreleased candidate. It bounds store
+NQ 0.2.1 is an unreleased candidate. It bounds store
 validation by a store-specific, content-bound validation watermark so that
 replay, qualification, export, and inspection no longer revalidate the whole
 retained history on every invocation; see
 [Store validation](OPERATIONS.md#store-validation-and-the-validation-watermark).
 Untouched historical rows are re-read only by `nq admin validate --full`, which
-an operator should schedule periodically. No 0.2.1 package or tag exists
-until the release owner publishes one; the published release is 0.2.0 below.
+an operator should schedule periodically. There is no v0.2.1 tag or GitHub
+release; 0.2.1 was deployed from a package only. The published release is
+0.2.0 below.
 
 ## NQ 0.2.0 component package
 
