@@ -231,6 +231,13 @@ impl HistoryFrontier {
     /// Read the current append position of every history table (each an
     /// O(log n) rowid lookup), without counts or chains.
     pub(crate) fn capture_bounds(connection: &Connection) -> Result<Self, StoreError> {
+        // One snapshot for every table: a frontier bounds what later rows can
+        // reference only if no commit lands between its reads.
+        let _snapshot = if connection.is_autocommit() {
+            Some(connection.unchecked_transaction()?)
+        } else {
+            None
+        };
         let mut tables = BTreeMap::new();
         for table in HISTORY_TABLES {
             let max_rowid: Option<i64> =
@@ -534,11 +541,12 @@ pub(crate) struct RunEvaluations {
 }
 
 impl RunEvaluations {
-    fn build(connection: &Connection) -> Result<Self, StoreError> {
-        let bound: Option<i64> =
-            connection.query_row("SELECT MAX(rowid) FROM evaluation_runs", [], |row| {
-                row.get(0)
-            })?;
+    fn build(connection: &Connection, through: i64) -> Result<Self, StoreError> {
+        let bound: Option<i64> = connection.query_row(
+            "SELECT MAX(rowid) FROM evaluation_runs WHERE rowid <= ?1",
+            [through],
+            |row| row.get(0),
+        )?;
         let mut by_run: std::collections::HashMap<String, Vec<i64>> =
             std::collections::HashMap::new();
         let mut statement = connection.prepare(
@@ -550,6 +558,24 @@ impl RunEvaluations {
             by_run.entry(row.get(0)?).or_default().push(row.get(1)?);
         }
         Ok(Self { bound, by_run })
+    }
+
+    /// Fold in the evaluations appended beyond the index's bound, through
+    /// rowid `through`.
+    fn extend(&mut self, connection: &Connection, through: i64) -> Result<(), StoreError> {
+        let mut statement = connection.prepare(
+            "SELECT trigger_run_id, rowid FROM evaluation_runs NOT INDEXED
+             WHERE rowid > ?1 AND rowid <= ?2 ORDER BY rowid",
+        )?;
+        let mut rows = statement.query([self.bound.unwrap_or(i64::MIN), through])?;
+        while let Some(row) = rows.next()? {
+            let rowid: i64 = row.get(1)?;
+            if let Some(run_id) = row.get::<_, Option<String>>(0)? {
+                self.by_run.entry(run_id).or_default().push(rowid);
+            }
+            self.bound = Some(rowid);
+        }
+        Ok(())
     }
 }
 
@@ -1138,19 +1164,29 @@ impl crate::Store {
         crate::validate_provider_intake_invariants(&self.connection, Scope::after(frontier))
     }
 
-    /// The frontier whose capture time bounds what new rows can reference:
-    /// the applied watermark's, else this handle's open frontier.
-    pub(crate) fn reference_frontier(&self) -> Option<&HistoryFrontier> {
-        self.validated_history_frontier()
-            .or(self.validation.store_validated.as_ref())
+    /// The frontiers whose capture time bounds what newer rows can
+    /// reference, newest first: this handle's store-validated frontier (its
+    /// open frontier advanced by its own commits, each captured in one
+    /// snapshot), then the applied watermark's. A row newer than one of them
+    /// can be bounded by it; the newest that applies bounds most tightly.
+    pub(crate) fn reference_frontiers(&self) -> impl Iterator<Item = &HistoryFrontier> {
+        self.validation
+            .store_validated
+            .iter()
+            .chain(self.validated_history_frontier())
     }
 
-    /// Rowid lower bound for the evaluations that can name `run_id`, when the
-    /// run is newer than [`Self::reference_frontier`].
+    /// Rowid lower bound for the evaluations that can name `run_id`: the
+    /// handle's store-validated frontier when the run is newer than it; else,
+    /// for a handle that has neither committed nor indexed evaluations by run
+    /// (a short-lived reader), the applied watermark's frontier when the run
+    /// is newer than that. `None` sends the lookup to the per-handle index,
+    /// which a long-lived handle keeps current at the cost of the rows
+    /// appended since, so its lookups never rescan from its open.
     pub(crate) fn run_evaluation_bound(&self, run_id: &str) -> Result<Option<i64>, StoreError> {
-        let Some(frontier) = self.reference_frontier() else {
+        if self.reference_frontiers().next().is_none() {
             return Ok(None);
-        };
+        }
         let rowid: Option<i64> = self
             .connection
             .query_row(
@@ -1159,14 +1195,31 @@ impl crate::Store {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(rowid.and_then(|rowid| crate::run_evaluation_bound(Some(frontier), rowid)))
+        let Some(rowid) = rowid else {
+            return Ok(None);
+        };
+        if let Some(bound) =
+            crate::run_evaluation_bound(self.validation.store_validated.as_ref(), rowid)
+        {
+            return Ok(Some(bound));
+        }
+        let unadvanced = self.validation.store_validated == self.validation.open_frontier;
+        if unadvanced && self.validation.run_evaluations.borrow().is_none() {
+            return Ok(crate::run_evaluation_bound(
+                self.validated_history_frontier(),
+                rowid,
+            ));
+        }
+        Ok(None)
     }
 
     /// Rowids of every evaluation triggered by `run_id`, in append order.
-    /// `trigger_run_id` is unindexed in schema 13: a run newer than the
-    /// reference frontier is answered from the rowid range beyond it; any
-    /// other run from an index of evaluations by run built once per handle
-    /// (one scan of the evaluation table) plus the range appended since.
+    /// `trigger_run_id` is unindexed in schema 13: a run newer than a
+    /// reference frontier is answered from the rowid range beyond it (see
+    /// [`Self::run_evaluation_bound`]); any other run from an index of
+    /// evaluations by run built once per handle (one scan of the evaluation
+    /// table) and extended by the committed range appended since, so a
+    /// long-lived handle reads each evaluation once.
     pub(crate) fn run_evaluation_rowids(&self, run_id: &str) -> Result<Vec<i64>, StoreError> {
         let beyond = |bound: Option<i64>| -> Result<Vec<i64>, StoreError> {
             self.connection
@@ -1179,8 +1232,22 @@ impl crate::Store {
             return beyond(Some(bound));
         }
         let mut cache = self.validation.run_evaluations.borrow_mut();
-        if cache.is_none() {
-            *cache = Some(RunEvaluations::build(&self.connection)?);
+        // Only committed rows enter the index. Outside a transaction every
+        // visible row is committed; inside one, the rows beyond the handle's
+        // validated frontier may be this transaction's and may still roll
+        // back, so the index covers rows only through it.
+        let through = if self.connection.is_autocommit() {
+            i64::MAX
+        } else {
+            self.validation
+                .store_validated
+                .as_ref()
+                .and_then(|frontier| frontier.max_rowid("evaluation_runs"))
+                .unwrap_or(i64::MIN)
+        };
+        match cache.as_mut() {
+            None => *cache = Some(RunEvaluations::build(&self.connection, through)?),
+            Some(index) => index.extend(&self.connection, through)?,
         }
         let index = cache
             .as_ref()

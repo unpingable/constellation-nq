@@ -3719,6 +3719,9 @@ impl Store {
         )?;
         validate_provider_intake_invariants(&transaction, scope)?;
         validate_run_results(&transaction, scope)?;
+        // The frontier advances past every row in scope, including other
+        // writers' evaluations, so their laws are checked here as well.
+        validate_evaluation_refusal_invariants(&transaction, scope)?;
         validate_diagnostic_artifact_invariants(&transaction, scope)?;
         let committed = validated
             .is_some()
@@ -5065,11 +5068,12 @@ pub struct BackupArtifact {
 /// one of each).
 #[derive(Clone, Copy)]
 enum AssociationCounts {
-    /// The in-range refusal and finding-event rows are materialized once
-    /// per page (a rowid-range read when the page is beyond a reference
-    /// frontier), then joined and counted by grouped joins: each association
-    /// row in range is read once per page, however many evaluations the page
-    /// holds or how much history precedes the range.
+    /// The refusal and finding-event rows naming the page's evaluations
+    /// are materialized once per page (read from a rowid range when the page
+    /// is beyond a reference frontier, otherwise found by one scan of each
+    /// table), then joined and counted by grouped joins. No more than the
+    /// page's own association rows are copied, and none is read per
+    /// evaluation.
     Grouped,
     /// The original form: joins straight onto the unindexed tables (an
     /// automatic index built from a scan of each whole table per page) and
@@ -5090,12 +5094,17 @@ impl AssociationCounts {
         match self {
             Self::Grouped => (
                 format!(
-                    "WITH refusal_range AS MATERIALIZED (
+                    "WITH page_evaluations AS MATERIALIZED (
+                 SELECT page.evaluation_id FROM evaluation_runs AS page
+                 WHERE page.evaluation_sequence > COALESCE(?1, 0)
+                   AND page.evaluation_sequence <= ?2
+                 ORDER BY page.evaluation_sequence LIMIT ?3),
+             refusal_range AS MATERIALIZED (
                  SELECT * FROM refusals AS range_refusal
-                 WHERE range_refusal.evaluation_id IS NOT NULL{refusal_range}),
+                 WHERE range_refusal.evaluation_id IN page_evaluations{refusal_range}),
              finding_range AS MATERIALIZED (
                  SELECT * FROM finding_events AS range_finding
-                 WHERE range_finding.evaluation_id IS NOT NULL{finding_range}),
+                 WHERE range_finding.evaluation_id IN page_evaluations{finding_range}),
              refusal_count AS (
                  SELECT evaluation_id, COUNT(*) AS associations
                  FROM refusal_range GROUP BY evaluation_id),
@@ -6020,6 +6029,8 @@ impl Store {
             &HistoryFrontier,
         ) -> Result<(Vec<EvaluationCommitInput>, T), E>,
     {
+        let validated = self.validation.store_validated.clone();
+        let scope = validated.as_ref().map_or(Scope::FULL, Scope::after);
         let transaction = self.shared_immediate_transaction().map_err(E::from)?;
         let bounds = HistoryFrontier::capture_bounds(&transaction).map_err(E::from)?;
         let (evaluations, value) = {
@@ -6037,10 +6048,45 @@ impl Store {
             insert_evaluation(&transaction, &input.evaluation, input.finding.as_ref())
                 .map_err(E::from)?;
         }
+        // The same store-level laws an admitted collection checks, so the
+        // handle's validated frontier can advance past this commit.
+        let committed = (|| {
+            validate_provider_intake_invariants(&transaction, scope)?;
+            validate_refusal_invariants(&transaction, scope)?;
+            validate_run_results(&transaction, scope)?;
+            validate_evaluation_refusal_invariants(&transaction, scope)?;
+            validate_diagnostic_artifact_invariants(&transaction, scope)?;
+            validated
+                .is_some()
+                .then(|| HistoryFrontier::capture_bounds(&transaction))
+                .transpose()
+        })()
+        .map_err(E::from)?;
         transaction
             .commit()
             .map_err(StoreError::from)
             .map_err(E::from)?;
+        if committed.is_some() {
+            self.validation.store_validated = committed;
+        }
+        Ok(value)
+    }
+
+    /// Run `read` over one read snapshot of this handle (a deferred read
+    /// transaction, which takes no write lock), with the append bounds of
+    /// that snapshot. Readers and writers of other connections proceed
+    /// meanwhile.
+    pub fn with_read_snapshot<T, E, F>(&self, read: F) -> Result<T, E>
+    where
+        E: From<StoreError>,
+        F: FnOnce(&Self, &HistoryFrontier) -> Result<T, E>,
+    {
+        let snapshot = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+            .map_err(StoreError::from)
+            .map_err(E::from)?;
+        let bounds = HistoryFrontier::capture_bounds(&snapshot).map_err(E::from)?;
+        let value = read(self, &bounds)?;
+        drop(snapshot);
         Ok(value)
     }
 
@@ -6331,10 +6377,12 @@ impl Store {
         // such evaluations reads only those ranges.
         let after = after_evaluation_sequence.unwrap_or(0);
         let applicable = reference
+            .into_iter()
+            .chain(self.reference_frontiers())
             .filter(|frontier| after >= frontier.evaluation_sequence)
-            .or(self.reference_frontier());
+            .max_by_key(|frontier| frontier.evaluation_sequence);
         let (refusal_range, finding_range) = match applicable {
-            Some(frontier) if after >= frontier.evaluation_sequence => (
+            Some(frontier) => (
                 format!(
                     " AND {{alias}}.rowid > {}",
                     frontier.max_rowid("refusals").unwrap_or(i64::MIN)
