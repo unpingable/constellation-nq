@@ -1,15 +1,76 @@
 # Constellation NQ source and integration guide
 
+## NQ 0.2.4 source candidate
+
+The source tree is version 0.2.4, an unreleased candidate. A daemon
+collection engine no longer replays the evaluation history from its open on
+every collection, which made collection cost grow with `nqd` uptime (about
+1 s an hour after start to about 400 s after nine hours on an operated store
+with ten instances), kept the write-ahead log from restarting (293 MB at
+stop), and raised spurious "does not continue the validated sequence"
+integrity failures when commits interleaved. Each engine keeps a replay
+cursor and, inside the transaction that commits each evaluation, validates the
+evaluations appended since its previous one and the store-wide laws for every
+row beyond the bounds it last recorded; an engine without a cursor replays the
+history once in a read snapshot, outside the write lock. Open-time and
+`admin validate --full` validation are unchanged. Every commit that advances
+a handle's validated frontier checks the evaluation laws for the rows it
+passes. Run-to-evaluation lookups and evaluation history pages read only what
+was appended since, so in a ten-engine synthetic run one collection's SQLite
+work stayed between 21,500 and 21,800 operations from 1,000 to 20,000
+evaluations, where the 0.2.3 replay alone took 0.5 s to 10 s or more.
+Evaluation history pages count refusal and finding-event associations with
+grouped joins (identical rows). `nqd` stops on SIGTERM as on SIGINT, closing
+its store connections after any in-flight collection. There is no schema
+change and no migration. See
+[Collection cost over uptime](OPERATIONS.md#collection-cost-over-uptime).
+No 0.2.4 package or tag exists until the release owner publishes one.
+
+## NQ 0.2.3 source candidate
+
+The source tree is version 0.2.3, an unreleased candidate. `nq status export`
+and `GET /v3/status` no longer reopen the complete evaluation history on every
+call (and once more per admitted instance status), which made their cost grow
+linearly with the store's age (17.7 s at 1,740 collections on an operated
+0.2.1 store). The validation watermark (now `nq.validation_watermark.v3`)
+additionally records each evaluation lineage's newest evaluation; a snapshot
+over a certified store validates only the history beyond the watermark and
+reopens one evaluation per lineage, and the findings exports validate only the
+evaluation history beyond it. Output is unchanged. `nq admin validate --full`
+re-derives the recorded heads and refuses a watermark whose heads disagree.
+There is no schema change and no migration: as after any package upgrade, the
+first engine open (or `admin validate --full`) validates the store in full once
+and records the new watermark; until then the status export walks the complete
+history. See
+[Status and findings exports](OPERATIONS.md#status-and-findings-exports).
+No 0.2.3 package or tag exists until the release owner publishes one.
+
+## NQ 0.2.2 source candidate
+
+The source tree is version 0.2.2, an unreleased candidate. Notification
+intents carry a closed `response_class` (`informational`, `attention` or
+`page`) assigned by the evaluator. A PagerDuty route sends only
+`response_class: page`, for trigger and resolve alike, and retains every other
+or absent class as the refusal `response_class_not_page` without contacting
+PagerDuty; severity is never used to infer it. This breaks v2 intents written
+for 0.2.1, which must add `"response_class":"page"`. v2 records retained by
+earlier builds are read as legacy and their resubmission is refused. Slack,
+Discord and local-inbox messages now start with the class, `[attention]` when
+a v1 intent omits it. See
+[Sinks are not interchangeable](NOTIFICATIONS.md#sinks-are-not-interchangeable).
+No 0.2.2 package or tag exists until the release owner publishes one.
+
 ## NQ 0.2.1 source candidate
 
-The source tree is version 0.2.1, an unreleased candidate. It bounds store
+NQ 0.2.1 is an unreleased candidate. It bounds store
 validation by a store-specific, content-bound validation watermark so that
 replay, qualification, export, and inspection no longer revalidate the whole
 retained history on every invocation; see
 [Store validation](OPERATIONS.md#store-validation-and-the-validation-watermark).
 Untouched historical rows are re-read only by `nq admin validate --full`, which
-an operator should schedule periodically. No 0.2.1 package or tag exists
-until the release owner publishes one; the published release is 0.2.0 below.
+an operator should schedule periodically. There is no v0.2.1 tag or GitHub
+release; 0.2.1 was deployed from a package only. The published release is
+0.2.0 below.
 
 ## NQ 0.2.0 component package
 
@@ -152,7 +213,7 @@ python3 -B helpers/python-conformance/test_helper.py
 cargo build --workspace
 target/debug/nq protocol check
 python3 -B profiles/verify_catalog.py target/debug/nq
-python3 -B scripts/verify_protocol_assets.py protocol target/debug/nq 0.2.1
+python3 -B scripts/verify_protocol_assets.py protocol target/debug/nq 0.2.2
 ```
 
 Before publishing a package, additionally run the existing reproducibility and

@@ -1744,6 +1744,11 @@ pub struct CollectionEngine {
     /// provider at open, or a structured reason it could not be established.
     /// Admission and collection fail closed on the error side.
     evaluator_identity: Result<EvaluatorRuntimeIdentity, String>,
+    /// How far this engine has replayed the evaluation history, so each
+    /// evaluation validates only what was appended since its previous one.
+    /// `None` until a replay is established (open certified no semantic
+    /// history): the next evaluation then replays in full.
+    replay: Option<ReplayCursor>,
 }
 
 #[derive(Debug)]
@@ -2245,7 +2250,7 @@ impl CollectionEngine {
     pub fn open(config: &NqConfig) -> Result<Self, EngineError> {
         validate_compiled_config(config)?;
         let store = Store::open(&config.database_path)?;
-        validate_engine_open_history(&store)?;
+        let replay = validate_engine_open_history(&store)?;
         Ok(Self {
             config: config.clone(),
             store,
@@ -2253,6 +2258,7 @@ impl CollectionEngine {
             runner: StdioRunner,
             unix_runners: BTreeMap::new(),
             evaluator_identity: crate::evaluator_identity::resolved(),
+            replay,
         })
     }
 
@@ -2290,7 +2296,7 @@ impl CollectionEngine {
             )));
         }
         let store = Store::open(&config.database_path)?;
-        validate_engine_open_history(&store)?;
+        let replay = validate_engine_open_history(&store)?;
         let mut engine = Self {
             config: config.clone(),
             store,
@@ -2300,6 +2306,7 @@ impl CollectionEngine {
             evaluator_identity: Err(
                 "evaluator identity is not consulted by revocation-only custody".to_owned(),
             ),
+            replay,
         };
         engine.revoke_binding(watcher)
     }
@@ -2314,7 +2321,7 @@ impl CollectionEngine {
     ) -> Result<Self, EngineError> {
         validate_compiled_config(config)?;
         let store = Store::open(&config.database_path)?;
-        validate_engine_open_history(&store)?;
+        let replay = validate_engine_open_history(&store)?;
         Ok(Self {
             config: config.clone(),
             store,
@@ -2322,6 +2329,7 @@ impl CollectionEngine {
             runner: StdioRunner,
             unix_runners: BTreeMap::new(),
             evaluator_identity,
+            replay,
         })
     }
 
@@ -3242,7 +3250,6 @@ impl CollectionEngine {
                             protocol_outcome: "valid_report".into(),
                             disposition: SubmissionDisposition::Admitted(stored_report),
                         };
-                        validate_evaluation_history_before_evaluating(&self.store)?;
                         let evaluator_artifact_digest = self
                             .require_evaluator_identity()?
                             .artifact_digest()
@@ -3253,8 +3260,11 @@ impl CollectionEngine {
                             run,
                             submission: Some(submission),
                         };
-                        let committed = self.store.commit_admitted_collection(
+                        ensure_replay_cursor(&self.store, &mut self.replay)?;
+                        let replay = &mut self.replay;
+                        let committed = self.store.commit_admitted_collection_validated(
                             &collection,
+                            |store, bounds| advance_engine_cursor(store, replay, bounds),
                             |view, receipt| {
                                 let snapshot = view.evidence_snapshot(std::slice::from_ref(
                                     &watcher.instance_id,
@@ -4078,34 +4088,35 @@ impl CollectionEngine {
         profile: &'static dyn ProfileModule,
         trigger_run_id: Option<&str>,
     ) -> Result<Vec<EvaluationEnvelopeV2>, EngineError> {
-        let snapshot = self
-            .store
-            .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
-        validate_evaluation_history_before_evaluating(&self.store)?;
-        let current_findings = self.store.finding_snapshots()?;
         let evaluator_artifact_digest = self
             .require_evaluator_identity()?
             .artifact_digest()
             .as_str()
             .to_owned();
-        let prepared = prepare_instance_evaluations(
-            watcher,
-            profile,
-            trigger_run_id,
-            &snapshot,
-            &current_findings,
-            &evaluator_artifact_digest,
-            EvaluationReportSelection::AllMatching,
-        )?;
-        let mut evaluations = Vec::with_capacity(prepared.len());
-        for prepared in prepared {
-            self.store.commit_evaluation(
-                &prepared.commit.evaluation,
-                prepared.commit.finding.as_ref(),
-            )?;
-            evaluations.push(prepared.envelope);
-        }
-        Ok(evaluations)
+        ensure_replay_cursor(&self.store, &mut self.replay)?;
+        let replay = &mut self.replay;
+        // Read, validate, prepare, and commit in one IMMEDIATE transaction,
+        // so the evaluations build on exactly the history just validated.
+        self.store
+            .commit_evaluations_validated(|store, view, bounds| {
+                let snapshot =
+                    view.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
+                advance_engine_cursor(store, replay, bounds)?;
+                let current_findings = view.finding_snapshots()?;
+                let prepared = prepare_instance_evaluations(
+                    watcher,
+                    profile,
+                    trigger_run_id,
+                    &snapshot,
+                    &current_findings,
+                    &evaluator_artifact_digest,
+                    EvaluationReportSelection::AllMatching,
+                )?;
+                Ok(prepared
+                    .into_iter()
+                    .map(|prepared| (prepared.commit, prepared.envelope))
+                    .unzip())
+            })
     }
 }
 
@@ -8329,15 +8340,32 @@ fn engine_semantic_state(
 /// and by `nq doctor`, and does not fail the open, which never required
 /// semantic history. A writable handle then records the watermark; a failure
 /// to write it is reported and leaves the previous watermark in place.
-fn validate_engine_open_history(store: &Store) -> Result<(), EngineError> {
+///
+/// Returns the engine's replay cursor: the evaluation replay state at the
+/// frontier this open certified, or `None` when it certified none.
+fn validate_engine_open_history(store: &Store) -> Result<Option<ReplayCursor>, EngineError> {
     validate_core_history_since_open(store)?;
+    let mut evaluation = None;
     let semantic = match engine_semantic_state(store) {
-        Some((frontier, state)) => validate_semantic_planes_since(store, frontier, state),
+        Some((frontier, state)) => {
+            validate_semantic_planes_since_with(store, frontier, state, &mut evaluation)
+        }
         // No watermark, or one whose semantic certification was withdrawn
         // by an earlier failure: attempt the full certification again
         // rather than leaving it withdrawn.
-        None => validate_semantic_planes_in_full(store),
+        None => validate_semantic_planes_in_full_with(store, &mut evaluation),
     };
+    // The evaluation history replays first; its heads seed the cursor even
+    // when a later plane withdraws the certification.
+    let cursor = evaluation
+        .map(|heads| {
+            certified_replay_bound(store).map(|through| ReplayCursor {
+                through,
+                heads,
+                reference: None,
+            })
+        })
+        .transpose()?;
     let certification = match semantic {
         Ok(state) => nq_store::SemanticCertification::Established(state),
         Err(error) => {
@@ -8350,13 +8378,13 @@ fn validate_engine_open_history(store: &Store) -> Result<(), EngineError> {
         }
     };
     match store.record_validation_watermark(certification, engine_validation_rules()) {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(cursor),
         Err(nq_store::StoreError::WatermarkWrite(message)) => {
             eprintln!(
                 "nq: warning: {message}; this validation is not recorded and the next open \
                  validates the same history again"
             );
-            Ok(())
+            Ok(cursor)
         }
         Err(error) => Err(error.into()),
     }
@@ -8421,9 +8449,20 @@ pub fn validate_referenced_diagnostic_artifact(
 /// Every semantic plane other than provider intake and diagnostic artifacts,
 /// in full; returns the finding-lineage replay state at the end of history.
 fn validate_semantic_planes_in_full(store: &Store) -> Result<nq_store::SemanticState, EngineError> {
+    validate_semantic_planes_in_full_with(store, &mut None)
+}
+
+/// [`validate_semantic_planes_in_full`], also yielding the evaluation replay
+/// heads in `evaluation` as soon as that replay succeeds, even when a later
+/// plane then fails.
+fn validate_semantic_planes_in_full_with(
+    store: &Store,
+    evaluation: &mut Option<HistoryHeads>,
+) -> Result<nq_store::SemanticState, EngineError> {
     // The evaluation history is replayed once, first; status and rejected
     // custody then read their runs' evaluations without replaying it again.
     let (_, heads) = replay_evaluation_history_in_full(store)?;
+    *evaluation = Some(heads.clone());
     validate_admitted_report_history(store)?;
     validate_watcher_run_history(store)?;
     validate_status_history_v2_with_page_size(store, 256, EvaluationHistory::AlreadyValidated)?;
@@ -8476,7 +8515,18 @@ fn validate_semantic_planes_since(
     frontier: &nq_store::HistoryFrontier,
     state: &nq_store::SemanticState,
 ) -> Result<nq_store::SemanticState, EngineError> {
-    const STATUS_PAGE_SIZE: u32 = 256;
+    validate_semantic_planes_since_with(store, frontier, state, &mut None)
+}
+
+/// [`validate_semantic_planes_since`], also yielding the evaluation replay
+/// heads in `evaluation` as soon as that replay succeeds, even when a later
+/// plane then fails.
+fn validate_semantic_planes_since_with(
+    store: &Store,
+    frontier: &nq_store::HistoryFrontier,
+    state: &nq_store::SemanticState,
+    evaluation: &mut Option<HistoryHeads>,
+) -> Result<nq_store::SemanticState, EngineError> {
     store.validate_admitted_report_associations_since(frontier)?;
     for report_id in store.admitted_report_ids_since(frontier)? {
         validate_admitted_report_record(store, &report_id)?;
@@ -8489,6 +8539,30 @@ fn validate_semantic_planes_since(
         state,
         certified_replay_bound(store)?,
     )?;
+    *evaluation = Some(heads.clone());
+    // Status events read their runs' evaluations, which were replayed only
+    // through the open frontier; later events are validated by the next open.
+    let status_through = store
+        .open_frontier()
+        .and_then(|open| open.max_rowid("status_events"));
+    validate_run_and_status_history_since(store, frontier, status_through)?;
+    for row in store.rejected_custody_since(frontier)? {
+        rejected_custody_from_row(store, row, EvaluationHistory::AlreadyValidated)?;
+    }
+    Ok(semantic_state(&heads))
+}
+
+/// Watcher runs and status events beyond `frontier`, under the same laws as
+/// [`validate_status_history_v2`]: run-result linkage, each new run's
+/// resource outcome and profile identity, and each new status event through
+/// `status_through` (every one when `None`). The caller has validated the
+/// evaluation history those status events read.
+fn validate_run_and_status_history_since(
+    store: &Store,
+    frontier: &nq_store::HistoryFrontier,
+    status_through: Option<i64>,
+) -> Result<(), EngineError> {
+    const STATUS_PAGE_SIZE: u32 = 256;
     store.validate_run_results_since(frontier)?;
     for run_id in store.watcher_run_ids_since(frontier)? {
         let run = store.watcher_run_outcome(&run_id)?.ok_or_else(|| {
@@ -8497,11 +8571,6 @@ fn validate_semantic_planes_since(
         reopen_run_resource_outcome(&run)?;
         validate_run_profile_identity(&run)?;
     }
-    // Status events read their runs' evaluations, which were replayed only
-    // through the open frontier; later events are validated by the next open.
-    let status_through = store
-        .open_frontier()
-        .and_then(|open| open.max_rowid("status_events"));
     let mut after_sequence = frontier.max_rowid("status_events");
     loop {
         let page = store.status_history_bounded(STATUS_PAGE_SIZE, after_sequence)?;
@@ -8509,23 +8578,20 @@ fn validate_semantic_planes_since(
         for row in page {
             after_sequence = Some(row.status_sequence);
             if status_through.is_some_and(|through| row.status_sequence > through) {
-                continue;
+                return Ok(());
             }
             validate_status_event_record(store, row, EvaluationHistory::AlreadyValidated)?;
         }
         if page_len < STATUS_PAGE_SIZE as usize {
-            break;
+            return Ok(());
         }
     }
-    for row in store.rejected_custody_since(frontier)? {
-        rejected_custody_from_row(store, row, EvaluationHistory::AlreadyValidated)?;
-    }
-    Ok(semantic_state(&heads))
 }
 
-fn semantic_state(heads: &BTreeMap<Vec<u8>, ReplayedFinding>) -> nq_store::SemanticState {
+fn semantic_state(heads: &HistoryHeads) -> nq_store::SemanticState {
     nq_store::SemanticState {
         lineage_heads: heads
+            .findings
             .iter()
             .map(|(lineage, head)| nq_store::LineageHead {
                 lineage: hex::encode(lineage),
@@ -8534,32 +8600,60 @@ fn semantic_state(heads: &BTreeMap<Vec<u8>, ReplayedFinding>) -> nq_store::Seman
                 condition_state: head.condition_state.clone(),
             })
             .collect(),
+        evaluation_heads: heads
+            .evaluations
+            .iter()
+            .map(|(lineage, head)| nq_store::EvaluationHead {
+                lineage: hex::encode(lineage),
+                evaluation_sequence: head.sequence,
+                evaluation_revision: head.revision,
+            })
+            .collect(),
     }
 }
 
-fn replay_heads(
-    state: &nq_store::SemanticState,
-) -> Result<BTreeMap<Vec<u8>, ReplayedFinding>, EngineError> {
-    state
-        .lineage_heads
-        .iter()
-        .map(|head| {
-            let lineage = hex::decode(&head.lineage).map_err(|error| {
-                EngineError::Invariant(format!(
-                    "validation watermark lineage head {} is not hex: {error}",
-                    head.lineage
-                ))
-            })?;
-            Ok((
-                lineage,
-                ReplayedFinding {
-                    finding_id: head.finding_id.clone(),
-                    event_revision: head.event_revision,
-                    condition_state: head.condition_state.clone(),
-                },
+fn replay_heads(state: &nq_store::SemanticState) -> Result<HistoryHeads, EngineError> {
+    let decode = |lineage: &str| {
+        hex::decode(lineage).map_err(|error| {
+            EngineError::Invariant(format!(
+                "validation watermark lineage head {lineage} is not hex: {error}"
             ))
         })
-        .collect()
+    };
+    let mut heads = HistoryHeads::default();
+    for head in &state.lineage_heads {
+        heads.findings.insert(
+            decode(&head.lineage)?,
+            ReplayedFinding {
+                finding_id: head.finding_id.clone(),
+                event_revision: head.event_revision,
+                condition_state: head.condition_state.clone(),
+            },
+        );
+    }
+    for head in &state.evaluation_heads {
+        if head.evaluation_sequence <= 0 || head.evaluation_revision <= 0 {
+            return Err(EngineError::Invariant(format!(
+                "validation watermark evaluation head {} has an invalid position",
+                head.lineage
+            )));
+        }
+        let position = EvaluationHeadPosition {
+            revision: head.evaluation_revision,
+            sequence: head.evaluation_sequence,
+        };
+        if heads
+            .evaluations
+            .insert(decode(&head.lineage)?, position)
+            .is_some()
+        {
+            return Err(EngineError::Invariant(format!(
+                "validation watermark names evaluation lineage {} twice",
+                head.lineage
+            )));
+        }
+    }
+    Ok(heads)
 }
 
 /// Exhaustively reopen the complete persisted semantic chain.
@@ -9062,7 +9156,9 @@ fn validate_admitted_report_record(store: &Store, report_id: &str) -> Result<(),
 ///
 /// Returns when a durable row violates the public DTO contract.
 pub fn list_findings(store: &Store) -> Result<Vec<FindingSnapshotV3>, EngineError> {
-    validate_evaluation_refusal_history(store)?;
+    // The finding projection is proven by the evaluation history: beyond
+    // the store's semantic certification when one applies, else in full.
+    validate_evaluation_history_before_evaluating(store)?;
     store
         .finding_snapshots()?
         .into_iter()
@@ -9080,7 +9176,7 @@ pub fn list_findings_bounded(
     limit: u32,
     after_finding_id: Option<&str>,
 ) -> Result<Vec<FindingSnapshotV3>, EngineError> {
-    validate_evaluation_refusal_history(store)?;
+    validate_evaluation_history_before_evaluating(store)?;
     store
         .finding_snapshots_bounded(limit, after_finding_id)?
         .into_iter()
@@ -9136,17 +9232,152 @@ pub fn status_snapshot_v2(store: &Store) -> Result<StatusSnapshotV2, EngineError
     })
 }
 
+/// Newest evaluation of each lineage, as one snapshot reports it.
+type LatestEvaluations = BTreeMap<Vec<u8>, (i64, i64, EvaluationEnvelopeV2)>;
+
 /// Build the lossless current status surface, including the latest canonical
 /// result from every exact semantic evaluation lineage.
 ///
-/// The evaluation upper bound is explicit and the complete immutable history
-/// through that bound is reopened before any latest-result selection occurs.
+/// The evaluation upper bound is explicit. When the store's validation
+/// watermark certifies the semantic history (under this engine's rules), the
+/// snapshot resumes from that certification: it validates only the
+/// evaluations, watcher runs, and status events beyond the watermark
+/// frontier, folds the evaluations into the certified newest-per-lineage
+/// heads, and reopens and validates exactly the one evaluation each lineage
+/// reports. Its cost is bounded by the number of lineages and the history
+/// beyond the watermark, not by total retained history. Without such a
+/// certification the complete immutable history through the bound is
+/// reopened before any latest-result selection occurs. Both paths select the
+/// same rows; `nq admin validate --full` re-proves the certification.
 ///
 /// # Errors
 ///
 /// Returns when status history, evaluation history, a canonical carrier, or a
 /// projection/linkage invariant cannot be proved exactly.
 pub fn status_snapshot_v3(store: &Store) -> Result<StatusSnapshotV3, EngineError> {
+    match engine_semantic_state(store) {
+        Some((frontier, state)) => status_snapshot_v3_with(store, |status_through, through| {
+            latest_evaluations_since(store, frontier, state, status_through, through)
+        }),
+        None => status_snapshot_v3_from_complete_history(store),
+    }
+}
+
+/// [`status_snapshot_v3`] over the complete immutable history, whatever the
+/// store's validation watermark certifies.
+fn status_snapshot_v3_from_complete_history(
+    store: &Store,
+) -> Result<StatusSnapshotV3, EngineError> {
+    status_snapshot_v3_with(store, |_, through| {
+        validate_status_history_v2(store)?;
+        let mut latest = LatestEvaluations::new();
+        visit_evaluation_history_through(
+            store,
+            nq_store::MAX_PUBLIC_QUERY_ROWS,
+            through,
+            |row, envelope, lineage, newest| {
+                if newest {
+                    latest.insert(
+                        lineage.to_vec(),
+                        (row.evaluation_revision, row.evaluation_sequence, envelope),
+                    );
+                }
+                Ok(())
+            },
+        )?;
+        Ok(latest)
+    })
+}
+
+/// Validate the history beyond the certified `frontier` that one snapshot
+/// reads (evaluations through `through`, watcher runs, and status events
+/// through `status_through`), then reopen each lineage's newest evaluation.
+fn latest_evaluations_since(
+    store: &Store,
+    frontier: &nq_store::HistoryFrontier,
+    state: &nq_store::SemanticState,
+    status_through: i64,
+    through: i64,
+) -> Result<LatestEvaluations, EngineError> {
+    let mut fresh = BTreeMap::new();
+    let heads = visit_evaluation_history_since(
+        store,
+        frontier,
+        state,
+        through,
+        |row, envelope, lineage, newest| {
+            if newest {
+                fresh.insert(
+                    lineage.to_vec(),
+                    (row.evaluation_revision, row.evaluation_sequence, envelope),
+                );
+            }
+            Ok(())
+        },
+    )?;
+    // Status events through `status_through` were committed before the
+    // evaluation bound was read, so every evaluation they reference is
+    // covered by the certification or was validated above.
+    validate_run_and_status_history_since(store, frontier, Some(status_through))?;
+    let mut latest = LatestEvaluations::new();
+    for (lineage, head) in heads.evaluations {
+        if let Some(entry) = fresh.remove(&lineage) {
+            latest.insert(lineage, entry);
+            continue;
+        }
+        if head.sequence > frontier.evaluation_sequence {
+            return Err(EngineError::Invariant(format!(
+                "evaluation lineage head at sequence {} was not reopened by this snapshot",
+                head.sequence
+            )));
+        }
+        let envelope = reopen_certified_evaluation_head(store, &lineage, head)?;
+        latest.insert(lineage, (head.revision, head.sequence, envelope));
+    }
+    Ok(latest)
+}
+
+/// Reopen and validate the one evaluation a certified lineage head names,
+/// proving it is still that lineage's evaluation at the certified revision.
+fn reopen_certified_evaluation_head(
+    store: &Store,
+    lineage: &[u8],
+    head: EvaluationHeadPosition,
+) -> Result<EvaluationEnvelopeV2, EngineError> {
+    let mut rows =
+        store.evaluation_refusal_history_bounded(1, Some(head.sequence - 1), head.sequence)?;
+    let substituted = || {
+        EngineError::Invariant(format!(
+            "certified evaluation head at sequence {} does not reopen as its lineage's newest \
+             evaluation; run `nq admin validate --full`",
+            head.sequence
+        ))
+    };
+    let (Some(row), None) = (rows.pop(), rows.pop()) else {
+        return Err(substituted());
+    };
+    if row.evaluation_sequence != head.sequence || row.evaluation_revision != head.revision {
+        return Err(substituted());
+    }
+    let envelope = validate_evaluation_refusal_row(store, &row, true)?;
+    if evaluation_lineage_key(&envelope)? != lineage {
+        return Err(substituted());
+    }
+    Ok(envelope)
+}
+
+/// Capture one stable status/evaluation snapshot: status rows are read before
+/// the evaluation bound, and the capture is retried while status history
+/// moves. `select_latest` validates what the snapshot reads and returns each
+/// lineage's newest evaluation through the bound; it receives the status
+/// sequence read before the status rows and the evaluation bound.
+fn status_snapshot_v3_with<F>(
+    store: &Store,
+    mut select_latest: F,
+) -> Result<StatusSnapshotV3, EngineError>
+where
+    F: FnMut(i64, i64) -> Result<LatestEvaluations, EngineError>,
+{
     const SNAPSHOT_ATTEMPTS: usize = 8;
     let mut captured = None;
     for _ in 0..SNAPSHOT_ATTEMPTS {
@@ -9156,28 +9387,7 @@ pub fn status_snapshot_v3(store: &Store) -> Result<StatusSnapshotV3, EngineError
         // component from embedding an evaluation beyond that declared bound.
         let status_rows = store.status_snapshots()?;
         let through = store.latest_evaluation_sequence()?;
-        validate_status_history_v2(store)?;
-        let mut latest: BTreeMap<Vec<u8>, (i64, i64, EvaluationEnvelopeV2)> = BTreeMap::new();
-        visit_evaluation_history_through(
-            store,
-            nq_store::MAX_PUBLIC_QUERY_ROWS,
-            through,
-            |row, envelope| {
-                let key = evaluation_lineage_key(&envelope)?;
-                match latest.entry(key) {
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        entry.insert((row.evaluation_revision, row.evaluation_sequence, envelope));
-                    }
-                    std::collections::btree_map::Entry::Occupied(mut entry)
-                        if row.evaluation_revision > entry.get().0 =>
-                    {
-                        entry.insert((row.evaluation_revision, row.evaluation_sequence, envelope));
-                    }
-                    std::collections::btree_map::Entry::Occupied(_) => {}
-                }
-                Ok(())
-            },
-        )?;
+        let latest = select_latest(status_before, through)?;
         let status_after = store.latest_status_sequence()?;
         if status_before == status_after {
             captured = Some((status_rows, through, latest));
@@ -9189,9 +9399,11 @@ pub fn status_snapshot_v3(store: &Store) -> Result<StatusSnapshotV3, EngineError
             "could not capture one stable status/evaluation snapshot after 8 attempts".into(),
         ));
     };
+    // Every evaluation a captured status row reads precedes the bound, and
+    // `select_latest` validated the history through it.
     let mut components = status_rows
         .into_iter()
-        .map(|row| status_from_row_v3(store, row))
+        .map(|row| status_from_row_v3(store, row, EvaluationHistory::AlreadyValidated))
         .collect::<Result<Vec<_>, _>>()?;
 
     for (_, sequence, result) in latest.into_values() {
@@ -9506,7 +9718,12 @@ fn validate_evaluation_refusal_history_with_page_size(
     page_size: u32,
 ) -> Result<usize, EngineError> {
     let through_evaluation_sequence = store.latest_evaluation_sequence()?;
-    visit_evaluation_history_through(store, page_size, through_evaluation_sequence, |_, _| Ok(()))
+    visit_evaluation_history_through(
+        store,
+        page_size,
+        through_evaluation_sequence,
+        |_, _, _, _| Ok(()),
+    )
 }
 
 fn visit_evaluation_history_through<F>(
@@ -9519,6 +9736,8 @@ where
     F: FnMut(
         nq_store::EvaluationRefusalHistoryRow,
         EvaluationEnvelopeV2,
+        &[u8],
+        bool,
     ) -> Result<(), EngineError>,
 {
     store.validate_evaluation_history_invariants()?;
@@ -9526,7 +9745,7 @@ where
         store,
         page_size,
         None,
-        BTreeMap::new(),
+        HistoryHeads::default(),
         through_evaluation_sequence,
         visit,
     )
@@ -9534,19 +9753,63 @@ where
 }
 
 /// The complete evaluation history replay; returns the count and the
-/// finding-lineage state at the end of history.
-fn replay_evaluation_history_in_full(
-    store: &Store,
-) -> Result<(usize, BTreeMap<Vec<u8>, ReplayedFinding>), EngineError> {
+/// finding-lineage and evaluation-lineage heads at the end of history.
+///
+/// When this handle was opened for full validation over an applicable
+/// watermark of this store that certified semantic history, the replay also
+/// proves that certification: the heads recomputed at the watermark's
+/// evaluation sequence must equal the ones it recorded. A substituted
+/// evaluation head (which the bounded status snapshot would otherwise
+/// trust) or finding head is refused here.
+fn replay_evaluation_history_in_full(store: &Store) -> Result<(usize, HistoryHeads), EngineError> {
     store.validate_evaluation_history_invariants()?;
-    visit_evaluation_history_between(
+    let bound = certified_replay_bound(store)?;
+    let prior = store
+        .prior_watermark()
+        .filter(|watermark| watermark.engine_rules == engine_validation_rules())
+        .and_then(|watermark| {
+            watermark
+                .semantic
+                .as_ref()
+                .map(|state| (watermark.frontier.evaluation_sequence, state))
+        })
+        .filter(|(through, _)| *through <= bound);
+    let mut reopened = 0usize;
+    let mut heads = HistoryHeads::default();
+    let mut after = None;
+    if let Some((prior_through, prior_state)) = prior {
+        let (count, at_prior) = visit_evaluation_history_between(
+            store,
+            nq_store::MAX_PUBLIC_QUERY_ROWS,
+            None,
+            heads,
+            prior_through,
+            |_, _, _, _| Ok(()),
+        )?;
+        if semantic_state(&at_prior) != *prior_state {
+            return Err(EngineError::Invariant(format!(
+                "the validation watermark's certified semantic state (finding-lineage or \
+                 evaluation heads) disagrees with the complete replay of the evaluation history \
+                 it covers (through sequence {prior_through}); the watermark or the history was \
+                 altered"
+            )));
+        }
+        reopened = count;
+        heads = at_prior;
+        after = Some(prior_through);
+    }
+    let (count, heads) = visit_evaluation_history_between(
         store,
         nq_store::MAX_PUBLIC_QUERY_ROWS,
-        None,
-        BTreeMap::new(),
-        certified_replay_bound(store)?,
-        |_, _| Ok(()),
-    )
+        after,
+        heads,
+        bound,
+        |_, _, _, _| Ok(()),
+    )?;
+    let reopened = reopened
+        .checked_add(count)
+        .ok_or_else(|| EngineError::Invariant("evaluation history count overflowed".into()))?;
+    Ok((reopened, heads))
 }
 
 /// The last evaluation a certification may fold into its lineage heads: the
@@ -9576,15 +9839,163 @@ fn validate_evaluation_history_before_evaluating(store: &Store) -> Result<(), En
     }
 }
 
+/// How far one long-lived engine has replayed the evaluation history: every
+/// evaluation through `through` was reopened and validated, ending in the
+/// finding-lineage and evaluation-lineage state `heads`.
+#[derive(Clone)]
+struct ReplayCursor {
+    through: i64,
+    heads: HistoryHeads,
+    /// Append bounds captured in the transaction that last advanced the
+    /// cursor (so `reference.evaluation_sequence == through`); it bounds the
+    /// refusal and finding-event rows that later evaluations can name.
+    reference: Option<nq_store::HistoryFrontier>,
+}
+
+/// Establish a replay cursor by validating and replaying the evaluation
+/// history in full, for an engine whose open replayed none (it failed). Run
+/// in a read snapshot ([`Store::with_read_snapshot`]), never inside a write
+/// transaction, so the whole replay takes no write lock; the evaluation then
+/// validates only what was appended since, inside its own transaction.
+fn establish_replay_cursor(
+    store: &Store,
+    bounds: &nq_store::HistoryFrontier,
+) -> Result<ReplayCursor, EngineError> {
+    store.validate_evaluation_history_invariants()?;
+    let (_, heads) = visit_evaluation_history_beyond(
+        store,
+        nq_store::MAX_PUBLIC_QUERY_ROWS,
+        None,
+        HistoryHeads::default(),
+        bounds.evaluation_sequence,
+        None,
+        |_, _, _, _| Ok(()),
+    )?;
+    Ok(ReplayCursor {
+        through: bounds.evaluation_sequence,
+        heads,
+        reference: Some(bounds.clone()),
+    })
+}
+
+/// The evaluation and finding history a new evaluation builds on, for an
+/// engine that has replayed it through `cursor`: the store-wide laws for
+/// every row beyond the cursor's reference bounds (or, for a cursor seeded at
+/// open, beyond the open frontier, through which the open proved them), then
+/// each evaluation after the cursor, replayed from the cursor's heads,
+/// through `bounds`. Called inside the IMMEDIATE transaction that commits
+/// the new evaluation, with the append bounds captured there, so no
+/// concurrent commit can interleave with the reads; the work is proportional
+/// to what was appended since the cursor. Returns the cursor advanced to
+/// `bounds`.
+fn advance_replay_cursor(
+    store: &Store,
+    cursor: &ReplayCursor,
+    bounds: &nq_store::HistoryFrontier,
+) -> Result<ReplayCursor, EngineError> {
+    let through = bounds.evaluation_sequence;
+    if cursor.through > through {
+        return Err(EngineError::Invariant(format!(
+            "evaluation history ends at sequence {through}, before the sequence {} this \
+             engine already validated; the history was altered",
+            cursor.through
+        )));
+    }
+    // Scoped by what this cursor proved, never by a frontier other commit
+    // paths advance.
+    match cursor.reference.as_ref().or(store.open_frontier()) {
+        Some(frontier) => store.validate_evaluation_history_invariants_since(frontier)?,
+        None => store.validate_evaluation_history_invariants()?,
+    }
+    let (_, heads) = visit_evaluation_history_beyond(
+        store,
+        nq_store::MAX_PUBLIC_QUERY_ROWS,
+        Some(cursor.through),
+        cursor.heads.clone(),
+        through,
+        cursor.reference.as_ref(),
+        |_, _, _, _| Ok(()),
+    )?;
+    Ok(ReplayCursor {
+        through,
+        heads,
+        reference: Some(bounds.clone()),
+    })
+}
+
+/// The engine's replay cursor, established outside any write transaction
+/// when its open replayed none.
+fn ensure_replay_cursor(
+    store: &Store,
+    replay: &mut Option<ReplayCursor>,
+) -> Result<(), EngineError> {
+    if replay.is_none() {
+        *replay = Some(store.with_read_snapshot(establish_replay_cursor)?);
+    }
+    Ok(())
+}
+
+/// Advance the engine's cursor inside a commit transaction.
+fn advance_engine_cursor(
+    store: &Store,
+    replay: &mut Option<ReplayCursor>,
+    bounds: &nq_store::HistoryFrontier,
+) -> Result<(), EngineError> {
+    #[cfg(test)]
+    let started = nq_store::sql_work_count();
+    let current = replay.as_ref().ok_or_else(|| {
+        EngineError::Invariant("the replay cursor is established before committing".into())
+    })?;
+    *replay = Some(advance_replay_cursor(store, current, bounds)?);
+    #[cfg(test)]
+    if let (Some(started), Some(now)) = (started, nq_store::sql_work_count()) {
+        TRANSACTION_REPLAY_WORK.with(|work| work.set(Some(now - started)));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `SQLite` work of the last cursor advance inside a commit transaction
+    /// on this thread, when work is being counted.
+    static TRANSACTION_REPLAY_WORK: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Evaluation history beyond `frontier`: the store-wide laws for new rows,
 /// then each evaluation after the frontier's sequence, replayed from the
-/// finding-lineage state the certification recorded at the frontier.
+/// finding-lineage and evaluation-lineage state the certification recorded at
+/// the frontier.
 fn validate_evaluation_refusal_history_since(
     store: &Store,
     frontier: &nq_store::HistoryFrontier,
     state: &nq_store::SemanticState,
     through_evaluation_sequence: i64,
-) -> Result<BTreeMap<Vec<u8>, ReplayedFinding>, EngineError> {
+) -> Result<HistoryHeads, EngineError> {
+    visit_evaluation_history_since(
+        store,
+        frontier,
+        state,
+        through_evaluation_sequence,
+        |_, _, _, _| Ok(()),
+    )
+}
+
+fn visit_evaluation_history_since<F>(
+    store: &Store,
+    frontier: &nq_store::HistoryFrontier,
+    state: &nq_store::SemanticState,
+    through_evaluation_sequence: i64,
+    visit: F,
+) -> Result<HistoryHeads, EngineError>
+where
+    F: FnMut(
+        nq_store::EvaluationRefusalHistoryRow,
+        EvaluationEnvelopeV2,
+        &[u8],
+        bool,
+    ) -> Result<(), EngineError>,
+{
     store.validate_evaluation_history_invariants_since(frontier)?;
     let (_, heads) = visit_evaluation_history_between(
         store,
@@ -9592,31 +10003,69 @@ fn validate_evaluation_refusal_history_since(
         Some(frontier.evaluation_sequence),
         replay_heads(state)?,
         through_evaluation_sequence.max(frontier.evaluation_sequence),
-        |_, _| Ok(()),
+        visit,
     )?;
     Ok(heads)
 }
 
+/// Reopen and validate every evaluation in `(after, through]`, advancing the
+/// finding-lineage replay and the newest-revision-per-lineage selection. The
+/// visitor receives each reopened row, its envelope, its lineage key, and
+/// whether it became its lineage's newest evaluation.
 fn visit_evaluation_history_between<F>(
     store: &Store,
     page_size: u32,
-    mut after_evaluation_sequence: Option<i64>,
-    mut replay: BTreeMap<Vec<u8>, ReplayedFinding>,
+    after_evaluation_sequence: Option<i64>,
+    replay: HistoryHeads,
     through_evaluation_sequence: i64,
-    mut visit: F,
-) -> Result<(usize, BTreeMap<Vec<u8>, ReplayedFinding>), EngineError>
+    visit: F,
+) -> Result<(usize, HistoryHeads), EngineError>
 where
     F: FnMut(
         nq_store::EvaluationRefusalHistoryRow,
         EvaluationEnvelopeV2,
+        &[u8],
+        bool,
+    ) -> Result<(), EngineError>,
+{
+    visit_evaluation_history_beyond(
+        store,
+        page_size,
+        after_evaluation_sequence,
+        replay,
+        through_evaluation_sequence,
+        None,
+        visit,
+    )
+}
+
+/// [`visit_evaluation_history_between`] with append bounds `reference`
+/// captured in the reading transaction at or before `after_evaluation_sequence`
+/// (see [`Store::evaluation_refusal_history_beyond`]).
+fn visit_evaluation_history_beyond<F>(
+    store: &Store,
+    page_size: u32,
+    mut after_evaluation_sequence: Option<i64>,
+    mut replay: HistoryHeads,
+    through_evaluation_sequence: i64,
+    reference: Option<&nq_store::HistoryFrontier>,
+    mut visit: F,
+) -> Result<(usize, HistoryHeads), EngineError>
+where
+    F: FnMut(
+        nq_store::EvaluationRefusalHistoryRow,
+        EvaluationEnvelopeV2,
+        &[u8],
+        bool,
     ) -> Result<(), EngineError>,
 {
     let mut reopened = 0usize;
     loop {
-        let page = store.evaluation_refusal_history_bounded(
+        let page = store.evaluation_refusal_history_beyond(
             page_size,
             after_evaluation_sequence,
             through_evaluation_sequence,
+            reference,
         )?;
         if page.is_empty() {
             return Ok((reopened, replay));
@@ -9625,14 +10074,57 @@ where
         for row in page {
             after_evaluation_sequence = Some(row.evaluation_sequence);
             let envelope = validate_evaluation_refusal_row(store, &row, true)?;
-            validate_evaluation_finding_replay_step(&row, &envelope, &mut replay)?;
-            visit(row, envelope)?;
+            validate_evaluation_finding_replay_step(&row, &envelope, &mut replay.findings)?;
+            let lineage = evaluation_lineage_key(&envelope)?;
+            let newest = replay.advance_evaluation(&lineage, &row);
+            visit(row, envelope, &lineage, newest)?;
             reopened = reopened.checked_add(1).ok_or_else(|| {
                 EngineError::Invariant("evaluation history count overflowed".into())
             })?;
         }
         if page_len < page_size as usize {
             return Ok((reopened, replay));
+        }
+    }
+}
+
+/// Position of a lineage's newest evaluation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EvaluationHeadPosition {
+    revision: i64,
+    sequence: i64,
+}
+
+/// Replay state of an evaluation history walk: each lineage's latest finding
+/// event and newest evaluation.
+#[derive(Clone, Default)]
+struct HistoryHeads {
+    findings: BTreeMap<Vec<u8>, ReplayedFinding>,
+    evaluations: BTreeMap<Vec<u8>, EvaluationHeadPosition>,
+}
+
+impl HistoryHeads {
+    /// Fold one evaluation into the newest-revision-per-lineage selection;
+    /// returns whether it became its lineage's newest evaluation.
+    fn advance_evaluation(
+        &mut self,
+        lineage: &[u8],
+        row: &nq_store::EvaluationRefusalHistoryRow,
+    ) -> bool {
+        let candidate = EvaluationHeadPosition {
+            revision: row.evaluation_revision,
+            sequence: row.evaluation_sequence,
+        };
+        match self.evaluations.get_mut(lineage) {
+            None => {
+                self.evaluations.insert(lineage.to_vec(), candidate);
+                true
+            }
+            Some(head) if candidate.revision > head.revision => {
+                *head = candidate;
+                true
+            }
+            Some(_) => false,
         }
     }
 }
@@ -10840,8 +11332,18 @@ fn project_notification_delivery_status(
 fn status_from_row_v3(
     store: &Store,
     row: nq_store::StatusSnapshotRow,
+    evaluations: EvaluationHistory<'_>,
 ) -> Result<ComponentStatusV3, EngineError> {
-    let component = status_from_row_v2(store, row)?;
+    let component = status_component_v2(
+        store,
+        &row.component_kind,
+        row.component_id,
+        &row.state,
+        row.code,
+        &row.detail_json,
+        &row.observed_at,
+        evaluations,
+    )?;
     if component.kind == ComponentKind::Evaluation {
         return Err(EngineError::Invariant(
             "evaluation status must be derived from canonical evaluation_runs, not status_events"
@@ -17958,6 +18460,405 @@ sys.stdout.write("\n")
         assert!(!watermark.exists());
     }
 
+    /// The status snapshot's comparable content: everything but the
+    /// generation time.
+    fn snapshot_content(snapshot: &StatusSnapshotV3) -> serde_json::Value {
+        let mut value = serde_json::to_value(snapshot).expect("snapshot value");
+        value
+            .as_object_mut()
+            .expect("snapshot object")
+            .remove("generated_at");
+        value
+    }
+
+    /// Append collections (each a watcher run and instance status event)
+    /// and freshness evaluations through the real engine paths.
+    fn append_freshness_history(config: &NqConfig, watcher: &WatcherConfig, rounds: usize) {
+        let mut engine = CollectionEngine::open_with_evaluator_identity(
+            config,
+            Ok(EvaluatorRuntimeIdentity::for_test(
+                nq_protocol::sha256_bytes(b"operator-beta-freshness-evaluator"),
+            )),
+        )
+        .expect("engine");
+        for _ in 0..rounds {
+            engine.collect(watcher).expect("collect");
+            engine.freshness_sweep(watcher).expect("freshness sweep");
+        }
+    }
+
+    #[test]
+    fn bounded_status_snapshot_equals_the_complete_history_walk() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (engine, watcher) = admitted_operator_beta_systemd_freshness_fixture(directory.path());
+        let config = engine.config.clone();
+        drop(engine);
+        append_freshness_history(&config, &watcher, 4);
+        full_validation_and_watermark(&config);
+        let certified = read_watermark_file(&config);
+        let state = certified.semantic.as_ref().expect("semantic certification");
+        assert!(!state.evaluation_heads.is_empty());
+
+        // Nothing beyond the watermark, then history beyond it: further
+        // revisions of the certified lineage plus new runs and statuses.
+        for beyond in [0usize, 3] {
+            append_freshness_history(&config, &watcher, beyond);
+            let store = Store::open_read_only(&config.database_path).expect("read-only");
+            assert!(
+                engine_semantic_state(&store).is_some(),
+                "bounded path applies"
+            );
+            let bounded = status_snapshot_v3(&store).expect("bounded snapshot");
+            let complete =
+                status_snapshot_v3_from_complete_history(&store).expect("complete snapshot");
+            assert_eq!(snapshot_content(&bounded), snapshot_content(&complete));
+            assert!(
+                bounded
+                    .components
+                    .iter()
+                    .any(|component| component.kind == ComponentKind::Instance)
+            );
+            assert!(
+                bounded
+                    .components
+                    .iter()
+                    .any(|component| component.kind == ComponentKind::Evaluation)
+            );
+            if beyond > 0 {
+                assert!(
+                    store
+                        .uncovered_history_rows()
+                        .expect("uncovered")
+                        .unwrap_or(0)
+                        > 0,
+                    "rows lie beyond the watermark"
+                );
+                let ComponentStatusDetailV3::Evaluation { sequence, .. } = &bounded
+                    .components
+                    .iter()
+                    .find(|component| component.kind == ComponentKind::Evaluation)
+                    .expect("evaluation component")
+                    .detail
+                else {
+                    panic!("evaluation detail");
+                };
+                assert!(
+                    i64::try_from(*sequence).expect("sequence")
+                        > certified.frontier.evaluation_sequence,
+                    "the newest revision beyond the watermark supersedes the certified head"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_status_snapshot_refuses_a_head_that_does_not_reopen_and_full_validation_refuses_a_substituted_one()
+     {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (engine, watcher) = admitted_operator_beta_systemd_freshness_fixture(directory.path());
+        let config = engine.config.clone();
+        drop(engine);
+        append_freshness_history(&config, &watcher, 3);
+        full_validation_and_watermark(&config);
+        let certified = read_watermark_file(&config);
+        let head = certified
+            .semantic
+            .as_ref()
+            .expect("semantic certification")
+            .evaluation_heads[0]
+            .clone();
+        assert!(
+            head.evaluation_sequence > 1,
+            "the lineage has an older revision"
+        );
+
+        // A head whose revision is not the row's: the ordinary snapshot
+        // refuses it.
+        let mut wrong_revision = certified.clone();
+        wrong_revision
+            .semantic
+            .as_mut()
+            .expect("semantic")
+            .evaluation_heads[0]
+            .evaluation_revision += 1;
+        wrong_revision.commitment_digest = wrong_revision.computed_commitment();
+        write_watermark_file(&config, &wrong_revision);
+        let store = Store::open_read_only(&config.database_path).expect("read-only");
+        assert!(matches!(
+            status_snapshot_v3(&store),
+            Err(EngineError::Invariant(message)) if message.contains("does not reopen")
+        ));
+        drop(store);
+
+        // A consistent substitution (an older evaluation of the same lineage
+        // at its own revision) or an omitted lineage reopens cleanly, so
+        // the explicit full validation is what proves the certification.
+        let store = Store::open(&config.database_path).expect("open");
+        let older = store
+            .evaluation_refusal_history_bounded(1, Some(0), 1)
+            .expect("first evaluation")
+            .pop()
+            .expect("row");
+        drop(store);
+        let mut stale = certified.clone();
+        stale.semantic.as_mut().expect("semantic").evaluation_heads[0] = nq_store::EvaluationHead {
+            lineage: head.lineage.clone(),
+            evaluation_sequence: older.evaluation_sequence,
+            evaluation_revision: older.evaluation_revision,
+        };
+        let mut omitted = certified.clone();
+        omitted
+            .semantic
+            .as_mut()
+            .expect("semantic")
+            .evaluation_heads
+            .clear();
+        for substituted in [stale, omitted] {
+            let mut substituted = substituted;
+            substituted.commitment_digest = substituted.computed_commitment();
+            write_watermark_file(&config, &substituted);
+            let store = Store::open_read_only(&config.database_path).expect("read-only");
+            status_snapshot_v3(&store).expect("a consistent substitution reopens");
+            drop(store);
+            let store = Store::open_validating_fully(&config.database_path).expect("full open");
+            assert!(matches!(
+                validate_fully_and_record(&store),
+                Err(EngineError::Invariant(message))
+                    if message.contains("certified semantic state")
+            ));
+            drop(store);
+            assert_eq!(
+                read_watermark_file(&config),
+                substituted,
+                "a refused full validation leaves the watermark"
+            );
+        }
+
+        // Restored, the certification is proven again.
+        write_watermark_file(&config, &certified);
+        full_validation_and_watermark(&config);
+    }
+
+    /// Append `count` explicitly-absent evaluations of the host profile's
+    /// first detector, round-robin over `lineages` instance lineages.
+    fn append_synthetic_evaluations(
+        store: &mut Store,
+        start: usize,
+        count: usize,
+        lineages: usize,
+    ) {
+        let profile: &'static dyn ProfileModule = &nq_profiles::host::MODULE;
+        let descriptor = profile.descriptor();
+        let profile_digest = descriptor.digest().expect("profile digest");
+        let semantic_id = profile_semantic_id(descriptor).expect("profile semantic id");
+        let detector = profile.detectors()[0].descriptor();
+        let detector_digest = detector.digest().expect("detector digest");
+        let evaluator = nq_protocol::sha256_bytes(b"status-scaling-evaluator");
+        let evaluation_profile = EvaluationProfileIdentity {
+            profile: descriptor.profile.clone(),
+            profile_digest: profile_digest.clone(),
+            profile_semantic_id: semantic_id.clone(),
+        };
+        for index in start..start + count {
+            let instance_id = format!("scaling-{:02}", index % lineages);
+            let evaluation_id = format!("scaling-evaluation-{index:07}");
+            let context = EvaluationContextV1 {
+                instance_id: instance_id.clone(),
+                subject: format!("host:{instance_id}"),
+                scope: ScopeConfig {
+                    kind: "host".to_owned(),
+                    value: json!({"id": instance_id}),
+                },
+                vantage: VantageConfig {
+                    kind: "local".to_owned(),
+                    value: json!({}),
+                },
+            };
+            let envelope = EvaluationEnvelopeV2 {
+                schema: EvaluationEnvelopeSchema::V2,
+                evaluation_id: evaluation_id.clone(),
+                trigger_run_id: None,
+                context,
+                detector: EvaluationDetectorIdentity {
+                    id: detector.id.clone(),
+                    version: detector.version.to_string(),
+                    digest: detector_digest.clone(),
+                },
+                threshold_policy: None,
+                evaluator_artifact_digest: evaluator.clone(),
+                profile: evaluation_profile.clone(),
+                started_at: parse_timestamp("2026-10-02T12:00:00.000Z").expect("start"),
+                evaluated_at: parse_timestamp("2026-10-02T12:00:01.000Z").expect("end"),
+                watermark: EvaluationWatermarkV2 {
+                    instance_id: instance_id.clone(),
+                    max_report_sequence: 0,
+                    watermark_received_at: None,
+                },
+                result: EvaluationResultV1 {
+                    schema: EvaluationResultSchema::V1,
+                    profile: evaluation_profile.clone(),
+                    state: DetectorState::ExplicitlyAbsent,
+                    condition: detector.condition.clone(),
+                    summary: format!("synthetic evaluation {index}"),
+                    evidence: Vec::new(),
+                    limitations: Vec::new(),
+                    refusal: None,
+                    watermark: EvidenceWatermark(0),
+                },
+            };
+            store
+                .commit_evaluation(
+                    &EvaluationInput {
+                        evaluation_id,
+                        trigger_run_id: None,
+                        detector_id: detector.id.clone(),
+                        detector_version: detector.version.to_string(),
+                        detector_digest: detector_digest.clone(),
+                        evaluator_artifact_digest: evaluator.to_string(),
+                        started_at: "2026-10-02T12:00:00.000Z".to_owned(),
+                        evaluated_at: "2026-10-02T12:00:01.000Z".to_owned(),
+                        outcome: "condition_explicitly_absent".to_owned(),
+                        detail: canonical(&envelope).expect("canonical envelope"),
+                        profile: EvaluationProfileBinding {
+                            profile_id: descriptor.profile.id.clone(),
+                            profile_version: descriptor.profile.version.to_string(),
+                            profile_digest: profile_digest.as_str().to_owned(),
+                            profile_semantic_id: parse_identity_digest(
+                                "profile_semantic_id",
+                                semantic_id.as_str(),
+                            )
+                            .expect("semantic id"),
+                        },
+                        watermarks: vec![nq_store::EvaluationWatermark {
+                            instance_id,
+                            max_report_sequence: 0,
+                            watermark_received_at: None,
+                        }],
+                        refusal: None,
+                    },
+                    None,
+                )
+                .expect("commit synthetic evaluation");
+        }
+    }
+
+    /// Build a store for measuring `nq status export` against retained
+    /// evaluation history: `NQ_SCALING_EVALUATIONS` (default 5000)
+    /// evaluations over ten lineages, certified by full validation, plus 100
+    /// more beyond the watermark. The store carries no watcher runs, so it
+    /// measures the evaluation term only. Ignored by default:
+    /// `NQ_SCALING_EVALUATIONS=5000 NQ_SCALING_STORE_DIR=/abs/dir cargo test
+    /// -p nq-core --lib status_scaling_store -- --ignored --nocapture`; the
+    /// store is left at `<dir>/nq.db` with its watermark.
+    #[test]
+    #[ignore = "builds thousands of evaluations; run explicitly"]
+    fn status_scaling_store() {
+        const LINEAGES: usize = 10;
+        const BEYOND: usize = 100;
+        let total: usize = std::env::var("NQ_SCALING_EVALUATIONS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(5000);
+        let root = PathBuf::from(
+            std::env::var("NQ_SCALING_STORE_DIR").expect("NQ_SCALING_STORE_DIR names a directory"),
+        );
+        let database = root.join("nq.db");
+        assert!(root.is_absolute() && !database.exists());
+        let mut store = Store::initialize(&database).expect("initialize");
+        append_profile_descriptor(&mut store, &nq_profiles::host::MODULE).expect("descriptor");
+        store
+            .append_genesis(&GenesisInput {
+                genesis_id: "genesis-status-scaling".into(),
+                legacy_manifest_digest: None,
+                created_at: "2026-10-02T12:00:00.000Z".into(),
+                detail: canonical(&json!({"fixture": "status-scaling"})).expect("detail"),
+            })
+            .expect("genesis");
+        drop(store);
+        let started = Instant::now();
+        let mut store = Store::open(&database).expect("open");
+        append_synthetic_evaluations(&mut store, 0, total - BEYOND, LINEAGES);
+        drop(store);
+        let store = Store::open_validating_fully(&database).expect("full open");
+        validate_fully_and_record(&store).expect("certify");
+        drop(store);
+        let mut store = Store::open(&database).expect("open");
+        append_synthetic_evaluations(&mut store, total - BEYOND, BEYOND, LINEAGES);
+        drop(store);
+        let store = Store::open_read_only(&database).expect("read-only");
+        eprintln!(
+            "built {} evaluations ({:?} rows beyond the watermark) in {:.1}s",
+            store.latest_evaluation_sequence().expect("evaluations"),
+            store.uncovered_history_rows().expect("uncovered"),
+            started.elapsed().as_secs_f64()
+        );
+        let bounded = status_snapshot_v3(&store).expect("bounded");
+        let complete = status_snapshot_v3_from_complete_history(&store).expect("complete");
+        assert_eq!(snapshot_content(&bounded), snapshot_content(&complete));
+    }
+
+    /// `SQLite` work of a read-only open plus one status snapshot.
+    fn status_snapshot_work(
+        config: &NqConfig,
+        snapshot: fn(&Store) -> Result<StatusSnapshotV3, EngineError>,
+    ) -> u64 {
+        nq_store::start_sql_work_count();
+        let store = Store::open_read_only(&config.database_path).expect("read-only open");
+        let _ = snapshot(&store);
+        drop(store);
+        nq_store::stop_sql_work_count().expect("counting")
+    }
+
+    /// The certified status snapshot decodes only the lineage heads, the
+    /// rows beyond the watermark, and the current status rows. Its one
+    /// remaining history term is SQL: reopening a covered head joins the
+    /// unindexed `refusals.evaluation_id` and `finding_events.evaluation_id`
+    /// (schema 13), a scan per lineage head. The complete-history walk
+    /// reopens every evaluation and status event instead. The read-only open
+    /// is measured separately and subtracted.
+    #[test]
+    fn status_snapshot_work_does_not_follow_covered_history() {
+        let mut measured = Vec::new();
+        for covered in [4u64, 40] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let (engine, watcher) =
+                admitted_operator_beta_systemd_freshness_fixture(directory.path());
+            let config = engine.config.clone();
+            drop(engine);
+            append_freshness_history(&config, &watcher, usize::try_from(covered).expect("rounds"));
+            full_validation_and_watermark(&config);
+            append_freshness_history(&config, &watcher, 2);
+            let open =
+                status_snapshot_work(&config, |_| Err(EngineError::Invariant("open only".into())));
+            let bounded = status_snapshot_work(&config, status_snapshot_v3) - open;
+            let complete =
+                status_snapshot_work(&config, status_snapshot_v3_from_complete_history) - open;
+            eprintln!(
+                "{covered} covered rounds: open {open}, bounded snapshot {bounded}, complete \
+                 snapshot {complete} SQLite operations"
+            );
+            measured.push((covered, bounded, complete));
+        }
+        let [
+            (small, small_bounded, small_complete),
+            (large, large_bounded, large_complete),
+        ] = measured.as_slice()
+        else {
+            unreachable!("two sizes")
+        };
+        let rounds = large - small;
+        let bounded_slope = large_bounded.saturating_sub(*small_bounded) / rounds;
+        let complete_slope = large_complete.saturating_sub(*small_complete) / rounds;
+        eprintln!(
+            "per covered round: bounded {bounded_slope}, complete {complete_slope} operations"
+        );
+        assert!(
+            bounded_slope * 20 <= complete_slope,
+            "bounded status work follows covered history ({bounded_slope} vs \
+             {complete_slope} operations per covered round)"
+        );
+    }
+
     /// Deterministic work of the hot read paths, as `SQLite` virtual-machine
     /// operations ([`nq_store::SQL_WORK_TICK`] is one operation).
     #[derive(Clone, Copy, Debug)]
@@ -18227,5 +19128,589 @@ sys.stdout.write("\n")
             ),
             &format!("{} -> {} retained acquisitions", small + 1, total + 2),
         );
+    }
+
+    /// One collection on `engine`, returning its `SQLite` work.
+    fn collection_work(engine: &mut CollectionEngine, watcher: &WatcherConfig) -> u64 {
+        let before = nq_store::sql_work_count().expect("counting");
+        let outcome = engine.collect(watcher).expect("collect");
+        assert!(outcome.is_success(), "collection admits: {outcome:?}");
+        nq_store::sql_work_count().expect("counting") - before
+    }
+
+    /// A daemon's engine lives for the whole uptime. Each collection
+    /// validates only the evaluations appended since its previous one (the
+    /// replay cursor), so its `SQLite` work stays flat as history accumulates,
+    /// while the replay from the open's certification that 0.2.3 performed
+    /// per collection grows with every collection since open.
+    #[test]
+    fn long_lived_engine_collection_work_does_not_follow_uptime() {
+        const COLLECTIONS: usize = 40;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((engine, watcher, _mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "genesis-replay-cursor",
+            b"watermark-evaluator",
+        ) else {
+            return;
+        };
+        let config = engine.config.clone();
+        drop(engine);
+        nq_store::start_sql_work_count();
+        let mut engine = reopen_with_test_identity(&config).expect("long-lived engine");
+        let replay_from_open = |engine: &CollectionEngine| {
+            let before = nq_store::sql_work_count().expect("counting");
+            validate_evaluation_history_before_evaluating(&engine.store).expect("replay");
+            nq_store::sql_work_count().expect("counting") - before
+        };
+        let early_replay = replay_from_open(&engine);
+        let work: Vec<u64> = (0..COLLECTIONS)
+            .map(|_| collection_work(&mut engine, &watcher))
+            .collect();
+        let late_replay = replay_from_open(&engine);
+        let evaluations = engine
+            .store
+            .latest_evaluation_sequence()
+            .expect("evaluations");
+        drop(engine);
+        nq_store::stop_sql_work_count().expect("counting");
+        assert!(
+            evaluations >= i64::try_from(COLLECTIONS).expect("collections"),
+            "every collection evaluates"
+        );
+        let mean = |window: &[u64]| window.iter().sum::<u64>() / window.len() as u64;
+        // The first collections establish the cursor's reference bounds and
+        // warm the per-handle state; compare a settled early window with the
+        // last one. What still grows is this fixture's evaluation itself:
+        // the host detectors read every retained matching report, so its
+        // evidence snapshot and finding evidence grow by a few operations
+        // per report. The replay from open grows by every evaluation's full
+        // reopening instead.
+        let early = mean(&work[2..10]);
+        let late = mean(&work[COLLECTIONS - 8..]);
+        let span = u64::try_from(COLLECTIONS - 8 - 2).expect("span");
+        let collection_slope = late.saturating_sub(early) / span;
+        let replay_slope = late_replay.saturating_sub(early_replay)
+            / u64::try_from(COLLECTIONS).expect("collections");
+        eprintln!(
+            "{evaluations} evaluations: collection work early {early}, late {late} SQLite \
+             operations ({collection_slope} per collection); replay from open \
+             {early_replay} -> {late_replay} ({replay_slope} per collection)"
+        );
+        assert!(
+            collection_slope * 20 <= replay_slope,
+            "collection work follows uptime: {early} -> {late} operations ({work:?})"
+        );
+        assert!(
+            late < late_replay,
+            "after {COLLECTIONS} collections one collection costs less than the replay from open"
+        );
+    }
+
+    /// Two engines on the same store collect concurrently while fresh
+    /// engines open (as the daemon's sweeps do): no collection errors, no
+    /// open withdraws the semantic certification, and the resulting history
+    /// passes full validation.
+    #[test]
+    fn concurrent_engines_collect_without_spurious_integrity_failures() {
+        const ROUNDS: usize = 12;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (mut config, primary, _mode) = host_diagnostic_fixture(directory.path());
+        let mut secondary = primary.clone();
+        secondary.instance_id = "host-diagnostic.secondary".to_owned();
+        config.watchers.push(secondary.clone());
+        let mut store = Store::initialize(&config.database_path).expect("initialize store");
+        append_profile_descriptor(&mut store, resolve(&primary).expect("host profile"))
+            .expect("profile descriptor");
+        store
+            .append_genesis(&GenesisInput {
+                genesis_id: "genesis-concurrent-engines".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: "2026-10-03T12:00:00.000Z".to_owned(),
+                detail: canonical(&json!({"source": "concurrent-engines"})).expect("detail"),
+            })
+            .expect("append genesis");
+        drop(store);
+        let mut engine = reopen_with_test_identity(&config).expect("engine");
+        for watcher in [&primary, &secondary] {
+            if let Err(error) = engine.watcher_action(watcher, "admit") {
+                if error.to_string().contains("\"class\":\"spawn_failed\"")
+                    && fs::read_to_string("/proc/self/attr/current")
+                        .is_ok_and(|profile| profile.contains("unpriv_bwrap"))
+                {
+                    eprintln!("skipping helper execution: sandbox denies executable memfds");
+                    return;
+                }
+                panic!("fixture admission failed: {error}");
+            }
+        }
+        // Some history before the engines under test open.
+        for watcher in [&primary, &secondary] {
+            assert!(engine.collect(watcher).expect("collect").is_success());
+        }
+        drop(engine);
+
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let collectors: Vec<_> = [&primary, &secondary]
+                .into_iter()
+                .map(|watcher| {
+                    let config = &config;
+                    scope.spawn(move || {
+                        let mut engine = reopen_with_test_identity(config).expect("engine");
+                        for round in 0..ROUNDS {
+                            let outcome = engine.collect(watcher).unwrap_or_else(|error| {
+                                panic!("{} round {round}: {error}", watcher.instance_id)
+                            });
+                            assert!(outcome.is_success(), "{outcome:?}");
+                        }
+                    })
+                })
+                .collect();
+            let opener = scope.spawn(|| {
+                let mut opens = 0usize;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let engine = reopen_with_test_identity(&config).expect("open");
+                    assert!(
+                        engine.replay.is_some(),
+                        "an open during concurrent commits certified semantic history"
+                    );
+                    drop(engine);
+                    assert!(
+                        read_watermark_file(&config).semantic.is_some(),
+                        "an open withdrew the semantic certification"
+                    );
+                    opens += 1;
+                }
+                opens
+            });
+            for collector in collectors {
+                collector.join().expect("collector");
+            }
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let opens = opener.join().expect("opener");
+            eprintln!(
+                "{opens} engine opens during {} concurrent collections",
+                2 * ROUNDS
+            );
+        });
+        let store = Store::open_validating_fully(&config.database_path).expect("full open");
+        validate_fully_and_record(&store).expect("the concurrent history validates in full");
+        assert!(store.latest_evaluation_sequence().expect("evaluations") > 0);
+    }
+
+    /// Per-collection evaluation-history validation on a real store, before
+    /// and after the replay cursor. Ignored by default; run on a writable
+    /// copy (nothing is committed):
+    /// `NQ_REPLAY_MEASURE_STORE=/abs/copy/nq.db cargo test -p nq-core --lib
+    /// replay_cursor_measurement -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measures a supplied store; run explicitly"]
+    fn replay_cursor_measurement() {
+        const BEHIND: i64 = 30;
+        let database = PathBuf::from(
+            std::env::var("NQ_REPLAY_MEASURE_STORE")
+                .expect("NQ_REPLAY_MEASURE_STORE names a store"),
+        );
+        let mut store = Store::open(&database).expect("open");
+        let latest = store.latest_evaluation_sequence().expect("latest");
+        let timed = |label: &str, run: &mut dyn FnMut()| {
+            let mut samples = Vec::new();
+            for _ in 0..3 {
+                let started = Instant::now();
+                run();
+                samples.push(started.elapsed().as_secs_f64());
+            }
+            samples.sort_by(f64::total_cmp);
+            eprintln!(
+                "{label:<64} median {:8.4}s  (min {:.4}, max {:.4})",
+                samples[1], samples[0], samples[2]
+            );
+        };
+        eprintln!("{latest} evaluations");
+        // 0.2.3: each collection replayed from the open's certification; a
+        // daemon opened on a fresh store replays from sequence 0.
+        timed(
+            "0.2.3 algorithm: replay from sequence 0 (current query)",
+            &mut || {
+                store
+                    .validate_evaluation_history_invariants()
+                    .expect("invariants");
+                visit_evaluation_history_between(
+                    &store,
+                    nq_store::MAX_PUBLIC_QUERY_ROWS,
+                    None,
+                    HistoryHeads::default(),
+                    latest,
+                    |_, _, _, _| Ok(()),
+                )
+                .expect("replay");
+            },
+        );
+        let (_, heads) = visit_evaluation_history_between(
+            &store,
+            nq_store::MAX_PUBLIC_QUERY_ROWS,
+            None,
+            HistoryHeads::default(),
+            latest - BEHIND,
+            |_, _, _, _| Ok(()),
+        )
+        .expect("seed");
+        let behind = ReplayCursor {
+            through: latest - BEHIND,
+            heads,
+            reference: None,
+        };
+        let mut advanced = None;
+        timed(
+            &format!("cursor {BEHIND} evaluations behind, in the commit transaction"),
+            &mut || {
+                advanced = Some(
+                    store
+                        .commit_evaluations_validated(|store, _, bounds| {
+                            advance_replay_cursor(store, &behind, bounds)
+                                .map(|cursor| (Vec::new(), cursor))
+                        })
+                        .expect("advance"),
+                );
+            },
+        );
+        let current = advanced.expect("advanced");
+        assert_eq!(current.through, latest);
+        timed(
+            "cursor at the head (reference bounds), in the commit transaction",
+            &mut || {
+                store
+                    .commit_evaluations_validated(|store, _, bounds| {
+                        advance_replay_cursor(store, &current, bounds)
+                            .map(|cursor| (Vec::new(), cursor))
+                    })
+                    .expect("advance");
+            },
+        );
+    }
+
+    /// Admitted host fixture with `synthetic` extra evaluations (ten
+    /// lineages) appended through the store, reopened as a long-lived engine.
+    fn host_fixture_with_history(
+        root: &Path,
+        genesis: &str,
+        synthetic: usize,
+    ) -> Option<(NqConfig, WatcherConfig, PathBuf)> {
+        let (mut engine, watcher, mode) =
+            admitted_host_diagnostic_fixture(root, genesis, b"watermark-evaluator")?;
+        assert!(engine.collect(&watcher).expect("collect").is_success());
+        let config = engine.config.clone();
+        drop(engine);
+        let mut store = Store::open(&config.database_path).expect("open");
+        append_synthetic_evaluations(&mut store, 0, synthetic, 10);
+        drop(store);
+        Some((config, watcher, mode))
+    }
+
+    /// An engine whose open could not replay the evaluation history (it has
+    /// no cursor) replays it in a read snapshot before its collection, never
+    /// inside the IMMEDIATE transaction: the work done under the write lock
+    /// is the same short tail whatever the history's length, and a writer
+    /// with a one-second busy timeout is never refused meanwhile.
+    #[test]
+    fn cursorless_engine_replays_outside_the_write_lock() {
+        let mut in_transaction = Vec::new();
+        for synthetic in [200usize, 3000] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let Some((config, watcher, _mode)) =
+                host_fixture_with_history(directory.path(), "genesis-cursorless", synthetic)
+            else {
+                return;
+            };
+            let stop = std::sync::atomic::AtomicBool::new(false);
+            let (refused, attempts, work) = std::thread::scope(|scope| {
+                let writer = scope.spawn(|| {
+                    let connection =
+                        rusqlite::Connection::open(&config.database_path).expect("writer");
+                    connection
+                        .busy_timeout(std::time::Duration::from_secs(1))
+                        .expect("busy timeout");
+                    let (mut refused, mut attempts) = (0usize, 0usize);
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        attempts += 1;
+                        if connection
+                            .execute_batch("BEGIN IMMEDIATE; COMMIT;")
+                            .is_err()
+                        {
+                            refused += 1;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    (refused, attempts)
+                });
+                nq_store::start_sql_work_count();
+                let mut engine = reopen_with_test_identity(&config).expect("engine");
+                // As after an open whose evaluation replay failed.
+                engine.replay = None;
+                assert!(engine.collect(&watcher).expect("collect").is_success());
+                assert!(
+                    engine.replay.is_some(),
+                    "the collection established a cursor"
+                );
+                drop(engine);
+                let _ = nq_store::stop_sql_work_count();
+                let work = TRANSACTION_REPLAY_WORK.with(std::cell::Cell::take);
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                let (refused, attempts) = writer.join().expect("writer");
+                (
+                    refused,
+                    attempts,
+                    work.expect("advanced in the transaction"),
+                )
+            });
+            eprintln!(
+                "{synthetic} synthetic evaluations: {work} SQLite operations under the write \
+                 lock; writer refused {refused} of {attempts}"
+            );
+            assert_eq!(
+                refused, 0,
+                "a writer was refused while the history replayed"
+            );
+            in_transaction.push(work);
+        }
+        assert!(
+            in_transaction[1] <= in_transaction[0] + in_transaction[0] / 10,
+            "work under the write lock follows history: {in_transaction:?}"
+        );
+    }
+
+    /// A row another writer commits between two collections is checked by
+    /// the store-wide laws of the next commit on every path: a non-success
+    /// collection (which advances the handle's validated frontier) refuses
+    /// it, and so do the next admitted collection and a sweep, so it cannot
+    /// slip behind a frontier another commit advanced.
+    #[test]
+    fn store_laws_cover_rows_committed_between_collections() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "genesis-store-laws",
+            b"watermark-evaluator",
+        ) else {
+            return;
+        };
+        assert!(engine.collect(&watcher).expect("collect").is_success());
+        let config = engine.config.clone();
+        drop(engine);
+        let mut engine = reopen_with_test_identity(&config).expect("long-lived engine");
+        assert!(engine.collect(&watcher).expect("collect").is_success());
+        // Another writer names an already validated evaluation with a
+        // refusal its outcome does not allow; the per-row replay of new
+        // evaluations never reads it.
+        let connection = rusqlite::Connection::open(&config.database_path).expect("writer");
+        let evaluation_id: String = connection
+            .query_row(
+                "SELECT evaluation_id FROM evaluation_runs
+                 WHERE outcome <> 'cannot_evaluate' ORDER BY evaluation_sequence LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("an evaluation");
+        connection
+            .execute(
+                "INSERT INTO refusals (refusal_id, source_kind, responsible_instance_id,
+                     boundary, code, evaluation_id, detail_json, created_at)
+                 VALUES ('refusal-injected', 'profile', ?1, 'detector', 'evidence_stale', ?2,
+                         CAST('{}' AS BLOB), '2026-10-03T12:00:00.000Z')",
+                rusqlite::params![watcher.instance_id, evaluation_id],
+            )
+            .expect("inject a refusal");
+        drop(connection);
+        let profile = resolve(&watcher).expect("profile");
+        let refused = |result: Result<String, EngineError>, path: &str| match result {
+            Err(error) => assert!(
+                error.to_string().contains("typed refusals"),
+                "{path} refused for another reason: {error}"
+            ),
+            Ok(outcome) => panic!("{path} accepted the injected row: {outcome}"),
+        };
+        fs::write(&mode, "no_response\n").expect("non-success mode");
+        refused(
+            engine
+                .collect(&watcher)
+                .map(|outcome| format!("{outcome:?}")),
+            "non-success collection",
+        );
+        fs::write(&mode, "complete\n").expect("complete mode");
+        refused(
+            engine
+                .collect(&watcher)
+                .map(|outcome| format!("{outcome:?}")),
+            "admitted collection",
+        );
+        refused(
+            engine
+                .evaluate_instance(&watcher, profile, None)
+                .map(|evaluations| format!("{} evaluations", evaluations.len())),
+            "sweep",
+        );
+    }
+
+    /// A long-lived engine that only sweeps advances its validated frontier
+    /// with each sweep commit, so its sweeps stay flat.
+    #[test]
+    fn long_lived_sweeps_stay_flat() {
+        const SWEEPS: usize = 60;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((engine, watcher, _mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "genesis-sweeps",
+            b"watermark-evaluator",
+        ) else {
+            return;
+        };
+        let config = engine.config.clone();
+        drop(engine);
+        let profile = resolve(&watcher).expect("profile");
+        nq_store::start_sql_work_count();
+        let mut engine = reopen_with_test_identity(&config).expect("engine");
+        assert!(engine.collect(&watcher).expect("collect").is_success());
+        let work: Vec<u64> = (0..SWEEPS)
+            .map(|_| {
+                let before = nq_store::sql_work_count().expect("counting");
+                engine
+                    .evaluate_instance(&watcher, profile, None)
+                    .expect("sweep");
+                nq_store::sql_work_count().expect("counting") - before
+            })
+            .collect();
+        drop(engine);
+        let _ = nq_store::stop_sql_work_count();
+        let mean = |window: &[u64]| window.iter().sum::<u64>() / window.len() as u64;
+        let (early, late) = (mean(&work[2..10]), mean(&work[SWEEPS - 8..]));
+        eprintln!("sweep work early {early}, late {late} SQLite operations");
+        assert!(
+            late <= early + early / 20,
+            "sweep work follows calls since open: {work:?}"
+        );
+    }
+
+    /// Per-collection cost of one long-lived engine while nine others
+    /// collect between its collections and a seeder sweeps the history up
+    /// to each target size (default 1,000, 5,000, 20,000 evaluations).
+    /// Ignored by default: `NQ_UPTIME_TARGETS=1000,5000,20000 cargo test
+    /// -p nq-core --lib long_uptime_collection_measurement -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "builds tens of thousands of evaluations; run explicitly"]
+    #[allow(clippy::too_many_lines)]
+    fn long_uptime_collection_measurement() {
+        let targets: Vec<i64> = std::env::var("NQ_UPTIME_TARGETS")
+            .unwrap_or_else(|_| "1000,5000,20000".to_owned())
+            .split(',')
+            .map(|target| target.trim().parse().expect("target"))
+            .collect();
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (mut config, primary, _mode) = host_diagnostic_fixture(directory.path());
+        let mut watchers = vec![primary.clone()];
+        for index in 1..10 {
+            let mut watcher = primary.clone();
+            watcher.instance_id = format!("host-diagnostic.i{index}");
+            config.watchers.push(watcher.clone());
+            watchers.push(watcher);
+        }
+        let mut store = Store::initialize(&config.database_path).expect("initialize store");
+        append_profile_descriptor(&mut store, resolve(&primary).expect("host profile"))
+            .expect("profile descriptor");
+        store
+            .append_genesis(&GenesisInput {
+                genesis_id: "genesis-uptime".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: "2026-10-03T12:00:00.000Z".to_owned(),
+                detail: canonical(&json!({"source": "uptime"})).expect("detail"),
+            })
+            .expect("append genesis");
+        drop(store);
+        let mut setup = reopen_with_test_identity(&config).expect("engine");
+        for watcher in &watchers {
+            setup.watcher_action(watcher, "admit").expect("admit");
+        }
+        for watcher in &watchers {
+            assert!(setup.collect(watcher).expect("collect").is_success());
+        }
+        drop(setup);
+        let profile = resolve(&primary).expect("profile");
+        let mut others: Vec<CollectionEngine> = (1..10)
+            .map(|_| reopen_with_test_identity(&config).expect("other"))
+            .collect();
+        let mut seeder = reopen_with_test_identity(&config).expect("seeder");
+        let mut wall_engine = reopen_with_test_identity(&config).expect("wall engine");
+        nq_store::start_sql_work_count();
+        let mut ops_engine = reopen_with_test_identity(&config).expect("ops engine");
+        let latest =
+            |engine: &CollectionEngine| engine.store.latest_evaluation_sequence().expect("latest");
+        let mut next = 0usize;
+        for target in targets {
+            while latest(&seeder) < target {
+                seeder
+                    .evaluate_instance(&watchers[next % 10], profile, None)
+                    .expect("seed");
+                next += 1;
+            }
+            assert!(ops_engine.collect(&watchers[0]).expect("c").is_success());
+            assert!(wall_engine.collect(&watchers[0]).expect("c").is_success());
+            for (index, engine) in others.iter_mut().enumerate() {
+                assert!(
+                    engine
+                        .collect(&watchers[index + 1])
+                        .expect("c")
+                        .is_success()
+                );
+            }
+            let (mut ops, mut walls, mut sweeps) = (Vec::new(), Vec::new(), Vec::new());
+            for _ in 0..3 {
+                for (index, engine) in others.iter_mut().enumerate() {
+                    assert!(
+                        engine
+                            .collect(&watchers[index + 1])
+                            .expect("c")
+                            .is_success()
+                    );
+                }
+                let before = nq_store::sql_work_count().expect("counting");
+                assert!(ops_engine.collect(&watchers[0]).expect("c").is_success());
+                ops.push(nq_store::sql_work_count().expect("counting") - before);
+                let started = Instant::now();
+                assert!(wall_engine.collect(&watchers[0]).expect("c").is_success());
+                walls.push(started.elapsed().as_secs_f64());
+                let started = Instant::now();
+                wall_engine
+                    .evaluate_instance(&watchers[0], profile, None)
+                    .expect("sweep");
+                sweeps.push(started.elapsed().as_secs_f64());
+            }
+            let started = Instant::now();
+            validate_evaluation_history_before_evaluating(&wall_engine.store).expect("replay");
+            let replay_from_open = started.elapsed().as_secs_f64();
+            // No cursor: the replay runs in a read snapshot; only the tail
+            // runs under the write lock.
+            wall_engine.replay = None;
+            let started = Instant::now();
+            ensure_replay_cursor(&wall_engine.store, &mut wall_engine.replay).expect("establish");
+            let establish = started.elapsed().as_secs_f64();
+            let started = Instant::now();
+            let replay = &mut wall_engine.replay;
+            wall_engine
+                .store
+                .commit_evaluations_validated(|store, _, bounds| {
+                    advance_engine_cursor(store, replay, bounds).map(|()| (Vec::new(), ()))
+                })
+                .expect("advance");
+            let tail_under_lock = started.elapsed().as_secs_f64();
+            eprintln!(
+                "UPTIME evaluations={} collect_ops={ops:?} collect_wall={walls:.3?} \
+                 sweep_tx_wall={sweeps:.4?} replay_from_open_0.2.3={replay_from_open:.3}s \
+                 cursorless_establish_unlocked={establish:.3}s \
+                 cursorless_tail_under_lock={tail_under_lock:.4}s",
+                latest(&seeder)
+            );
+        }
+        let _ = nq_store::stop_sql_work_count();
     }
 }

@@ -137,7 +137,7 @@ These commands do not initialize NQ. The Debian package also deliberately
 leaves `nqd` stopped and disabled.
 
 To read which build is deployed, ask the installed binary rather than the
-package name: `nq --version` prints `nq 0.2.1 (<commit>)` (and `nqd --version` prints `nqd 0.2.1 (<commit>)`),
+package name: `nq --version` prints `nq 0.2.4 (<commit>)` (and `nqd --version` prints `nqd 0.2.4 (<commit>)`),
 where `<commit>` is the full git commit id release automation recorded at
 compile time through `NQ_SOURCE_COMMIT`; `nq --build-info` prints the same
 commit as `source_commit` in a one-line JSON document
@@ -146,7 +146,7 @@ policy, without reading any configuration. Every binary in a release carries
 the same commit because the assembler refuses a cohort whose commits differ or
 are absent, and the qualification package receipt binds that commit through the
 recorded build environment. A development build without `NQ_SOURCE_COMMIT`
-prints `nq 0.2.1` and `"source_commit":null`, and is not packageable.
+prints `nq 0.2.4` and `"source_commit":null`, and is not packageable.
 
 At every service start under the intact packaged unit, systemd runs the
 installed inner-manifest check from `/usr` before `config check`. Missing or
@@ -644,7 +644,9 @@ after a validation succeeds and records:
   encoding of each of those rows in rowid order (the rowid and every column
   value, payload bytes included), and the digest of the bounding row;
 - when the complete semantic history is also certified, the finding-lineage
-  replay state at the frontier;
+  replay state at the frontier and, for every evaluation lineage, the sequence
+  and revision of its newest evaluation (the evaluation heads the status
+  export resumes from);
 - a commitment digest over all of the above, which every open recomputes from
   the file, so an accidentally or partly edited watermark is refused.
 
@@ -652,7 +654,11 @@ The commitment is store-specific and detects accidents; it is not an
 authenticator. It is an unkeyed SHA-256 that anyone able to write
 `/var/lib/nq` can recompute, so a coherent reseal of the database and the
 watermark together passes an ordinary open, and the recorded lineage heads are
-trusted as written rather than re-derived from the database on open. History
+trusted as written rather than re-derived from the database on open. The
+status export reopens and re-validates the evaluation each recorded head
+names, but it cannot see a head that consistently names an older evaluation of
+its lineage or a lineage omitted from the file; full validation recomputes the
+heads and refuses such a watermark. History
 that an operation consumes does not depend on it: the referenced closure is
 re-proven from the stored bytes, and full validation applies every law to
 every row. Pinning the commitment outside the host is tracked separately.
@@ -717,6 +723,110 @@ watermark covers it:
 
 `admin validate --full` remains the one explicit whole-store operation.
 
+### Status and findings exports
+
+`nq status export`, `GET /v3/status`, `nq findings export`, and
+`GET /v3/findings` read current state. When the watermark certifies semantic
+history under the running engine's rules, the status snapshot validates only
+the evaluations, watcher runs, and status events beyond the watermark frontier,
+folds the new evaluations into the recorded evaluation heads (the newest
+revision of each lineage wins, as in the complete walk), and reopens and
+validates exactly one evaluation per lineage. The findings exports validate the
+evaluation history beyond the frontier. Their cost follows the number of
+lineages, the current status rows, and the history appended since the last
+engine open, not the store's age. Each instance's freshness sweep opens an
+engine at least once a minute and advances the watermark, so the uncovered
+tail stays short while `nqd` runs.
+
+Without such a certification (no watermark, a withdrawn certification, or one
+recorded under other engine rules, as after every package upgrade until the
+first engine open), the status snapshot reopens the complete history as
+before, which is linear in retained evaluations. The stable-snapshot rule is
+the same on both paths: status rows are read before the evaluation bound, and
+the capture is retried up to eight times while status history moves. The
+complete history stays available explicitly through `evaluations export`
+pages and `admin validate --full`.
+
+Measured on the reference machine with release builds, wall time of one
+`status export` on synthetic stores of ten evaluation lineages certified by
+full validation with 100 evaluations beyond the watermark: NQ 0.2.2 took
+1.3 s at 5,000 evaluations and 13 s to 14.5 s at 50,000; this build took
+0.04 s at both sizes (0.02 s with nothing beyond the watermark), with
+identical output. Those stores carry no watcher runs; in production each
+admitted instance status also reopened the complete evaluation history
+before this change, which is why an operated NQ 0.2.1 store with 1,740
+collections took 17.7 s.
+On a debug-build store of 342 real collections and 683 evaluations, 0.2.2
+took 3.6 s and this build 0.05 s (0.74 s with 459 history rows beyond the
+watermark). The `status_snapshot_work_does_not_follow_covered_history` test
+counts SQLite operations: the certified snapshot adds about 20 per covered
+collection round against 640 for the complete walk, and it decodes no covered
+evaluation other than each lineage's newest.
+
+### Collection cost over uptime
+
+`nqd` keeps one collection engine per instance for its whole uptime. Before a
+collection or freshness sweep evaluates, the engine validates the evaluation
+and finding history the new evaluations build on. Since 0.2.4 each engine
+keeps a replay cursor: the evaluation sequence it has validated through and
+the lineage state there. The cursor is seeded from the evaluation-history
+replay its open performs (even when a later plane then withdraws the semantic
+certification). Each evaluation then validates, inside the IMMEDIATE
+transaction that commits it, only what was appended since the cursor: every
+new evaluation through the same per-evaluation laws as before, and the
+store-wide evaluation, refusal, and finding laws for every row beyond the
+append bounds the cursor last recorded, whichever writer or commit path added
+it. Every commit that advances a handle's validated frontier (admitted,
+non-success, and sweep commits) now checks those laws for the rows it passes.
+An engine whose open could not replay the evaluation history replays it in
+full in a read snapshot, without the write lock, and then validates only the
+tail under it. Open-time validation and `admin validate --full` are
+unchanged. The evaluation history query reads only the refusal and
+finding-event rows of each page's evaluations (grouped joins) instead of
+scanning both tables per evaluation, with identical rows, and run-to-
+evaluation lookups read only the evaluations appended since the handle's last
+commit. There is no schema change.
+
+Up to 0.2.3 every collection replayed the evaluation history from the
+engine's open, so its cost grew with uptime: on an operated store with ten
+instances it went from about 1 s an hour after start to about 400 s after nine
+hours (about 6,300 evaluations), and the collections' constant reads kept the
+write-ahead log from ever restarting (293 MB at stop). The replays also ran
+outside any transaction, so a concurrent commit could make them report a
+spurious integrity failure ("evaluation append sequence does not continue the
+validated sequence", or a lineage whose "new revisions ... do not continue")
+and, on an engine open, withdraw the semantic certification. Those checks now
+read one snapshot.
+
+Measured with ten long-lived host-diagnostic engines collecting in turn and a
+sweeper growing the history (debug assertions, optimization level 2), one
+engine's collection took 21,500, 21,700, and 21,800 SQLite operations
+(0.13 s to 0.15 s, helper execution included) at 1,000, 5,000, and 20,000
+evaluations; a sweep's transaction held the write lock 6 ms to 8 ms. The
+0.2.3 per-collection replay took 0.5 s, 2.5 s to 2.8 s, and 10 s to 15 s at
+those sizes. An engine
+without a cursor spends that replay once, unlocked, and then holds the lock
+about 2.5 ms. On a copy of the incident store (6,311 evaluations, release
+build), the 0.2.3 per-collection replay took 17.5 s to 19.7 s; validating 30
+evaluations behind the cursor took 0.05 s, and 0.003 s once current. Periodic
+restarts are not needed. What a collection's own evaluation reads (for
+example a profile that reads every retained report of its instance) is not
+bounded by this change.
+
+The cursor detects a history shorter than the sequence it has validated, but
+not a store replaced in place with a different history of the same or greater
+length: rows at or below the cursor are revalidated only by the next engine
+open (as rows at or below the open frontier were before 0.2.4). After
+restoring or replacing the database file, restart `nqd`.
+
+`nqd` also stops on SIGTERM (as `systemctl stop` sends) as it does on SIGINT:
+it records its stopped status and closes its store connections, so SQLite
+checkpoints and removes the write-ahead log. Up to 0.2.3 SIGTERM killed the
+process without closing them. A collection already running in a helper is
+not interrupted: the process exits after it finishes, which can follow the
+`stopped` record, and systemd's `TimeoutStopSec` (45 s in the packaged unit)
+bounds the wait, after which SIGKILL rolls back any open transaction.
+
 ### Full validation
 
 Full validation runs when no watermark exists, when it cannot be decoded, when
@@ -730,7 +840,9 @@ sudo -u nq nq --config /etc/nq/nq.toml --json admin validate --full
 It adds SQLite `quick_check` and `foreign_key_check`, revalidates every
 history row and the complete semantic history, recomputes every table's chain
 from the stored rows, and refuses if any row certified by the existing
-watermark was added, removed, or rewritten since. On success it records a new
+watermark was added, removed, or rewritten since, or if the finding-lineage or
+evaluation heads it recorded differ from the ones the complete replay derives
+at its frontier ("certified semantic state ... disagrees"). On success it records a new
 watermark and prints its commitment digest. An existing store has no
 watermark until its first engine open or explicit full validation; that first
 validation costs a full validation.
@@ -800,6 +912,12 @@ is bounded by the new rows, the referenced closure, and the schema:
   `profile_semantic_id`) refuses the old store and cannot archive it, and a
   refused writable open still checkpoints the WAL. The sealed archive is the
   provenance link between the retired generation and the new store.
+- The certified status export reopens each lineage's newest evaluation,
+  which joins the same unindexed `refusals.evaluation_id` and
+  `finding_events.evaluation_id`: one SQL scan of those tables per lineage
+  head, without decoding. A current instance status whose run the watermark
+  already covers builds the evaluations-by-run index above once. The
+  notification delivery summary groups retained delivery custody.
 - Full validation is linear in history apart from those lookups: about 7 s,
   27 s, and 81 s at those sizes, and 3.5 s on a 208-acquisition production
   store copy.
@@ -1017,7 +1135,7 @@ cargo build --release --locked
 python3 profiles/verify_catalog.py target/release/nq \
   --helper target/release/nq-host-resource-helper
 SOURCE_DATE_EPOCH=0 scripts/build-release-bundle.sh \
-  0.2.1 amd64 target/release profiles dist
+  0.2.4 amd64 target/release profiles dist
 (cd dist && sha256sum --check SHA256SUMS)
 ```
 
@@ -1061,7 +1179,7 @@ failure boundaries without touching `dist/`:
 
 ```sh
 scripts/test_release_reproducibility.sh \
-  0.2.1 amd64 target/release profiles
+  0.2.4 amd64 target/release profiles
 scripts/test_release_failure_atomicity.sh \
-  0.2.1 amd64 target/release profiles
+  0.2.4 amd64 target/release profiles
 ```

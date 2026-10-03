@@ -22,7 +22,7 @@ use nq_profiles::{
 };
 use nq_store::{
     CanonicalDocument, EvaluationInput, EvaluationProfileBinding, EvaluationWatermark,
-    FindingEventInput, ProfileDescriptorInput, RefusalInput, Store,
+    FindingEventInput, GenesisInput, ProfileDescriptorInput, RefusalInput, Store,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -161,11 +161,22 @@ fn fixture(
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn commit_present_then_cannot_evaluate(
     store: &mut Store,
     fixture: &EvaluationFixture,
     with_prior_finding: bool,
+) -> EvaluationEnvelopeV2 {
+    commit_present_then_cannot_evaluate_around(store, fixture, with_prior_finding, |_| {})
+}
+
+/// As [`commit_present_then_cannot_evaluate`], running `between` after the
+/// present evaluation and before the cannot-evaluate revision supersedes it.
+#[allow(clippy::too_many_lines)]
+fn commit_present_then_cannot_evaluate_around(
+    store: &mut Store,
+    fixture: &EvaluationFixture,
+    with_prior_finding: bool,
+    between: impl FnOnce(&mut Store),
 ) -> EvaluationEnvelopeV2 {
     let module = resolve_profile(&fixture.profile.id, fixture.profile.version)
         .expect("compiled fixture profile");
@@ -295,6 +306,7 @@ fn commit_present_then_cannot_evaluate(
         None
     };
 
+    between(store);
     let refused = EvaluationResultV1 {
         schema: EvaluationResultSchema::V1,
         profile: evaluation_profile.clone(),
@@ -836,4 +848,181 @@ fn same_code_evaluation_refusals_survive_backup_cli_and_cold_archive() {
     ] {
         assert_eq!(archived_evaluations[field], live_evaluations[field]);
     }
+}
+
+fn status_content(mut status: Value) -> Value {
+    status
+        .as_object_mut()
+        .expect("status object")
+        .remove("generated_at")
+        .expect("generation time");
+    status
+}
+
+fn certify(database: &Path) {
+    let store = Store::open_validating_fully(database).expect("full validation open");
+    nq_core::engine::validate_fully_and_record(&store).expect("certify history");
+}
+
+fn read_watermark(database: &Path) -> nq_store::ValidationWatermark {
+    serde_json::from_slice(&fs::read(nq_store::watermark_path(database)).expect("read watermark"))
+        .expect("decode watermark")
+}
+
+/// The status export bounded by the validation watermark equals the
+/// complete-history walk on a store with several lineages, superseded
+/// revisions, typed refusals, a first-ever refusal without a finding, and
+/// rows on both sides of the watermark, including a lineage superseded
+/// across it. A substituted certified head is refused by full validation.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn bounded_status_export_equals_the_complete_history_walk() {
+    let nq = Path::new(env!("CARGO_BIN_EXE_nq"));
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = directory.path();
+    let database = root.join("nq.db");
+    let config = write_config(root, "bounded", &database);
+    let mut store = Store::initialize(&database).expect("initialize store");
+    store
+        .append_genesis(&GenesisInput {
+            genesis_id: "genesis-bounded-status".to_owned(),
+            legacy_manifest_digest: None,
+            created_at: TEST_TIME.to_owned(),
+            detail: document(&json!({"fixture": "bounded-status"})),
+        })
+        .expect("append genesis");
+    let lineage = |store: &mut Store, name: &'static str, finding, refusal| {
+        fixture(
+            store,
+            name,
+            finding,
+            refusal,
+            name,
+            BTreeMap::from([("reason".to_owned(), name.to_owned())]),
+        )
+    };
+    let first = lineage(
+        &mut store,
+        "bounded-first",
+        "finding-bounded-first",
+        "refusal-bounded-first",
+    );
+    let beta = lineage(
+        &mut store,
+        "bounded-beta",
+        "finding-bounded-beta",
+        "refusal-bounded-beta",
+    );
+    let alpha = lineage(
+        &mut store,
+        "bounded-alpha",
+        "finding-bounded-alpha",
+        "refusal-bounded-alpha",
+    );
+    let gamma = lineage(
+        &mut store,
+        "bounded-gamma",
+        "finding-bounded-gamma",
+        "refusal-bounded-gamma",
+    );
+    commit_present_then_cannot_evaluate(&mut store, &first, false);
+    commit_present_then_cannot_evaluate(&mut store, &beta, true);
+    // Alpha's present revision is certified; its superseding refusal and
+    // the whole gamma lineage lie beyond the watermark.
+    let alpha_refused =
+        commit_present_then_cannot_evaluate_around(&mut store, &alpha, true, |_| {
+            certify(&database);
+        });
+    let gamma_refused = commit_present_then_cannot_evaluate(&mut store, &gamma, true);
+    drop(store);
+
+    let watermark = read_watermark(&database);
+    let state = watermark.semantic.as_ref().expect("semantic certification");
+    assert_eq!(watermark.frontier.evaluation_sequence, 4);
+    assert_eq!(state.evaluation_heads.len(), 3);
+    let store = Store::open_read_only(&database).expect("read-only open");
+    assert!(store.validated_semantic_state().is_some());
+    assert!(
+        store
+            .uncovered_history_rows()
+            .expect("uncovered")
+            .is_some_and(|rows| rows > 0)
+    );
+    drop(store);
+
+    let bounded = success(run(nq, &config, &["status", "export"]));
+    let evaluations = bounded["components"]
+        .as_array()
+        .expect("components")
+        .iter()
+        .filter(|component| component["kind"] == "evaluation")
+        .collect::<Vec<_>>();
+    assert_eq!(evaluations.len(), 4, "one newest evaluation per lineage");
+    for expected in [&alpha_refused, &gamma_refused] {
+        assert!(
+            evaluations
+                .iter()
+                .any(|component| component["id"] == expected.evaluation_id.as_str()),
+            "{} supersedes its lineage",
+            expected.evaluation_id
+        );
+    }
+    assert_eq!(bounded["evaluation_through_sequence"], 7);
+
+    // The same store without its watermark walks the complete history.
+    let unwatermarked_root = root.join("unwatermarked");
+    fs::create_dir(&unwatermarked_root).expect("create copy directory");
+    let unwatermarked = unwatermarked_root.join("nq.db");
+    fs::copy(&database, &unwatermarked).expect("copy database");
+    let unwatermarked_config = write_config(&unwatermarked_root, "complete", &unwatermarked);
+    let complete = success(run(nq, &unwatermarked_config, &["status", "export"]));
+    assert!(!nq_store::watermark_path(&unwatermarked).exists());
+    assert_eq!(status_content(bounded.clone()), status_content(complete));
+    assert_eq!(
+        success(run(nq, &config, &["findings", "export"])),
+        success(run(nq, &unwatermarked_config, &["findings", "export"]))
+    );
+
+    // Certifying the remaining history keeps the same export.
+    certify(&database);
+    let recertified = success(run(nq, &config, &["status", "export"]));
+    assert_eq!(status_content(recertified), status_content(bounded));
+    let watermark = read_watermark(&database);
+    assert_eq!(
+        watermark
+            .semantic
+            .as_ref()
+            .expect("semantic certification")
+            .evaluation_heads
+            .len(),
+        4
+    );
+
+    // Pointing alpha's head back at its superseded present revision is a
+    // consistent substitution that reopens; full validation refuses it.
+    let mut substituted = watermark.clone();
+    let heads = &mut substituted
+        .semantic
+        .as_mut()
+        .expect("semantic certification")
+        .evaluation_heads;
+    let alpha_head = heads
+        .iter_mut()
+        .find(|head| head.evaluation_sequence == 5)
+        .expect("alpha's refusal is its lineage head");
+    alpha_head.evaluation_sequence = 4;
+    alpha_head.evaluation_revision -= 1;
+    substituted.commitment_digest = substituted.computed_commitment();
+    fs::write(
+        nq_store::watermark_path(&database),
+        serde_json::to_vec(&substituted).expect("encode watermark"),
+    )
+    .expect("write substituted watermark");
+    let refused = run(nq, &config, &["admin", "validate", "--full"]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("certified semantic state"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
 }

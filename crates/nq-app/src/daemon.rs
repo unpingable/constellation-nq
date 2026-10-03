@@ -130,10 +130,18 @@ pub async fn run(options: Nqd) -> Result<()> {
     }
 
     info!(instances = config.watchers.len(), "nqd started");
+    // systemd stops the service with SIGTERM: stop as for SIGINT, so every
+    // engine and store connection closes (SQLite checkpoints and removes the
+    // WAL on the last close) and the stopped status is recorded.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("cannot listen for SIGTERM")?;
     tokio::select! {
         signal = tokio::signal::ctrl_c() => {
             signal.context("cannot listen for shutdown signal")?;
             info!("shutdown requested");
+        }
+        _ = terminate.recv() => {
+            info!("termination requested");
         }
         result = services.join_next() => {
             match result {

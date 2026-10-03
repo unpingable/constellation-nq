@@ -9,8 +9,9 @@ installable Constellation suite. See [the 0.2.0 release notes and known
 limitations](docs/PUBLIC_RELEASE.md#nq-020-component-package); the main one is
 that stores do not carry across NQ builds, so the documented procedure is to
 re-initialize ([OPERATIONS](docs/OPERATIONS.md#historical-binary-and-schema-upgrade)).
-The source tree is at 0.2.1, an unreleased candidate that bounds store
-validation per invocation ([release notes](docs/PUBLIC_RELEASE.md#nq-021-source-candidate)).
+The source tree is at 0.2.4, an unreleased candidate whose daemon collections
+no longer replay the evaluation history on every collection
+([release notes](docs/PUBLIC_RELEASE.md#nq-024-source-candidate)).
 
 The current immutable Constellation integration release is
 [0.1.0-alpha.6](https://unpingable.com/constellation/releases/0.1.0-alpha.6/guide.html).
