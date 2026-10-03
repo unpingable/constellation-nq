@@ -5023,6 +5023,94 @@ pub struct BackupArtifact {
     pub size_bytes: u64,
 }
 
+/// How a history page associates each evaluation with its refusal and
+/// finding-event rows and counts them (the evaluation laws require at most
+/// one of each).
+#[derive(Clone, Copy)]
+enum AssociationCounts {
+    /// The in-range refusal and finding-event rows are materialized once
+    /// per page (a rowid-range read when the page is beyond a reference
+    /// frontier), then joined and counted by grouped joins: each association
+    /// row in range is read once per page, however many evaluations the page
+    /// holds or how much history precedes the range.
+    Grouped,
+    /// The original form: joins straight onto the unindexed tables (an
+    /// automatic index built from a scan of each whole table per page) and
+    /// correlated `COUNT(*)` subqueries (a scan of each table per
+    /// evaluation). Kept to prove the two forms return the same rows.
+    #[cfg(test)]
+    Correlated,
+}
+
+impl AssociationCounts {
+    /// The statement's `WITH` prefix, its two count columns, and its joins,
+    /// given the rowid-range condition of each table for an alias.
+    fn sql(self, refusal_range: &str, finding_range: &str) -> (String, String, String) {
+        const PRIOR: &str = "
+             LEFT JOIN finding_events AS prior
+               ON prior.finding_id = finding.finding_id
+              AND prior.event_revision = finding.event_revision - 1";
+        match self {
+            Self::Grouped => (
+                format!(
+                    "WITH refusal_range AS MATERIALIZED (
+                 SELECT * FROM refusals AS range_refusal
+                 WHERE range_refusal.evaluation_id IS NOT NULL{refusal_range}),
+             finding_range AS MATERIALIZED (
+                 SELECT * FROM finding_events AS range_finding
+                 WHERE range_finding.evaluation_id IS NOT NULL{finding_range}),
+             refusal_count AS (
+                 SELECT evaluation_id, COUNT(*) AS associations
+                 FROM refusal_range GROUP BY evaluation_id),
+             finding_count AS (
+                 SELECT evaluation_id, COUNT(*) AS associations
+                 FROM finding_range GROUP BY evaluation_id)
+             "
+                ),
+                "COALESCE(refusal_count.associations, 0),
+                    COALESCE(finding_count.associations, 0)"
+                    .to_owned(),
+                format!(
+                    "
+             LEFT JOIN refusal_range AS refusal
+               ON refusal.evaluation_id = evaluation.evaluation_id
+             LEFT JOIN finding_range AS finding
+               ON finding.evaluation_id = evaluation.evaluation_id{PRIOR}
+             LEFT JOIN refusal_count
+               ON refusal_count.evaluation_id = evaluation.evaluation_id
+             LEFT JOIN finding_count
+               ON finding_count.evaluation_id = evaluation.evaluation_id"
+                ),
+            ),
+            #[cfg(test)]
+            Self::Correlated => {
+                let refusal = |alias: &str| refusal_range.replace("range_refusal", alias);
+                let finding = |alias: &str| finding_range.replace("range_finding", alias);
+                (
+                    String::new(),
+                    format!(
+                        "(SELECT COUNT(*) FROM refusals AS linked_refusal
+                     WHERE linked_refusal.evaluation_id = evaluation.evaluation_id{}),
+                    (SELECT COUNT(*) FROM finding_events AS linked_finding
+                     WHERE linked_finding.evaluation_id = evaluation.evaluation_id{})",
+                        refusal("linked_refusal"),
+                        finding("linked_finding"),
+                    ),
+                    format!(
+                        "
+             LEFT JOIN refusals AS refusal
+               ON refusal.evaluation_id = evaluation.evaluation_id{}
+             LEFT JOIN finding_events AS finding
+               ON finding.evaluation_id = evaluation.evaluation_id{}{PRIOR}",
+                        refusal("refusal"),
+                        finding("finding"),
+                    ),
+                )
+            }
+        }
+    }
+}
+
 /// Read-only semantic view of the transaction that is assembling one admitted
 /// collection. The newly inserted report is visible here, while no partial
 /// collection state is visible outside the transaction.
@@ -6098,12 +6186,29 @@ impl Store {
     /// Read one bounded immutable page of evaluations with exact refusal and
     /// finding-event associations. Both bounds use the stable store-wide
     /// append sequence, so later inserts cannot fall behind a returned cursor.
-    #[allow(clippy::too_many_lines)]
     pub fn evaluation_refusal_history_bounded(
         &self,
         limit: u32,
         after_evaluation_sequence: Option<i64>,
         through_evaluation_sequence: i64,
+    ) -> Result<Vec<EvaluationRefusalHistoryRow>, StoreError> {
+        self.evaluation_refusal_history_page(
+            limit,
+            after_evaluation_sequence,
+            through_evaluation_sequence,
+            None,
+            AssociationCounts::Grouped,
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn evaluation_refusal_history_page(
+        &self,
+        limit: u32,
+        after_evaluation_sequence: Option<i64>,
+        through_evaluation_sequence: i64,
+        reference: Option<&HistoryFrontier>,
+        counts: AssociationCounts,
     ) -> Result<Vec<EvaluationRefusalHistoryRow>, StoreError> {
         validate_public_limit(limit)?;
         if after_evaluation_sequence.is_some_and(|sequence| sequence < 0) {
@@ -6124,27 +6229,29 @@ impl Store {
         // unindexed. Evaluations newer than a captured frontier can only be
         // named by refusals and finding events newer than it, so a page of
         // such evaluations reads only those ranges.
-        let (refusal_range, finding_range) = match self.reference_frontier() {
-            Some(frontier)
-                if after_evaluation_sequence.unwrap_or(0) >= frontier.evaluation_sequence =>
-            {
-                (
-                    format!(
-                        " AND {{alias}}.rowid > {}",
-                        frontier.max_rowid("refusals").unwrap_or(i64::MIN)
-                    ),
-                    format!(
-                        " AND {{alias}}.rowid > {}",
-                        frontier.max_rowid("finding_events").unwrap_or(i64::MIN)
-                    ),
-                )
-            }
+        let after = after_evaluation_sequence.unwrap_or(0);
+        let applicable = reference
+            .filter(|frontier| after >= frontier.evaluation_sequence)
+            .or(self.reference_frontier());
+        let (refusal_range, finding_range) = match applicable {
+            Some(frontier) if after >= frontier.evaluation_sequence => (
+                format!(
+                    " AND {{alias}}.rowid > {}",
+                    frontier.max_rowid("refusals").unwrap_or(i64::MIN)
+                ),
+                format!(
+                    " AND {{alias}}.rowid > {}",
+                    frontier.max_rowid("finding_events").unwrap_or(i64::MIN)
+                ),
+            ),
             _ => (String::new(), String::new()),
         };
         let refusal = |alias: &str| refusal_range.replace("{alias}", alias);
         let finding = |alias: &str| finding_range.replace("{alias}", alias);
+        let (with, count_columns, joins) =
+            counts.sql(&refusal("range_refusal"), &finding("range_finding"));
         let mut statement = self.connection.prepare(&format!(
-            "SELECT evaluation.evaluation_id, evaluation.trigger_run_id,
+            "{with}SELECT evaluation.evaluation_id, evaluation.trigger_run_id,
                     evaluation.detector_id, evaluation.detector_version,
                     evaluation.detector_digest, evaluation.evaluator_artifact_digest,
                     evaluation.evaluation_revision, evaluation.started_at,
@@ -6172,27 +6279,12 @@ impl Store {
                     finding.refusal_json, prior.event_id, prior.event_kind,
                     prior.condition_state, prior.subject_json,
                     prior.operator_work_state, prior.severity, prior.summary,
-                    evaluation.evaluation_sequence,
-                    (SELECT COUNT(*) FROM refusals AS linked_refusal
-                     WHERE linked_refusal.evaluation_id = evaluation.evaluation_id{}),
-                    (SELECT COUNT(*) FROM finding_events AS linked_finding
-                     WHERE linked_finding.evaluation_id = evaluation.evaluation_id{})
-             FROM evaluation_runs AS evaluation
-             LEFT JOIN refusals AS refusal
-               ON refusal.evaluation_id = evaluation.evaluation_id{}
-             LEFT JOIN finding_events AS finding
-               ON finding.evaluation_id = evaluation.evaluation_id{}
-             LEFT JOIN finding_events AS prior
-               ON prior.finding_id = finding.finding_id
-              AND prior.event_revision = finding.event_revision - 1
+                    evaluation.evaluation_sequence, {count_columns}
+             FROM evaluation_runs AS evaluation{joins}
              WHERE evaluation.evaluation_sequence > COALESCE(?1, 0)
                AND evaluation.evaluation_sequence <= ?2
              ORDER BY evaluation.evaluation_sequence
-             LIMIT ?3",
-            refusal("linked_refusal"),
-            finding("linked_finding"),
-            refusal("refusal"),
-            finding("finding"),
+             LIMIT ?3"
         ))?;
         let rows = statement.query_map(
             params![
@@ -15484,6 +15576,317 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    /// Seed `rounds` evaluations per lineage over three lineages, mixing
+    /// plain evaluations, refusal-only evaluations, finding events with and
+    /// without a refusal, and run-level refusals that name no evaluation.
+    fn seed_association_history(store: &mut Store, profile_digest: &str, rounds: usize) {
+        let collection = commit_admitted(
+            store,
+            "fixture-a",
+            "associations",
+            profile_digest,
+            document(json!({"status": "unhealthy"})),
+            b"unhealthy\n".to_vec(),
+        );
+        let report_digest = collection.semantic_digest.expect("semantic digest");
+        let snapshot = store
+            .evidence_snapshot(&["fixture-a".to_owned()])
+            .expect("snapshot");
+        let refusal = |id: String| RefusalInput {
+            refusal_id: id,
+            source_kind: "profile".to_owned(),
+            responsible_instance_id: "fixture-a".to_owned(),
+            boundary: "detector".to_owned(),
+            code: "evidence_stale".to_owned(),
+            profile_semantic_id: Some(typed_digest("profile-semantic").into_string()),
+            detail: document(json!({"boundary": "detector", "code": "evidence_stale"})),
+            created_at: TIME.to_owned(),
+        };
+        for round in 0..rounds {
+            for lineage in 0..3 {
+                let detector = format!("fixture.lineage-{lineage}");
+                let evaluation_id = format!("evaluation-{lineage}-{round}");
+                let refused = round % 3 == 1;
+                let evaluation = EvaluationInput {
+                    evaluation_id: evaluation_id.clone(),
+                    trigger_run_id: None,
+                    detector_id: detector.clone(),
+                    detector_version: "1".to_owned(),
+                    detector_digest: digest("detector-v1"),
+                    evaluator_artifact_digest: digest("evaluator-artifact"),
+                    started_at: TIME.to_owned(),
+                    evaluated_at: TIME.to_owned(),
+                    outcome: if refused {
+                        "cannot_evaluate"
+                    } else {
+                        "condition_present"
+                    }
+                    .to_owned(),
+                    detail: document(json!({"round": round})),
+                    profile: evaluation_profile(profile_digest),
+                    watermarks: snapshot.watermarks.clone(),
+                    refusal: refused.then(|| refusal(format!("refusal-{evaluation_id}"))),
+                };
+                // Lineage 0 opens its finding in round 0 and updates it on
+                // every even round (stale with a refusal on refused rounds);
+                // the other lineages carry no finding.
+                let finding =
+                    (lineage == 0 && (round == 0 || round % 2 == 0 || refused)).then(|| {
+                        FindingEventInput {
+                            event_id: format!("event-{evaluation_id}"),
+                            finding_id: "finding-associations".to_owned(),
+                            event_kind: if round == 0 { "opened" } else { "updated" }.to_owned(),
+                            instance_id: "fixture-a".to_owned(),
+                            profile_id: "fixture.health".to_owned(),
+                            profile_version: "1".to_owned(),
+                            profile_digest: profile_digest.to_owned(),
+                            subject: document(json!({"fixture": "associations"})),
+                            condition_name: detector.clone(),
+                            condition_state: "present".to_owned(),
+                            visibility_state: if refused { "stale" } else { "sufficient" }
+                                .to_owned(),
+                            operator_work_state: "unacknowledged".to_owned(),
+                            severity: "warning".to_owned(),
+                            summary: "Fixture is unhealthy".to_owned(),
+                            limitations: document(json!([])),
+                            safe_next_checks: document(json!(["inspect fixture"])),
+                            freshness: document(
+                                json!({"state": if refused { "stale" } else { "current" }}),
+                            ),
+                            basis: document(json!({"profile": "fixture.health"})),
+                            refusal: refused.then(|| {
+                                document(json!({"boundary": "detector", "code": "evidence_stale"}))
+                            }),
+                            origin_mode: "native".to_owned(),
+                            historical_refs: document(json!([])),
+                            observed_at: Some(TIME.to_owned()),
+                            received_at: Some(TIME.to_owned()),
+                            created_at: TIME.to_owned(),
+                            evidence: vec![FindingEvidenceInput {
+                                ordinal: 0,
+                                report_id: "report-associations".to_owned(),
+                                report_semantic_digest: report_digest.clone(),
+                                observation_ordinal: Some(0),
+                                observed_at: TIME.to_owned(),
+                                received_at: TIME.to_owned(),
+                            }],
+                        }
+                    });
+                store
+                    .commit_evaluation(&evaluation, finding.as_ref())
+                    .expect("seeded evaluation commits");
+            }
+        }
+    }
+
+    fn association_pages(
+        store: &Store,
+        page_size: u32,
+        after: Option<i64>,
+        through: i64,
+        reference: Option<&HistoryFrontier>,
+        counts: AssociationCounts,
+    ) -> Vec<EvaluationRefusalHistoryRow> {
+        let mut rows = Vec::new();
+        let mut cursor = after;
+        loop {
+            let page = store
+                .evaluation_refusal_history_page(page_size, cursor, through, reference, counts)
+                .expect("history page");
+            let length = page.len();
+            cursor = page.last().map(|row| row.evaluation_sequence).or(cursor);
+            rows.extend(page);
+            if length < page_size as usize {
+                return rows;
+            }
+        }
+    }
+
+    /// The grouped association counts return exactly the rows of the
+    /// correlated subqueries they replace: over every page size, resume
+    /// point, and reference frontier, including an evaluation carrying two
+    /// refusal rows (which the evaluation laws later refuse) and run-level
+    /// refusals that name no evaluation.
+    #[test]
+    fn grouped_association_counts_equal_the_correlated_subqueries() {
+        let (mut store, profile_digest) = configured_store();
+        seed_association_history(&mut store, &profile_digest, 20);
+        let bound_run = bound_fixture_run(&mut store, "fixture-a", "rejected", &profile_digest);
+        let collection = fixture_collection(
+            &mut store,
+            bound_run,
+            Some(SubmissionInput {
+                submission_id: "submission-rejected".to_owned(),
+                raw_bytes: b"{}\n".to_vec(),
+                received_at: TIME.to_owned(),
+                protocol_outcome: "valid_report".to_owned(),
+                disposition: SubmissionDisposition::Rejected {
+                    refusal: RefusalInput {
+                        refusal_id: "refusal-run-level".to_owned(),
+                        source_kind: "protocol".to_owned(),
+                        responsible_instance_id: "fixture-a".to_owned(),
+                        boundary: "profile_registry".to_owned(),
+                        code: "unknown_profile".to_owned(),
+                        profile_semantic_id: None,
+                        detail: document(json!({"profile_id": "unknown.profile"})),
+                        created_at: TIME.to_owned(),
+                    },
+                },
+            }),
+        );
+        let result = non_success_status(&collection.run.run_id, "fixture-a", "rejected");
+        committed_parts(
+            store
+                .commit_non_success_collection(&collection, &result)
+                .expect("run-level refusal"),
+        );
+        let middle = HistoryFrontier::capture_bounds(&store.connection).expect("bounds");
+        seed_association_history_more(&mut store, &profile_digest);
+        let latest: i64 = store
+            .connection
+            .query_row(
+                "SELECT MAX(evaluation_sequence) FROM evaluation_runs",
+                [],
+                |row| row.get(0),
+            )
+            .expect("latest");
+        assert!(latest > middle.evaluation_sequence && middle.evaluation_sequence > 30);
+        let all = association_pages(&store, 1000, None, latest, None, AssociationCounts::Grouped);
+        assert_eq!(all.len(), usize::try_from(latest).expect("count"));
+        assert!(
+            all.iter()
+                .any(|row| row.refusal_count == 1 && row.finding_event_count == 1)
+        );
+        assert!(
+            all.iter()
+                .any(|row| row.refusal_count == 0 && row.finding_event_count == 1)
+        );
+        assert!(
+            all.iter()
+                .any(|row| row.refusal_count == 1 && row.finding_event_count == 0)
+        );
+        assert!(
+            all.iter()
+                .any(|row| row.refusal_count == 0 && row.finding_event_count == 0)
+        );
+        for page_size in [1u32, 7, 1000] {
+            for after in [
+                None,
+                Some(5),
+                Some(middle.evaluation_sequence),
+                Some(latest - 1),
+            ] {
+                for through in [latest, latest - 1, middle.evaluation_sequence] {
+                    if after.is_some_and(|after| after > through) {
+                        continue;
+                    }
+                    for reference in [None, Some(&middle)] {
+                        let grouped = association_pages(
+                            &store,
+                            page_size,
+                            after,
+                            through,
+                            reference,
+                            AssociationCounts::Grouped,
+                        );
+                        let correlated = association_pages(
+                            &store,
+                            page_size,
+                            after,
+                            through,
+                            reference,
+                            AssociationCounts::Correlated,
+                        );
+                        assert_eq!(
+                            grouped,
+                            correlated,
+                            "page {page_size} after {after:?} through {through} reference {}",
+                            reference.is_some()
+                        );
+                    }
+                }
+            }
+        }
+
+        // Two refusal rows for one evaluation: both forms return one joined
+        // row per refusal, each counting two (the order of tied rows is
+        // unspecified, so they are compared sorted).
+        store
+            .connection
+            .execute(
+                "INSERT INTO refusals (refusal_id, source_kind, responsible_instance_id,
+                     boundary, code, run_id, submission_id, evaluation_id, profile_id,
+                     profile_version, profile_digest, profile_semantic_id, detail_json,
+                     created_at)
+                 SELECT 'refusal-duplicate', source_kind, responsible_instance_id, boundary,
+                        code, run_id, submission_id, evaluation_id, profile_id,
+                        profile_version, profile_digest, profile_semantic_id, detail_json,
+                        created_at
+                 FROM refusals WHERE evaluation_id = 'evaluation-1-1'",
+                [],
+            )
+            .expect("a second refusal row for one evaluation");
+        for reference in [None, Some(&middle)] {
+            let sorted = |counts| {
+                let mut rows = association_pages(&store, 1000, None, latest, reference, counts);
+                rows.sort_by(|left, right| {
+                    (left.evaluation_sequence, &left.refusal_id)
+                        .cmp(&(right.evaluation_sequence, &right.refusal_id))
+                });
+                rows
+            };
+            let grouped = sorted(AssociationCounts::Grouped);
+            assert_eq!(grouped.len(), usize::try_from(latest).expect("count") + 1);
+            assert_eq!(
+                grouped.iter().filter(|row| row.refusal_count == 2).count(),
+                2
+            );
+            assert_eq!(grouped, sorted(AssociationCounts::Correlated));
+        }
+    }
+
+    fn seed_association_history_more(store: &mut Store, profile_digest: &str) {
+        let refused = EvaluationInput {
+            evaluation_id: "evaluation-after-middle".to_owned(),
+            trigger_run_id: None,
+            detector_id: "fixture.lineage-1".to_owned(),
+            detector_version: "1".to_owned(),
+            detector_digest: digest("detector-v1"),
+            evaluator_artifact_digest: digest("evaluator-artifact"),
+            started_at: TIME.to_owned(),
+            evaluated_at: TIME.to_owned(),
+            outcome: "cannot_evaluate".to_owned(),
+            detail: document(json!({"round": "after-middle"})),
+            profile: evaluation_profile(profile_digest),
+            watermarks: store
+                .evidence_snapshot(&["fixture-a".to_owned()])
+                .expect("snapshot")
+                .watermarks,
+            refusal: Some(RefusalInput {
+                refusal_id: "refusal-after-middle".to_owned(),
+                source_kind: "profile".to_owned(),
+                responsible_instance_id: "fixture-a".to_owned(),
+                boundary: "detector".to_owned(),
+                code: "evidence_stale".to_owned(),
+                profile_semantic_id: Some(typed_digest("profile-semantic").into_string()),
+                detail: document(json!({"boundary": "detector", "code": "evidence_stale"})),
+                created_at: TIME.to_owned(),
+            }),
+        };
+        store
+            .commit_evaluation(&refused, None)
+            .expect("evaluation beyond the middle frontier");
+        let plain = EvaluationInput {
+            evaluation_id: "evaluation-after-middle-plain".to_owned(),
+            outcome: "condition_present".to_owned(),
+            refusal: None,
+            ..refused
+        };
+        store
+            .commit_evaluation(&plain, None)
+            .expect("plain evaluation beyond the middle frontier");
     }
 
     #[test]
