@@ -1355,11 +1355,15 @@ where
     if let Some(existing) = retained_duplicate(config, route, &intent, &intent_document)? {
         return Ok(existing);
     }
-    replay_nightshift(route, &intent)?;
-    let owner_receipt = intent.owner_receipt.clone();
     // Page eligibility is the evaluator's explicit decision. It is not
     // inferred from action, severity or condition, and a resolve is page-class.
+    // A non-page intent is refused whatever its owner receipt would replay to,
+    // so replay runs only for intents that could be sent.
     let not_page = pagerduty && !intent.is_page();
+    if !not_page {
+        replay_nightshift(route, &intent)?;
+    }
+    let owner_receipt = intent.owner_receipt.clone();
     let payload = match pager {
         Some(pager) => render_pagerduty(&intent, pager, &intent_document)?,
         None => render(route, &intent)?,
@@ -3778,6 +3782,55 @@ mod tests {
             );
             assert_routing_key_absent(&config);
         }
+    }
+
+    #[tokio::test]
+    async fn non_page_refusal_precedes_nightshift_replay() {
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut value = pagerduty_intent("trigger", digest, "inspect");
+        value["attention_kind"] = json!("nightshift_receipt");
+        value["attention_receipt_digest"] = json!(digest);
+        value["transition_id"] = json!(digest);
+        value["owner_receipt"] = replay_bundle();
+        // The route enrolls no verifier, so any replay attempt fails.
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let path = write_intent(&root, value.clone());
+        let error = submit_with_dispatch(
+            &config,
+            &path,
+            "pd.ops",
+            true,
+            |_| panic!("no secret resolution when replay fails"),
+            |_| Ok(|_, _, _| async { panic!("no dispatch when replay fails") }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Nightshift replay is not configured")
+        );
+        assert_eq!(inspect(&config, None).unwrap(), json!([]));
+
+        value["response_class"] = json!("attention");
+        let path = write_intent(&root, value);
+        let result = submit_with_dispatch(
+            &config,
+            &path,
+            "pd.ops",
+            true,
+            |_| panic!("no secret resolution for a non-page intent"),
+            |_| Ok(|_, _, _| async { panic!("no dispatch for a non-page intent") }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["delivery_state"], "refused");
+        let status = inspect(&config, result["notification_id"].as_str()).unwrap();
+        assert_eq!(
+            status[0]["pagerduty"]["last_event"]["detail"]["reason"],
+            RESPONSE_CLASS_NOT_PAGE
+        );
     }
 
     #[tokio::test]

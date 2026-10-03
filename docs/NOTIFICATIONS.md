@@ -52,8 +52,13 @@ or `page`. The evaluator (Nightshift, operator policy or a site script)
 assigns it. NQ never derives it from `severity`, `action`, the condition or
 the rule. On a PagerDuty route, an intent whose `response_class` is not `page`,
 or is absent, is retained with the refusal reason `response_class_not_page`
-before any routing-key resolution or network call. That applies to `resolve`
-as well: the resolve of a page is page-class. The refusal is counted under
+before any routing-key resolution or network call. The check runs before
+Nightshift replay, so a non-page intent always yields this retained refusal,
+even when the enrolled verifier would refuse its receipt. That applies to
+`resolve` as well: the resolve of a page is page-class. A page trigger
+followed by a non-page resolve leaves the PagerDuty alert open: the resolve is
+refused and nothing is sent, so the alert stays open until a resolve with
+`response_class: page` is accepted. The refusal is counted under
 `refused`, is an unresolved failure in `nq status export`, and appears in
 `notification inspect` under `pagerduty.last_event.detail.reason`. A
 `response_class` value outside the closed set is a malformed intent and is
