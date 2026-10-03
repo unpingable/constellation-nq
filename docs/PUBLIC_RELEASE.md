@@ -1,5 +1,24 @@
 # Constellation NQ source and integration guide
 
+## NQ 0.2.3 source candidate
+
+The source tree is version 0.2.3, an unreleased candidate. `nq status export`
+and `GET /v3/status` no longer reopen the complete evaluation history on every
+call (and once more per admitted instance status), which made their cost grow
+linearly with the store's age (17.7 s at 1,740 collections on an operated
+0.2.1 store). The validation watermark (now `nq.validation_watermark.v3`)
+additionally records each evaluation lineage's newest evaluation; a snapshot
+over a certified store validates only the history beyond the watermark and
+reopens one evaluation per lineage, and the findings exports validate only the
+evaluation history beyond it. Output is unchanged. `nq admin validate --full`
+re-derives the recorded heads and refuses a watermark whose heads disagree.
+There is no schema change and no migration: as after any package upgrade, the
+first engine open (or `admin validate --full`) validates the store in full once
+and records the new watermark; until then the status export walks the complete
+history. See
+[Status and findings exports](OPERATIONS.md#status-and-findings-exports).
+No 0.2.3 package or tag exists until the release owner publishes one.
+
 ## NQ 0.2.2 source candidate
 
 The source tree is version 0.2.2, an unreleased candidate. Notification
