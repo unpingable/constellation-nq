@@ -1,5 +1,20 @@
 # Constellation NQ source and integration guide
 
+## NQ 0.2.2 source candidate
+
+The source tree is version 0.2.2, an unreleased candidate. Notification
+intents carry a closed `response_class` (`informational`, `attention` or
+`page`) assigned by the evaluator. A PagerDuty route sends only
+`response_class: page`, for trigger and resolve alike, and retains every other
+or absent class as the refusal `response_class_not_page` without contacting
+PagerDuty; severity is never used to infer it. This breaks v2 intents written
+for 0.2.1, which must add `"response_class":"page"`. v2 records retained by
+earlier builds are read as legacy and their resubmission is refused. Slack,
+Discord and local-inbox messages now start with the class, `[attention]` when
+a v1 intent omits it. See
+[Sinks are not interchangeable](NOTIFICATIONS.md#sinks-are-not-interchangeable).
+No 0.2.2 package or tag exists until the release owner publishes one.
+
 ## NQ 0.2.1 source candidate
 
 NQ 0.2.1 is an unreleased candidate. It bounds store
@@ -153,7 +168,7 @@ python3 -B helpers/python-conformance/test_helper.py
 cargo build --workspace
 target/debug/nq protocol check
 python3 -B profiles/verify_catalog.py target/debug/nq
-python3 -B scripts/verify_protocol_assets.py protocol target/debug/nq 0.2.1
+python3 -B scripts/verify_protocol_assets.py protocol target/debug/nq 0.2.2
 ```
 
 Before publishing a package, additionally run the existing reproducibility and
