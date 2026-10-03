@@ -74,8 +74,13 @@ Write a canonical v2 intent: compact JSON with sorted keys and no trailing
 newline. For example, with `jq -cjS . source.json > trigger.json`:
 
 ```json
-{"action":"trigger","attention_kind":"operator_assertion","attention_policy_digest":"sha256:<64 hex of your operator policy>","attention_policy_id":"operator-test","condition":{"component":"nq","rule":"nq-no-fresh-acquisition","site":"crow-lab","target_class":"demo"},"destination_identity":"pagerduty:pagerduty-ops","inspection_reference":"nq notification inspect","route_reference":"pagerduty-ops","schema":"nq.notification_delivery_intent.v2","severity":"critical","stable_event_id":"test-trigger-1","summary":"TEST: NQ route qualification","transition_id":"test-1"}
+{"action":"trigger","attention_kind":"operator_assertion","attention_policy_digest":"sha256:<64 hex of your operator policy>","attention_policy_id":"operator-test","condition":{"component":"nq","rule":"nq-no-fresh-acquisition","site":"crow-lab","target_class":"demo"},"destination_identity":"pagerduty:pagerduty-ops","inspection_reference":"nq notification inspect","response_class":"page","route_reference":"pagerduty-ops","schema":"nq.notification_delivery_intent.v2","severity":"critical","stable_event_id":"test-trigger-1","summary":"TEST: NQ route qualification","transition_id":"test-1"}
 ```
+
+`response_class` must be `page`, for the trigger and for the resolve. PagerDuty
+is an interruption channel: NQ does not infer page-worthiness from `severity`
+or anything else, and retains any other or absent class as the refusal
+`response_class_not_page` without contacting PagerDuty.
 
 Submit it with the key supplied as in step 3 and `--enable-network`. The
 result shows `delivery_state` and `dedup_key`
@@ -119,6 +124,7 @@ PagerDuty itself.
 | `routing_key_unavailable` | The variable is not set for that process; fix step 3, then resubmit. |
 | `routing_key_malformed` | The value is not 32 hex characters; recopy the integration key, then resubmit. |
 | `network_dispatch_not_explicitly_enabled` | Resubmit with `--enable-network`. |
+| `response_class_not_page` | The intent did not say `response_class: page`, or it is a pre-0.2.2 record without one. Do not resubmit it; if the evaluator decides the condition is page-worthy, submit a fresh intent with `response_class: page`, otherwise send it to a non-interruption route. |
 | `rate_limited`, `server_error`, `connect_failed` | Retryable; resubmit after a pause. |
 | `rejected` | Permanent for that request: PagerDuty refused the event (for example an invalid payload or a key it reports as malformed). Read the PagerDuty message, fix the cause, then resubmit. A wrong but well-formed key does not appear here; it is `accepted`. |
 | `timeout_after_dispatch`, `transport_error_or_response_loss`, `success_not_confirmed`, or a claim without outcome | PagerDuty may have the event. Resubmitting the newest record for the condition is safe, because it carries the same dedup key. |

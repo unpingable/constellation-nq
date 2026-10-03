@@ -1,15 +1,50 @@
 # Constellation NQ source and integration guide
 
+## NQ 0.2.3 source candidate
+
+The source tree is version 0.2.3, an unreleased candidate. `nq status export`
+and `GET /v3/status` no longer reopen the complete evaluation history on every
+call (and once more per admitted instance status), which made their cost grow
+linearly with the store's age (17.7 s at 1,740 collections on an operated
+0.2.1 store). The validation watermark (now `nq.validation_watermark.v3`)
+additionally records each evaluation lineage's newest evaluation; a snapshot
+over a certified store validates only the history beyond the watermark and
+reopens one evaluation per lineage, and the findings exports validate only the
+evaluation history beyond it. Output is unchanged. `nq admin validate --full`
+re-derives the recorded heads and refuses a watermark whose heads disagree.
+There is no schema change and no migration: as after any package upgrade, the
+first engine open (or `admin validate --full`) validates the store in full once
+and records the new watermark; until then the status export walks the complete
+history. See
+[Status and findings exports](OPERATIONS.md#status-and-findings-exports).
+No 0.2.3 package or tag exists until the release owner publishes one.
+
+## NQ 0.2.2 source candidate
+
+The source tree is version 0.2.2, an unreleased candidate. Notification
+intents carry a closed `response_class` (`informational`, `attention` or
+`page`) assigned by the evaluator. A PagerDuty route sends only
+`response_class: page`, for trigger and resolve alike, and retains every other
+or absent class as the refusal `response_class_not_page` without contacting
+PagerDuty; severity is never used to infer it. This breaks v2 intents written
+for 0.2.1, which must add `"response_class":"page"`. v2 records retained by
+earlier builds are read as legacy and their resubmission is refused. Slack,
+Discord and local-inbox messages now start with the class, `[attention]` when
+a v1 intent omits it. See
+[Sinks are not interchangeable](NOTIFICATIONS.md#sinks-are-not-interchangeable).
+No 0.2.2 package or tag exists until the release owner publishes one.
+
 ## NQ 0.2.1 source candidate
 
-The source tree is version 0.2.1, an unreleased candidate. It bounds store
+NQ 0.2.1 is an unreleased candidate. It bounds store
 validation by a store-specific, content-bound validation watermark so that
 replay, qualification, export, and inspection no longer revalidate the whole
 retained history on every invocation; see
 [Store validation](OPERATIONS.md#store-validation-and-the-validation-watermark).
 Untouched historical rows are re-read only by `nq admin validate --full`, which
-an operator should schedule periodically. No 0.2.1 package or tag exists
-until the release owner publishes one; the published release is 0.2.0 below.
+an operator should schedule periodically. There is no v0.2.1 tag or GitHub
+release; 0.2.1 was deployed from a package only. The published release is
+0.2.0 below.
 
 ## NQ 0.2.0 component package
 
@@ -152,7 +187,7 @@ python3 -B helpers/python-conformance/test_helper.py
 cargo build --workspace
 target/debug/nq protocol check
 python3 -B profiles/verify_catalog.py target/debug/nq
-python3 -B scripts/verify_protocol_assets.py protocol target/debug/nq 0.2.1
+python3 -B scripts/verify_protocol_assets.py protocol target/debug/nq 0.2.2
 ```
 
 Before publishing a package, additionally run the existing reproducibility and
