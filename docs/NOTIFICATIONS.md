@@ -39,6 +39,31 @@ Nightshift/operator policy decides what warrants attention; this adapter attempt
 delivery and retains factual state. Human acknowledgment is not implemented.
 No notification, acknowledgment or maintenance declaration grants execution authority.
 
+## Sinks are not interchangeable
+
+Notification sinks are not semantically interchangeable.
+
+PagerDuty is an interruption channel. Page eligibility is an evaluator decision and must be explicitly expressed in the notification intent. The PagerDuty transport refuses non-page intents.
+
+A PagerDuty event being accepted/enqueued does not establish that a human received, acknowledged, understood, or acted on it.
+
+Every intent carries a closed `response_class`: `informational`, `attention`
+or `page`. The evaluator (Nightshift, operator policy or a site script)
+assigns it. NQ never derives it from `severity`, `action`, the condition or
+the rule. On a PagerDuty route, an intent whose `response_class` is not `page`,
+or is absent, is retained with the refusal reason `response_class_not_page`
+before any routing-key resolution or network call. That applies to `resolve`
+as well: the resolve of a page is page-class. The refusal is counted under
+`refused`, is an unresolved failure in `nq status export`, and appears in
+`notification inspect` under `pagerduty.last_event.detail.reason`. A
+`response_class` value outside the closed set is a malformed intent and is
+refused as a command error, with no retained record.
+
+Slack, Discord and local-inbox routes take any class, including `page`. The
+class is optional there and defaults to `attention`; the message starts with
+it, for example `[page] Attention required: ...` or, in a local-inbox
+message summary, `[attention] check storage`.
+
 ## Configure and inspect
 
 Add a route to an explicit NQ configuration whose database, socket, admissions
@@ -109,7 +134,8 @@ update the same alert; see [Retry by resubmission](#retry-by-resubmission).
 
 The intent is exact canonical JSON, at most32KiB, with schema
 `nq.notification_delivery_intent.v1`. It binds attention kind, event, transition,
-policy ID/digest, route reference, destination label, summary and inspection link.
+policy ID/digest, route reference, destination label, summary and inspection link,
+and optionally `response_class` (absent means `attention`).
 Keep the summary minimal: what happened, what needs attention and where to inspect.
 Do not include credentials, prompts, personal data or private evidence bundles in
 message text. NQ cannot determine whether operator-authored prose contains secrets.
@@ -190,7 +216,8 @@ of the newest acceptance, and the unresolved failures. A failure is
 unresolved when it is the newest terminal outcome of its condition: the
 route, plus for a PagerDuty record its `site:component:rule[:target_class]`.
 A failure here is `failed`, `unknown`, a stale claim, or any refusal except
-three, so a missing or malformed routing key counts. The exceptions are the
+three, so a missing or malformed routing key and `response_class_not_page`
+count. The exceptions are the
 deliberate `network_dispatch_not_explicitly_enabled` and the saved-check
 refusals `saved_check_attention_event_not_current` and
 `saved_check_attention_event_time_invalid`. Those two refuse an owner decision
@@ -255,11 +282,12 @@ transport; the endpoint cannot be redirected by configuration. See
 ### Intent v2
 
 A PagerDuty route accepts only `nq.notification_delivery_intent.v2`, and other
-routes refuse it. v1 is unchanged. A v2 intent has every v1 field (the summary
+routes refuse it. A v2 intent has every v1 field (the summary
 may be up to 1024 bytes) and, with the same closed field set:
 
 | field | contract |
 |---|---|
+| `response_class` | required in effect: must be `page`, or the record is retained as the refusal `response_class_not_page` (see [above](#sinks-are-not-interchangeable)) |
 | `action` | `trigger` or `resolve` |
 | `condition.site` | bounded site or installation id, 1..=64 of `[a-z0-9._-]` |
 | `condition.component` | one of `nq`, `host_posture`, `nightshift`, `docket`, `ag`, `service` |
@@ -268,6 +296,22 @@ may be up to 1024 bytes) and, with the same closed field set:
 | `severity` | `critical`, `error`, `warning` or `info` |
 | `runbook_url` | optional `https://` URL, at most 1024 bytes |
 | `details` | optional JSON object, at most 4 KiB canonical; key `constellation` is reserved and credential-like key names are refused |
+
+For example, as canonical JSON (compact, sorted keys, no trailing newline):
+
+```json
+{"action":"trigger","attention_kind":"operator_assertion","attention_policy_digest":"sha256:<64 hex of your operator policy>","attention_policy_id":"operator-test","condition":{"component":"nq","rule":"nq-no-fresh-acquisition","site":"crow-lab","target_class":"demo"},"destination_identity":"pagerduty:pagerduty-ops","inspection_reference":"nq notification inspect","response_class":"page","route_reference":"pagerduty-ops","schema":"nq.notification_delivery_intent.v2","severity":"critical","stable_event_id":"test-trigger-1","summary":"TEST: NQ route qualification","transition_id":"test-1"}
+```
+
+`severity` is PagerDuty's payload field only. It does not make an intent
+page-worthy, and a `critical` intent without `response_class: page` is
+refused.
+
+v2 records retained before NQ 0.2.2 have no `response_class`. They are read
+as legacy: `notification inspect` and status export read them, and inspect
+shows `pagerduty.response_class` as `null`. NQ does not assume they were
+pages. Resubmitting one is retained as the refusal `response_class_not_page`;
+to page again, submit a fresh intent with `response_class: page`.
 
 A condition names a stable class, never an event. NQ refuses, before any
 custody, a condition value that contains `sha256`, 32 or more consecutive
@@ -333,8 +377,9 @@ nq --config ./nq.toml notification resubmit \
 ```
 
 `resubmit` copies the retained v2 intent with only `stable_event_id` replaced
-and submits it to the same route, under the current submission validation. It
-refuses:
+and submits it to the same route, under the current submission validation, so
+a legacy record without `response_class` becomes a retained
+`response_class_not_page` refusal. It refuses:
 
 - a record whose outcome is `accepted`;
 - a v1 record;

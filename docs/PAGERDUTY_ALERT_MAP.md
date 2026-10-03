@@ -14,11 +14,18 @@ estate. NQ's PagerDuty route only delivers an intent that an operator or a
 site script has written and submitted. The "evaluated by" column records that
 gap and the issue where each owner was asked for the telemetry.
 
-"Page?" is the registry's `severity: page` label. NQ maps `page` to PagerDuty
-`critical` and `warn` to `warning`; a site may choose another mapping, but the
-rule and component values are fixed. A warning still creates a PagerDuty alert;
-whether it notifies anyone is decided by the PagerDuty service's urgency rules,
-not by NQ.
+"Page?" is the registry's `severity: page` label. It is the evaluator's
+response-class decision, and the evaluator must state it in the intent as
+`response_class`; NQ never derives it from the rule or from `severity`. PagerDuty
+is an interruption channel and refuses non-page intents: a "yes" condition is
+sent with `response_class: page`, for both trigger and resolve. A "no"
+condition is `attention`; send it as a v1 intent to a Slack, Discord or
+local-inbox route, because a PagerDuty route retains it as the refusal
+`response_class_not_page`. The rule anchors stay in the closed set so an
+evaluator can still decide to page on one. The severity column is only
+PagerDuty's payload `severity` (registry `page` maps to `critical`, `warn` to
+`warning`); a site may choose another mapping, but the rule and component
+values are fixed.
 
 | Rule anchor | component | severity | Page? | Suggested `target_class` | Operator response | Evaluated by (today / future owner) |
 |---|---|---|---|---|---|---|
