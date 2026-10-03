@@ -644,7 +644,9 @@ after a validation succeeds and records:
   encoding of each of those rows in rowid order (the rowid and every column
   value, payload bytes included), and the digest of the bounding row;
 - when the complete semantic history is also certified, the finding-lineage
-  replay state at the frontier;
+  replay state at the frontier and, for every evaluation lineage, the sequence
+  and revision of its newest evaluation (the evaluation heads the status
+  export resumes from);
 - a commitment digest over all of the above, which every open recomputes from
   the file, so an accidentally or partly edited watermark is refused.
 
@@ -652,7 +654,11 @@ The commitment is store-specific and detects accidents; it is not an
 authenticator. It is an unkeyed SHA-256 that anyone able to write
 `/var/lib/nq` can recompute, so a coherent reseal of the database and the
 watermark together passes an ordinary open, and the recorded lineage heads are
-trusted as written rather than re-derived from the database on open. History
+trusted as written rather than re-derived from the database on open. The
+status export reopens and re-validates the evaluation each recorded head
+names, but it cannot see a head that consistently names an older evaluation of
+its lineage or a lineage omitted from the file; full validation recomputes the
+heads and refuses such a watermark. History
 that an operation consumes does not depend on it: the referenced closure is
 re-proven from the stored bytes, and full validation applies every law to
 every row. Pinning the commitment outside the host is tracked separately.
@@ -717,6 +723,46 @@ watermark covers it:
 
 `admin validate --full` remains the one explicit whole-store operation.
 
+### Status and findings exports
+
+`nq status export`, `GET /v3/status`, `nq findings export`, and
+`GET /v3/findings` read current state. When the watermark certifies semantic
+history under the running engine's rules, the status snapshot validates only
+the evaluations, watcher runs, and status events beyond the watermark frontier,
+folds the new evaluations into the recorded evaluation heads (the newest
+revision of each lineage wins, as in the complete walk), and reopens and
+validates exactly one evaluation per lineage. The findings exports validate the
+evaluation history beyond the frontier. Their cost follows the number of
+lineages, the current status rows, and the history appended since the last
+engine open, not the store's age. The daemon's collection engine opens the
+store for every collection and advances the watermark each time, so the
+uncovered tail stays short while `nqd` runs.
+
+Without such a certification (no watermark, a withdrawn certification, or one
+recorded under other engine rules, as after every package upgrade until the
+first engine open), the status snapshot reopens the complete history as
+before, which is linear in retained evaluations. The stable-snapshot rule is
+the same on both paths: status rows are read before the evaluation bound, and
+the capture is retried up to eight times while status history moves. The
+complete history stays available explicitly through `evaluations export`
+pages and `admin validate --full`.
+
+Measured on the reference machine with release builds, wall time of one
+`status export` on synthetic stores of ten evaluation lineages certified by
+full validation with 100 evaluations beyond the watermark: NQ 0.2.2 took
+1.3 s at 5,000 evaluations and 13 s to 14.5 s at 50,000; this build took
+0.04 s at both sizes (0.02 s with nothing beyond the watermark), with
+identical output. Those stores carry no watcher runs; in production each
+admitted instance status also reopened the complete evaluation history
+before this change, which is why an operated NQ 0.2.1 store with 1,740
+collections took 17.7 s.
+On a debug-build store of 342 real collections and 683 evaluations, 0.2.2
+took 3.6 s and this build 0.05 s (0.74 s with 459 history rows beyond the
+watermark). The `status_snapshot_work_does_not_follow_covered_history` test
+counts SQLite operations: the certified snapshot adds about 20 per covered
+collection round against 640 for the complete walk, and it decodes no covered
+evaluation other than each lineage's newest.
+
 ### Full validation
 
 Full validation runs when no watermark exists, when it cannot be decoded, when
@@ -730,7 +776,9 @@ sudo -u nq nq --config /etc/nq/nq.toml --json admin validate --full
 It adds SQLite `quick_check` and `foreign_key_check`, revalidates every
 history row and the complete semantic history, recomputes every table's chain
 from the stored rows, and refuses if any row certified by the existing
-watermark was added, removed, or rewritten since. On success it records a new
+watermark was added, removed, or rewritten since, or if the finding-lineage or
+evaluation heads it recorded differ from the ones the complete replay derives
+at its frontier ("certified semantic state ... disagrees"). On success it records a new
 watermark and prints its commitment digest. An existing store has no
 watermark until its first engine open or explicit full validation; that first
 validation costs a full validation.
@@ -800,6 +848,12 @@ is bounded by the new rows, the referenced closure, and the schema:
   `profile_semantic_id`) refuses the old store and cannot archive it, and a
   refused writable open still checkpoints the WAL. The sealed archive is the
   provenance link between the retired generation and the new store.
+- The certified status export reopens each lineage's newest evaluation,
+  which joins the same unindexed `refusals.evaluation_id` and
+  `finding_events.evaluation_id`: one SQL scan of those tables per lineage
+  head, without decoding. A current instance status whose run the watermark
+  already covers builds the evaluations-by-run index above once. The
+  notification delivery summary groups retained delivery custody.
 - Full validation is linear in history apart from those lookups: about 7 s,
   27 s, and 81 s at those sizes, and 3.5 s on a 208-acquisition production
   store copy.

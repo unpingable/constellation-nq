@@ -37,7 +37,7 @@ use sha2::{Digest, Sha256};
 use crate::{CanonicalDocument, StoreError};
 
 /// Watermark document schema.
-pub const VALIDATION_WATERMARK_SCHEMA: &str = "nq.validation_watermark.v2";
+pub const VALIDATION_WATERMARK_SCHEMA: &str = "nq.validation_watermark.v3";
 
 /// Identity of the store validation rules a watermark vouches for. Any change
 /// to what store validation checks must change this value so that existing
@@ -568,6 +568,20 @@ pub struct LineageHead {
     pub condition_state: String,
 }
 
+/// Newest evaluation of one evaluation lineage: the row the current status
+/// surface reports for it. Within a lineage the newest revision wins, the
+/// same rule the complete-history selection applies.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationHead {
+    /// Hex encoding of the lineage key.
+    pub lineage: String,
+    /// Append sequence of the lineage's newest evaluation.
+    pub evaluation_sequence: i64,
+    /// Revision of that evaluation.
+    pub evaluation_revision: i64,
+}
+
 /// Semantic certification carried by a watermark: the complete semantic
 /// history is proven through the watermark frontier, and replay resumes from
 /// these lineage heads.
@@ -576,6 +590,10 @@ pub struct LineageHead {
 pub struct SemanticState {
     /// Finding-lineage replay state at the frontier.
     pub lineage_heads: Vec<LineageHead>,
+    /// Newest evaluation of every evaluation lineage through the frontier,
+    /// in lineage order: the certified projection the bounded status
+    /// snapshot resumes from instead of reopening every evaluation.
+    pub evaluation_heads: Vec<EvaluationHead>,
 }
 
 /// A completed validation, bound to one store, schema, and rule set.
@@ -637,6 +655,21 @@ impl ValidationWatermark {
                         hasher.update(field.as_bytes());
                     }
                     hasher.update(head.event_revision.to_be_bytes());
+                }
+                hasher.update(
+                    u64::try_from(state.evaluation_heads.len())
+                        .unwrap_or(u64::MAX)
+                        .to_be_bytes(),
+                );
+                for head in &state.evaluation_heads {
+                    hasher.update(
+                        u64::try_from(head.lineage.len())
+                            .unwrap_or(u64::MAX)
+                            .to_be_bytes(),
+                    );
+                    hasher.update(head.lineage.as_bytes());
+                    hasher.update(head.evaluation_sequence.to_be_bytes());
+                    hasher.update(head.evaluation_revision.to_be_bytes());
                 }
             }
         }
@@ -862,6 +895,15 @@ impl crate::Store {
             OpenValidation::SinceWatermark(watermark) => Some(watermark),
             OpenValidation::Full(_) => None,
         }
+    }
+
+    /// The applicable watermark of this store that a full validation
+    /// (`open_validating_fully`) found and must not contradict: its covered
+    /// rows (checked when recording) and its semantic certification
+    /// (checked by the engine's full replay).
+    #[must_use]
+    pub fn prior_watermark(&self) -> Option<&ValidationWatermark> {
+        self.validation.prior.as_deref()
     }
 
     /// History rows beyond the applied watermark's frontier: what the next

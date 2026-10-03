@@ -26,8 +26,8 @@ use thiserror::Error;
 mod history_scope;
 
 pub use history_scope::{
-    FullValidationReason, HistoryFrontier, LineageHead, OpenValidation, SQL_WORK_TICK,
-    SemanticCertification, SemanticState, TableFrontier, VALIDATION_RULES,
+    EvaluationHead, FullValidationReason, HistoryFrontier, LineageHead, OpenValidation,
+    SQL_WORK_TICK, SemanticCertification, SemanticState, TableFrontier, VALIDATION_RULES,
     VALIDATION_WATERMARK_SCHEMA, ValidationWatermark, sql_work_count, start_sql_work_count,
     stop_sql_work_count, watermark_path,
 };
