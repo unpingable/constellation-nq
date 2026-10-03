@@ -1,5 +1,31 @@
 # Constellation NQ source and integration guide
 
+## NQ 0.2.4 source candidate
+
+The source tree is version 0.2.4, an unreleased candidate. A daemon
+collection engine no longer replays the evaluation history from its open on
+every collection, which made collection cost grow with `nqd` uptime (about
+1 s an hour after start to about 400 s after nine hours on an operated store
+with ten instances), kept the write-ahead log from restarting (293 MB at
+stop), and raised spurious "does not continue the validated sequence"
+integrity failures when commits interleaved. Each engine keeps a replay
+cursor and, inside the transaction that commits each evaluation, validates the
+evaluations appended since its previous one and the store-wide laws for every
+row beyond the bounds it last recorded; an engine without a cursor replays the
+history once in a read snapshot, outside the write lock. Open-time and
+`admin validate --full` validation are unchanged. Every commit that advances
+a handle's validated frontier checks the evaluation laws for the rows it
+passes. Run-to-evaluation lookups and evaluation history pages read only what
+was appended since, so in a ten-engine synthetic run one collection's SQLite
+work stayed between 21,500 and 21,800 operations from 1,000 to 20,000
+evaluations, where the 0.2.3 replay alone took 0.5 s to 10 s or more.
+Evaluation history pages count refusal and finding-event associations with
+grouped joins (identical rows). `nqd` stops on SIGTERM as on SIGINT, closing
+its store connections after any in-flight collection. There is no schema
+change and no migration. See
+[Collection cost over uptime](OPERATIONS.md#collection-cost-over-uptime).
+No 0.2.4 package or tag exists until the release owner publishes one.
+
 ## NQ 0.2.3 source candidate
 
 The source tree is version 0.2.3, an unreleased candidate. `nq status export`
