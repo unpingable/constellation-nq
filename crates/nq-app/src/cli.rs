@@ -420,7 +420,9 @@ pub enum StatusCommand {
 /// Query-only exact admitted-observation custody.
 #[derive(Debug, Subcommand)]
 pub enum ObservationsCommand {
+    /// Export exact historical observation custody without collecting.
     Export {
+        /// Strict bounded JSON file containing the five detector evidence fields.
         #[arg(long)]
         reference: PathBuf,
     },

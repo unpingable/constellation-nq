@@ -18,22 +18,31 @@ pub use v2::{
     ACCESS_PATH, CAPABILITIES, COVERAGE_KIND, OBSERVATION_KIND, PROFILE_ID, SCOPE_KIND,
     SUBJECT_PREFIX, subject_for,
 };
+/// Native boot-bound profile revision.
 pub const PROFILE_VERSION: u32 = 3;
+/// Stable machine/unit enrollment scope schema.
 pub const SCOPE_SCHEMA: &str = "nq.systemd_unit_scope.v3";
+/// Existing required-active condition detector identity.
 pub const DETECTOR_ID: &str = v2::DETECTOR_ID;
+/// Revision that consumes boot-bound native testimony.
 pub const DETECTOR_VERSION: u32 = 2;
 
 /// Failure codes introduced by the boot-bound acquisition boundary. Existing
 /// manager failures keep their v2 owner codes through the explicitly named variant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SystemdUnitFailureCode {
+    /// Existing system-manager owner failure.
     Manager(v2::SystemdUnitFailureCode),
+    /// Native boot identity could not be acquired.
     BootIdentityUnavailable,
+    /// Acquired boot identity has noncanonical spelling.
     BootIdentityMalformed,
+    /// The two boot reads differ across the manager cut.
     BootIdentityChanged,
 }
 impl SystemdUnitFailureCode {
     #[must_use]
+    /// Exact opaque owner wire token.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Manager(code) => code.as_str(),
@@ -43,6 +52,7 @@ impl SystemdUnitFailureCode {
         }
     }
     #[must_use]
+    /// Closed profile failure vocabulary.
     pub fn tokens() -> &'static [&'static str] {
         static TOKENS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
             let mut codes = v2::SystemdUnitFailureCode::tokens().to_vec();
@@ -71,15 +81,20 @@ pub fn valid_boot_id(value: &str) -> bool {
         && value != "00000000-0000-0000-0000-000000000000"
 }
 
+/// Stable enrollment identity, deliberately excluding boot occurrence.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SystemdUnitScope {
+    /// Exact versioned scope schema.
     pub schema: String,
+    /// Exact manager-reported stable machine identity.
     pub machine_id: String,
+    /// Exact canonical unit name.
     pub unit_name: String,
 }
 impl SystemdUnitScope {
     #[must_use]
+    /// Reuse the existing v2 manager acquisition law with stable identity.
     pub fn manager_scope(&self) -> v2::SystemdUnitScope {
         v2::SystemdUnitScope {
             schema: v2::SCOPE_SCHEMA.into(),
@@ -92,13 +107,21 @@ impl SystemdUnitScope {
 /// The exact existing manager payload plus a mandatory acquired boot identity.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+/// Native manager snapshot and its independently acquired boot occurrence.
 pub struct SystemdUnitStatePayload {
+    /// Exact exercised scope, vantage, capability, and acquisition basis.
     pub evidence_basis: crate::EvidenceBasis,
+    /// Exact manager-reported stable machine identity.
     pub machine_id: String,
+    /// Exact canonical unit name.
     pub unit_name: String,
+    /// Closed systemd manager load state.
     pub load_state: String,
+    /// Closed systemd manager active state.
     pub active_state: String,
+    /// Closed systemd manager sub-state.
     pub sub_state: String,
+    /// Canonical native boot UUID bracketing this acquisition.
     pub boot_id: String,
 }
 impl SystemdUnitStatePayload {
@@ -149,7 +172,9 @@ static DETECTOR_DESCRIPTOR: LazyLock<DetectorDescriptor> = LazyLock::new(|| {
 });
 
 #[derive(Debug)]
+/// Compiled boot-bound systemd observation and required-active profile.
 pub struct SystemdUnitV3Profile;
+/// Registered immutable v3 profile module.
 pub static MODULE: SystemdUnitV3Profile = SystemdUnitV3Profile;
 
 fn refusal(context: &ValidationContext, message: &str) -> ProfileRefusal {

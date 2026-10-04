@@ -7,17 +7,24 @@ use nq_protocol::{EvidenceReport, Observation};
 use nq_store::{CanonicalDocument, Store};
 use serde::{Deserialize, Serialize};
 
+/// Exact query-only export schema identity.
 pub const SCHEMA: &str = "nq.admitted-observation-export/v1";
+/// Source report and serialized export byte ceiling.
 pub const MAX_BYTES: usize = 1_048_576;
 
 /// Exact existing detector evidence fields, with unknown additions refused.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservationReferenceV1 {
+    /// Exact admitted report identity.
     pub report_id: String,
+    /// Exact monotonic admitted report sequence.
     pub report_sequence: u64,
+    /// Exact canonical semantic source report digest.
     pub report_digest: String,
+    /// Required native observation ordinal within the report.
     pub observation_ordinal: u32,
+    /// Exact native observation timestamp.
     pub observed_at: DateTime<Utc>,
 }
 impl From<ObservationReferenceV1> for DetectorEvidence {
@@ -32,20 +39,33 @@ impl From<ObservationReferenceV1> for DetectorEvidence {
     }
 }
 
+/// Authenticated historical custody of one exact native observation.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmittedObservationExportV1 {
+    /// Exact export schema.
     pub schema: String,
+    /// Joined detector evidence coordinates.
     pub evidence: DetectorEvidence,
+    /// Original admitted watcher instance identity.
     pub instance_id: String,
+    /// Historical admission receipt time, never export time.
     pub received_at: DateTime<Utc>,
+    /// Native bound profile identity and descriptor digest.
     pub profile: nq_protocol::ProfileBinding,
+    /// Native exact logical subject, scope and vantage.
     pub binding: nq_protocol::SubjectBinding,
+    /// Native containing report observation timestamp.
     pub report_observed_at: DateTime<Utc>,
+    /// Native containing report status.
     pub report_status: nq_protocol::ReportStatus,
+    /// Original report producer implementation and tool provenance.
     pub backend: nq_protocol::BackendProvenance,
+    /// Capabilities recorded as exercised by the source report.
     pub used_capabilities: Vec<nq_protocol::Capability>,
+    /// Exact native admitted observation, including raw profile payload.
     pub observation: Observation,
+    /// Always historical custody only; no currentness or effects grant.
     pub standing: String,
 }
 
