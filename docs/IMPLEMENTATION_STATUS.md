@@ -14,7 +14,7 @@ addendum does not change the v1 operational-core or authority boundary.
 Host Operational Portrait v1 is now an
 [operator-ratified specification](../audit/host-operational-portrait-v1-ratification/RATIFICATION_DECISION.md).
 That is a policy result, not an implementation result. Neither `sushi-k` nor
-`labelwatch-host` has earned Portrait v1 completeness; Classic remains
+`reference-host` has earned Portrait v1 completeness; Classic remains
 authoritative; parallel qualification and cutover are not authorized. The
 current preview package and executable names are explicitly not the final
 production namespace because a bare `/usr/bin/nq` collides with Debian's
@@ -187,7 +187,7 @@ therefore invents neither historical intake bytes nor diagnostic executions.
 The following governing-plan stages are not claimed by this preview:
 
 - conformance to the ratified Host Operational Portrait v1 specification for
-  either `sushi-k` or `labelwatch-host`;
+  either `sushi-k` or `reference-host`;
 - role-oriented core/host/application packaging or an independently installed
   witness authoring and conformance surface;
 - static private profile-cohort assembly, cohort lifecycle, or recursive child

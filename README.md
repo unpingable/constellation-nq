@@ -75,7 +75,7 @@ historical read path does not supply automated retention or migration.
 > [`docs/SEQUENCING.md`](docs/SEQUENCING.md). Host Operational Portrait v1 is
 > now a
 > [ratified specification](audit/host-operational-portrait-v1-ratification/RATIFICATION_DECISION.md),
-> but neither `sushi-k` nor `labelwatch-host` has earned completeness. Classic
+> but neither `sushi-k` nor `reference-host` has earned completeness. Classic
 > replacement, parallel qualification, and cutover remain unauthorized. The
 > minted `v0.1.0` release and post-release provider-intake receipts remain
 > frozen evidence. Current main is unpublished, untagged after `v0.1.0`, and
