@@ -6034,6 +6034,11 @@ fn require_initial_diagnostic_profile(
         && profile_digest == compiled_profile_digest.as_str()
         && detector_descriptor.id == nq_profiles::systemd_unit_v2::DETECTOR_ID
         && detector_descriptor.version == 1;
+    let systemd_unit_v3 = descriptor.profile.id == nq_profiles::systemd_unit_v3::PROFILE_ID
+        && descriptor.profile.version == nq_profiles::systemd_unit_v3::PROFILE_VERSION
+        && profile_digest == compiled_profile_digest.as_str()
+        && detector_descriptor.id == nq_profiles::systemd_unit_v3::DETECTOR_ID
+        && detector_descriptor.version == nq_profiles::systemd_unit_v3::DETECTOR_VERSION;
     if !(host
         || systemd
         || http
@@ -6041,7 +6046,8 @@ fn require_initial_diagnostic_profile(
         || filesystem_capacity
         || filesystem_inodes
         || memory
-        || systemd_unit_v2)
+        || systemd_unit_v2
+        || systemd_unit_v3)
     {
         return Err(EngineError::DiagnosticUnsupported(format!(
             "live diagnostic execution has no admitted one-detector correspondence for {} v{} / {} v{}",

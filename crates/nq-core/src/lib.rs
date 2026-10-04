@@ -112,3 +112,6 @@ pub use runtime::{
 pub use unix_runner::{UnixAcquisitionOutcome, UnixRunner, UnixRunnerOptions};
 pub mod stage_qualification;
 pub mod stage_realization;
+
+/// Exact linked historical observation export; no present-reliance grant.
+pub mod observation_export;

@@ -34,6 +34,7 @@ use nq_profiles::{
     host_memory,
     host_memory::MemoryFailureCode,
     systemd_unit_v2::{self, SystemdUnitFailureCode},
+    systemd_unit_v3,
 };
 use nq_protocol::{
     BackendIdentity, BackendProvenance, Capability, CoverageDeclaration, CoverageKind,
@@ -100,6 +101,7 @@ pub fn failure_code_vocabularies() -> Value {
             Branch::Inodes,
             Branch::Memory,
             Branch::SystemdUnit,
+            Branch::SystemdUnitBoot,
         ]
         .into_iter()
         .map(|branch| {
@@ -158,6 +160,7 @@ enum Branch {
     Inodes,
     Memory,
     SystemdUnit,
+    SystemdUnitBoot,
 }
 
 impl Branch {
@@ -167,6 +170,7 @@ impl Branch {
             Self::Inodes => &host_filesystem::INODES_MODULE,
             Self::Memory => &host_memory::MODULE,
             Self::SystemdUnit => &systemd_unit_v2::MODULE,
+            Self::SystemdUnitBoot => &systemd_unit_v3::MODULE,
         }
     }
 
@@ -174,7 +178,7 @@ impl Branch {
         match self {
             Self::Capacity | Self::Inodes => &CAPABILITIES,
             Self::Memory => &host_memory::CAPABILITIES,
-            Self::SystemdUnit => &systemd_unit_v2::CAPABILITIES,
+            Self::SystemdUnit | Self::SystemdUnitBoot => &systemd_unit_v2::CAPABILITIES,
         }
     }
 
@@ -182,7 +186,7 @@ impl Branch {
         match self {
             Self::Capacity | Self::Inodes => COVERAGE_KIND,
             Self::Memory => host_memory::COVERAGE_KIND,
-            Self::SystemdUnit => systemd_unit_v2::COVERAGE_KIND,
+            Self::SystemdUnit | Self::SystemdUnitBoot => systemd_unit_v2::COVERAGE_KIND,
         }
     }
 }
@@ -295,6 +299,12 @@ impl OwnerFailureCode for SystemdUnitFailureCode {
     }
 }
 
+impl OwnerFailureCode for systemd_unit_v3::SystemdUnitFailureCode {
+    fn wire_token(self) -> &'static str {
+        self.as_str()
+    }
+}
+
 fn handle_request(
     request: &HelperRequest,
     source: &impl ResourceSource,
@@ -331,7 +341,7 @@ fn handle_request(
                 Err(failure) => failed_report(request, branch, failure),
             }
         }
-        Branch::SystemdUnit => {
+        Branch::SystemdUnit | Branch::SystemdUnitBoot => {
             let scope = match validate_systemd_binding_request(request) {
                 Ok(scope) => scope,
                 Err(response) => return *response,
@@ -348,9 +358,18 @@ fn handle_request(
                     );
                 }
             };
-            match observe_systemd_unit(&scope, source, budget) {
-                Ok(observation) => complete_systemd_report(request, &scope, &observation),
-                Err(failure) => failed_report(request, branch, failure),
+            if branch == Branch::SystemdUnitBoot {
+                match observe_boot_bound_systemd_unit(&scope, source, budget) {
+                    Ok((observation, boot_id)) => {
+                        complete_systemd_report(request, &scope, &observation, Some(&boot_id))
+                    }
+                    Err(failure) => failed_report(request, branch, failure),
+                }
+            } else {
+                match observe_systemd_unit(&scope, source, budget) {
+                    Ok(observation) => complete_systemd_report(request, &scope, &observation, None),
+                    Err(failure) => failed_report(request, branch, failure),
+                }
             }
         }
     };
@@ -380,12 +399,13 @@ fn validate_profile_request(request: &HelperRequest) -> Result<Branch, Box<Helpe
         (host_filesystem::INODES_PROFILE_ID, "1") => Branch::Inodes,
         (host_memory::PROFILE_ID, "1") => Branch::Memory,
         (systemd_unit_v2::PROFILE_ID, "2") => Branch::SystemdUnit,
+        (systemd_unit_v3::PROFILE_ID, "3") => Branch::SystemdUnitBoot,
         _ => {
             return Err(Box::new(refusal(
                 request,
                 RefusalBoundary::Profile,
                 RefusalCode::UnknownProfile,
-                "this helper implements only nq.host_filesystem_capacity/v1, nq.host_filesystem_inodes/v1, nq.host_memory/v1, and nq.systemd_unit/v2",
+                "this helper implements only nq.host_filesystem_capacity/v1, nq.host_filesystem_inodes/v1, nq.host_memory/v1, and nq.systemd_unit/v2 or v3",
                 false,
                 json!({
                     "requested_id": request.profile.id,
@@ -583,6 +603,10 @@ pub struct StatfsCut {
 /// Read-only system access, abstracted so the classification logic is testable.
 #[allow(clippy::missing_errors_doc)]
 pub trait ResourceSource {
+    /// Bounded Linux boot UUID read for v3 acquisition; v2 does not call it.
+    fn boot_id(&self) -> Result<String, String> {
+        Err("boot identity unavailable".into())
+    }
     /// Contents of `/etc/machine-id`, trimmed. Errors are read failures.
     fn machine_id(&self) -> Result<String, String>;
     /// Contents of `/proc/self/mountinfo`. Errors are read failures.
@@ -792,10 +816,18 @@ fn validate_systemd_binding_request(
             json!({}),
         )));
     }
-    let scope = systemd_unit_v2::validate_scope_value(
-        &request.binding.scope.value,
-        request.binding.subject.as_str(),
-    )
+    let scope = if request.profile.version.as_str() == "3" {
+        systemd_unit_v3::validate_scope_value(
+            &request.binding.scope.value,
+            request.binding.subject.as_str(),
+        )
+        .map(|scope| scope.manager_scope())
+    } else {
+        systemd_unit_v2::validate_scope_value(
+            &request.binding.scope.value,
+            request.binding.subject.as_str(),
+        )
+    }
     .map_err(|message| {
         Box::new(refusal(
             request,
@@ -825,6 +857,7 @@ fn complete_systemd_report(
     request: &HelperRequest,
     scope: &systemd_unit_v2::SystemdUnitScope,
     observation: &SystemdUnitObservation,
+    boot_id: Option<&str>,
 ) -> Result<EvidenceReport, String> {
     let observed_at = Utc::now();
     let basis = EvidenceBasis {
@@ -852,7 +885,10 @@ fn complete_systemd_report(
         active_state: observation.active_state.clone(),
         sub_state: observation.sub_state.clone(),
     };
-    let payload = serde_json::to_value(payload).map_err(|error| error.to_string())?;
+    let mut payload = serde_json::to_value(payload).map_err(|error| error.to_string())?;
+    if let Some(boot_id) = boot_id {
+        payload["boot_id"] = json!(boot_id);
+    }
     let mut builder = EvidenceReport::builder(
         request.profile.clone(),
         request.binding.clone(),
@@ -876,6 +912,51 @@ fn complete_systemd_report(
         builder = builder.used_capability(token(Capability::new(capability))?);
     }
     builder.build().map_err(|error| format!("{error:?}"))
+}
+
+/// Acquire the manager cut only between two equal canonical boot reads.
+/// # Errors
+/// Preserves typed manager failures and refuses unavailable, malformed or
+/// changed boot identity. A valid result names acquisition, not live reliance.
+pub fn observe_boot_bound_systemd_unit(
+    scope: &systemd_unit_v2::SystemdUnitScope,
+    source: &impl ResourceSource,
+    budget: std::time::Duration,
+) -> Result<
+    (SystemdUnitObservation, String),
+    CollectionFailure<systemd_unit_v3::SystemdUnitFailureCode>,
+> {
+    use systemd_unit_v3::SystemdUnitFailureCode as Code;
+    let read = || {
+        let boot = source.boot_id().map_err(|message| {
+            CollectionFailure::owner(Code::BootIdentityUnavailable, message, true)
+        })?;
+        if !systemd_unit_v3::valid_boot_id(&boot) {
+            return Err(CollectionFailure::owner(
+                Code::BootIdentityMalformed,
+                "boot identity is not a canonical nonzero UUID",
+                false,
+            ));
+        }
+        Ok(boot)
+    };
+    let before = read()?;
+    let observation = observe_systemd_unit(scope, source, budget).map_err(|failure| {
+        CollectionFailure::owner(
+            Code::Manager(failure.code()),
+            failure.message(),
+            failure.retriable(),
+        )
+    })?;
+    let after = read()?;
+    if before != after {
+        return Err(CollectionFailure::owner(
+            Code::BootIdentityChanged,
+            "boot identity changed across the manager cut",
+            true,
+        ));
+    }
+    Ok((observation, before))
 }
 
 /// Validated observation ready for the payload.
@@ -1327,6 +1408,11 @@ fn read_bounded(path: &str, max_bytes: usize) -> Result<String, String> {
 }
 
 impl ResourceSource for LinuxSource {
+    fn boot_id(&self) -> Result<String, String> {
+        Ok(read_bounded("/proc/sys/kernel/random/boot_id", 37)?
+            .trim_end_matches('\n')
+            .to_owned())
+    }
     fn machine_id(&self) -> Result<String, String> {
         Ok(read_bounded(MACHINE_ID_PATH, 256)?.trim().to_owned())
     }

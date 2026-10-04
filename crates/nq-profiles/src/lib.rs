@@ -33,6 +33,8 @@ pub mod synthetic_cache_executor_result;
 pub mod systemd_unit;
 /// `nq.systemd_unit/v2`: required unit active state on the local system manager.
 pub mod systemd_unit_v2;
+/// Boot-bound systemd unit testimony, with stable logical enrollment.
+pub mod systemd_unit_v3;
 
 pub use descriptor::{
     CardinalityLimits, DescriptorError, FreshnessPolicy, PROFILE_DESCRIPTOR_SCHEMA,

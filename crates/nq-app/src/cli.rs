@@ -180,6 +180,11 @@ pub enum Command {
         #[command(subcommand)]
         command: EvaluationsCommand,
     },
+    /// Inspect an exact admitted observation using its detector evidence reference.
+    Observations {
+        #[command(subcommand)]
+        command: ObservationsCommand,
+    },
     /// Export rejected custody with its exact linked typed refusal.
     Refusals {
         /// Refusal-history workflow.
@@ -410,6 +415,15 @@ pub enum FindingsCommand {
 pub enum StatusCommand {
     /// Export `nq.status_snapshot.v3`.
     Export,
+}
+
+/// Query-only exact admitted-observation custody.
+#[derive(Debug, Subcommand)]
+pub enum ObservationsCommand {
+    Export {
+        #[arg(long)]
+        reference: PathBuf,
+    },
 }
 
 /// Governed evaluation-history commands.
@@ -668,6 +682,7 @@ pub async fn run(options: Nq) -> Result<()> {
         Command::Findings { command } => findings_command(&options.config, &command),
         Command::Status { command } => status_command(&options.config, &command),
         Command::Evaluations { command } => evaluations_command(&options.config, &command),
+        Command::Observations { command } => observations_command(&options.config, &command),
         Command::Refusals { command } => refusals_command(&options.config, &command),
         Command::Notification { command } => {
             notification_command(&options.config, command, options.json).await
@@ -2912,6 +2927,20 @@ fn status_command(config_path: &Path, command: &StatusCommand) -> Result<()> {
     match command {
         StatusCommand::Export => print_value(&status_snapshot_if_supported(&store)?, true),
     }
+}
+
+fn observations_command(config_path: &Path, command: &ObservationsCommand) -> Result<()> {
+    let ObservationsCommand::Export { reference } = command;
+    let bytes = crate::bounded_input::read(reference, 65_536)?;
+    let document = nq_protocol::decode_json_document(&bytes, 65_536)?;
+    let evidence: nq_core::observation_export::ObservationReferenceV1 =
+        serde_json::from_value(document)?;
+    let config = NqConfig::load(config_path)?;
+    let store = Store::open_read_only(&config.database_path)?;
+    print_value(
+        &nq_core::observation_export::export_admitted_observation(&store, &evidence.into())?,
+        true,
+    )
 }
 
 fn evaluations_command(config_path: &Path, command: &EvaluationsCommand) -> Result<()> {

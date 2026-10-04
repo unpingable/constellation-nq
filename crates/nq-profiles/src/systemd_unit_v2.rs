@@ -628,7 +628,7 @@ impl Detector for RequiredActiveDetector {
     }
 }
 
-fn newest_current_report<'a>(
+pub(crate) fn newest_current_report<'a>(
     input: &DetectorInput<'a>,
     descriptor: &DetectorDescriptor,
 ) -> Result<&'a DetectorReport, Box<DetectorResult>> {
@@ -675,9 +675,12 @@ fn newest_current_report<'a>(
         // carries exactly one collection error and that code is in this
         // module's closed list; NQ copies it and interprets nothing.
         if let Some(failure) = admitted.single_failure_error()
-            && let Some(code) = SystemdUnitFailureCode::parse(&failure.code)
+            && (SystemdUnitFailureCode::parse(&failure.code).is_some()
+                || (descriptor.profile.version == crate::systemd_unit_v3::PROFILE_VERSION
+                    && crate::systemd_unit_v3::SystemdUnitFailureCode::tokens()
+                        .contains(&failure.code.as_str())))
         {
-            details.insert("failure_code".to_owned(), code.as_str().to_owned());
+            details.insert("failure_code".to_owned(), failure.code.clone());
             details.insert(
                 "failure_retriable".to_owned(),
                 failure.retriable.to_string(),

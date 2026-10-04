@@ -147,6 +147,71 @@ max_file_bytes = 67108864
     assert_eq!(collected["result"]["report_status"], "complete");
     assert_eq!(collected["result"]["evaluations"], serde_json::json!([]));
 
+    // Query-only export joins the exact five-field evidence reference to
+    // verified admission custody, with no second helper invocation.
+    let store = nq_store::Store::open_read_only(&database).expect("read-only custody");
+    let source = store
+        .admitted_collection_for_run(collected["run_id"].as_str().expect("run id"))
+        .expect("source query")
+        .expect("admitted report");
+    let report: nq_protocol::EvidenceReport =
+        serde_json::from_slice(&source.canonical_json).expect("native report");
+    let observation = report.observations.first().expect("source observation");
+    let exact = serde_json::json!({"report_id":source.report_id,"report_sequence":source.report_sequence,"report_digest":source.semantic_digest,"observation_ordinal":observation.ordinal,"observed_at":observation.observed_at});
+    drop(store);
+    let reference = root.join("evidence-reference.json");
+    fs::write(&reference, serde_json::to_vec(&exact).unwrap()).unwrap();
+    let reference_path = reference.to_str().unwrap();
+    let exported = success(run(
+        nq,
+        &config_path,
+        &["observations", "export", "--reference", reference_path],
+    ));
+    assert_eq!(exported["schema"], "nq.admitted-observation-export/v1");
+    assert_eq!(exported["evidence"], exact);
+    assert_eq!(
+        exported["observation"],
+        serde_json::to_value(observation).unwrap()
+    );
+    assert_eq!(exported["standing"], "historical_custody_only");
+    for (field, changed) in [
+        ("report_id", serde_json::json!("absent")),
+        ("report_sequence", serde_json::json!(999)),
+        (
+            "report_digest",
+            serde_json::json!(format!("sha256:{}", "0".repeat(64))),
+        ),
+        ("observation_ordinal", serde_json::json!(999)),
+        ("observed_at", serde_json::json!("2000-01-01T00:00:00Z")),
+    ] {
+        let mut substituted = exact.clone();
+        substituted[field] = changed;
+        fs::write(&reference, serde_json::to_vec(&substituted).unwrap()).unwrap();
+        assert!(
+            !run(
+                nq,
+                &config_path,
+                &["observations", "export", "--reference", reference_path]
+            )
+            .status
+            .success(),
+            "{field} substitution must refuse"
+        );
+    }
+    let mut extra = exact.clone();
+    extra["current"] = serde_json::json!(true);
+    fs::write(&reference, serde_json::to_vec(&extra).unwrap()).unwrap();
+    assert!(
+        !run(
+            nq,
+            &config_path,
+            &["observations", "export", "--reference", reference_path]
+        )
+        .status
+        .success()
+    );
+    fs::write(&reference, serde_json::to_vec(&exact).unwrap()).unwrap();
+
     let findings = success(run(nq, &config_path, &["findings", "export"]));
     assert_eq!(findings, serde_json::json!([]));
 
@@ -185,6 +250,14 @@ max_file_bytes = 67108864
     ));
     assert_eq!(revoked["outcome"], "revoked");
     assert!(!admissions.join("conformance.primary.json").exists());
+    assert_eq!(
+        success(run(
+            nq,
+            &config_path,
+            &["observations", "export", "--reference", reference_path]
+        )),
+        exported
+    );
     let retained = revoked["retained_lock"]
         .as_str()
         .expect("retained lock path")

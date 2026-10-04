@@ -15,7 +15,7 @@ use nq_profiles::{
 fn the_helper_publishes_exactly_the_owner_vocabularies() {
     let vocabularies = failure_code_vocabularies();
     let entries = vocabularies.as_array().expect("array");
-    assert_eq!(entries.len(), 4);
+    assert_eq!(entries.len(), 5);
     for (entry, module, expected) in [
         (
             &entries[0],

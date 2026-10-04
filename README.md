@@ -4,6 +4,10 @@ NQ collects and checks bounded evidence for a specific question. It records what
 was admitted, what was refused, and the diagnostic conclusion its profile can
 support. It does not authorize or execute the work that might follow.
 
+The current-forward source lane adds [boot-bound systemd observation and exact
+query-only observation reads](docs/SYSTEMD_UNIT_BOOT_BOUND_V3.md). These interfaces
+preserve historical custody separately from consumer currentness and authority.
+
 **NQ 0.2.0** is a component package for Debian 12 amd64: NQ alone, not an
 installable Constellation suite. See [the 0.2.0 release notes and known
 limitations](docs/PUBLIC_RELEASE.md#nq-020-component-package); the main one is
