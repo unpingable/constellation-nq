@@ -45,16 +45,31 @@ Unknown fields and duplicate JSON keys refuse; the reference file is bounded to
 64 KiB. The ordinal is required, so a report-only claim cannot silently become an
 observation. The command opens the ordinary store read-only and verifies the
 recorded admission snapshot, canonical source report, digest, sequence, ordinal,
-and observation time before returning native bytes. The response is bounded to
+and the declared exact observation time relation before returning native bytes.
+The response is bounded to
 1 MiB. Missing, substituted, unbound, noncanonical, or oversized evidence refuses.
 
 `nq.admitted-observation-export/v1` returns these fields:
 
-- `schema`, `evidence`, `instance_id`, and historical `received_at`;
+- `schema`, exact supplied `evidence`, `reference_time_basis`, `instance_id`, and
+  historical `received_at`;
 - native protocol `profile` (version is a string), `binding`, `report_observed_at`,
   `report_status`, `backend`, and `used_capabilities`;
 - the exact native `observation` including boot identity and raw manager states;
 - `standing: "historical_custody_only"`.
+
+Timestamp precision has two **named exact forms**, not a tolerance interval.
+`native_observation_time` means the supplied reference equals the full native
+observation DateTime. `evaluation_millisecond_projection` means it equals
+exactly the millisecond projection already sealed by the ordinary frozen
+evaluation carrier in `engine.rs::prepare_evaluations`. Equal forms choose the
+native label. The existing index must equal the canonical millisecond string
+of the native source observation. The response retains the full native timestamp
+and the exact supplied reference unchanged. A different fractional value in
+the same millisecond refuses; consumers validate the named relation explicitly.
+This accommodates the current named evaluation consumer without mutating its
+frozen carrier or discarding native source precision. It does not invent a new
+freshness allowance.
 
 Export is custody, not currentness. It does not invoke a helper, collect,
 reevaluate, refresh a timestamp, grant effects, require a still-admitted watcher,
@@ -71,7 +86,9 @@ The normative cross-component fixture is
 [`observation-export-vectors.v1.json`](../operational-contract/fixtures/systemd-unit-v3/observation-export-vectors.v1.json).
 It contains the descriptor, native canonical-digest report, exact export shape,
 and consumer cases for current state, old boot, expiry, altered subject/profile/
-reference, malformed boot, and future evidence. NQ tests the positive native
+reference, malformed boot, future evidence, and sub-millisecond reference forms.
+The fractional cases retain native source reports and cover exact native,
+exact evaluation projection, changed fraction, and substituted time-basis label. NQ tests the positive native
 report and descriptor; Monitor owns reliance outcomes and consumes the same
 fixture bytes. Negative cases are deliberate substitutions, not valid admission
 claims. Fixture backend version is an assertion of the fixture, not proof of a
@@ -102,3 +119,17 @@ reimplemented. No claim of atomic manager state across arbitrary reboot,
 filesystem snapshot linearizability, generic health, or proof of effect causation
 is made. A bounded consumer-currentness transition model is a useful future
 formalization, owned with the component that grants present reliance.
+
+The first black-box observation export exposed the index/native precision seam:
+the admission index stores canonical milliseconds while the native helper report
+retains nanoseconds. The current evaluation producer deliberately projects its
+reference timestamp to milliseconds (`engine.rs` preparation), and the current
+history validator matches that projection. This is a named lossy transformation,
+not an evaluator-history defect. Its scope is one timestamp coordinate; source
+digest, sequence, ordinal, and report identity remain exact. Formalization
+consideration: the permitted relation is `r = t` or `r = millis(t)`, with the
+export declaring which relation holds and preserving `t`. Practical shared
+vectors plus actual black-box export establish this finite boundary; no claim
+of lossless inversion from `millis(t)` is made. A fractional substitution distinct
+from both forms is the retained negative control. Failed producer evidence and
+successor checks remain separate immutable campaign receipts.

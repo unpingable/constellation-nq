@@ -1,7 +1,7 @@
 //! Query-only exact admitted-observation custody. This does not collect,
 //! reevaluate, refresh evidence, or grant present reliance or effect authority.
 use crate::engine::EngineError;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use nq_profiles::{DetectorEvidence, ValidatedReport};
 use nq_protocol::{EvidenceReport, Observation};
 use nq_store::{CanonicalDocument, Store};
@@ -39,6 +39,33 @@ impl From<ObservationReferenceV1> for DetectorEvidence {
     }
 }
 
+/// Named exact timestamp form used by an observation reference.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceTimeBasis {
+    /// Exact native protocol observation timestamp.
+    NativeObservationTime,
+    /// Exact millisecond projection sealed by the existing evaluation carrier.
+    EvaluationMillisecondProjection,
+}
+
+fn reference_time_basis(
+    native: DateTime<Utc>,
+    reference: DateTime<Utc>,
+) -> Option<ReferenceTimeBasis> {
+    if native == reference {
+        Some(ReferenceTimeBasis::NativeObservationTime)
+    } else if DateTime::parse_from_rfc3339(&native.to_rfc3339_opts(SecondsFormat::Millis, true))
+        .ok()
+        .map(|at| at.with_timezone(&Utc))
+        == Some(reference)
+    {
+        Some(ReferenceTimeBasis::EvaluationMillisecondProjection)
+    } else {
+        None
+    }
+}
+
 /// Authenticated historical custody of one exact native observation.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +74,8 @@ pub struct AdmittedObservationExportV1 {
     pub schema: String,
     /// Joined detector evidence coordinates.
     pub evidence: DetectorEvidence,
+    /// Named exact relation between supplied reference and native observation time.
+    pub reference_time_basis: ReferenceTimeBasis,
     /// Original admitted watcher instance identity.
     pub instance_id: String,
     /// Historical admission receipt time, never export time.
@@ -127,15 +156,24 @@ pub fn export_admitted_observation(
         .find(|observation| observation.ordinal == ordinal)
         .ok_or_else(|| invalid("observation unavailable"))?
         .clone();
-    if observation.observed_at != evidence.observed_at
-        || row
-            .observation_observed_at
-            .as_deref()
-            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
-            .map(|at| at.with_timezone(&Utc))
-            != Some(evidence.observed_at)
+    let reference_time_basis = reference_time_basis(observation.observed_at, evidence.observed_at)
+        .ok_or_else(|| {
+            invalid(
+                "observation reference time is neither native nor its exact evaluation projection",
+            )
+        })?;
+    // The existing admission index deliberately stores the engine's canonical
+    // millisecond projection. Native bytes and the supplied reference remain
+    // unrounded in this export; arbitrary within-millisecond changes refuse.
+    if row.observation_observed_at.as_deref()
+        != Some(
+            observation
+                .observed_at
+                .to_rfc3339_opts(SecondsFormat::Millis, true)
+                .as_str(),
+        )
     {
-        return Err(invalid("observation time mismatch"));
+        return Err(invalid("observation index time projection mismatch"));
     }
     let received_at = DateTime::parse_from_rfc3339(&row.received_at)
         .map_err(|error| invalid(&error.to_string()))?
@@ -143,6 +181,7 @@ pub fn export_admitted_observation(
     let exported = AdmittedObservationExportV1 {
         schema: SCHEMA.into(),
         evidence: evidence.clone(),
+        reference_time_basis,
         instance_id: row.instance_id,
         received_at,
         profile: report.profile,
@@ -199,5 +238,46 @@ mod tests {
         let mut extra = vectors["cases"][0]["reference"].clone();
         extra["current"] = true.into();
         assert!(serde_json::from_value::<ObservationReferenceV1>(extra).is_err());
+    }
+}
+
+#[cfg(test)]
+mod precision_tests {
+    use super::*;
+    #[test]
+    fn shared_fractional_vectors_preserve_exact_native_or_declared_projection_only() {
+        let vectors: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../operational-contract/fixtures/systemd-unit-v3/observation-export-vectors.v1.json"
+        )).unwrap();
+        for case in vectors["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|case| case["name"].as_str().unwrap().starts_with("nanos_"))
+        {
+            let response: AdmittedObservationExportV1 =
+                serde_json::from_value(case["response"].clone()).unwrap();
+            let report: EvidenceReport =
+                serde_json::from_value(case["source_report"].clone()).unwrap();
+            assert_eq!(
+                nq_protocol::semantic_digest(&report).unwrap().as_str(),
+                response.evidence.report_digest
+            );
+            let actual = reference_time_basis(
+                response.observation.observed_at,
+                response.evidence.observed_at,
+            );
+            let valid = actual == Some(response.reference_time_basis);
+            assert_eq!(
+                valid,
+                case["expected_reliance"] == "current",
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                response.observation.observed_at,
+                report.observations[0].observed_at
+            );
+        }
     }
 }

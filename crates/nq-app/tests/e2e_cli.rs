@@ -158,6 +158,21 @@ max_file_bytes = 67108864
         serde_json::from_slice(&source.canonical_json).expect("native report");
     let observation = report.observations.first().expect("source observation");
     let exact = serde_json::json!({"report_id":source.report_id,"report_sequence":source.report_sequence,"report_digest":source.semantic_digest,"observation_ordinal":observation.ordinal,"observed_at":observation.observed_at});
+    let index = store
+        .admitted_evidence_reference(
+            &source.report_id,
+            &source.semantic_digest,
+            Some(observation.ordinal),
+        )
+        .unwrap()
+        .unwrap();
+    let indexed_at = observation
+        .observed_at
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    assert_eq!(
+        index.observation_observed_at.as_deref(),
+        Some(indexed_at.as_str())
+    );
     drop(store);
     let reference = root.join("evidence-reference.json");
     fs::write(&reference, serde_json::to_vec(&exact).unwrap()).unwrap();
@@ -174,7 +189,38 @@ max_file_bytes = 67108864
         serde_json::to_value(observation).unwrap()
     );
     assert_eq!(exported["standing"], "historical_custody_only");
+    assert_eq!(exported["reference_time_basis"], "native_observation_time");
+    let projected_at = chrono::DateTime::parse_from_rfc3339(&indexed_at)
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let mut indexed_reference = exact.clone();
+    indexed_reference["observed_at"] = serde_json::json!(projected_at);
+    fs::write(&reference, serde_json::to_vec(&indexed_reference).unwrap()).unwrap();
+    let projected = success(run(
+        nq,
+        &config_path,
+        &["observations", "export", "--reference", reference_path],
+    ));
+    assert_eq!(projected["evidence"], indexed_reference);
+    assert_eq!(projected["observation"], exported["observation"]);
+    assert_eq!(
+        projected["reference_time_basis"],
+        if projected_at == observation.observed_at {
+            "native_observation_time"
+        } else {
+            "evaluation_millisecond_projection"
+        }
+    );
+    let mut changed_fraction = projected_at + chrono::Duration::nanoseconds(2);
+    if changed_fraction == observation.observed_at {
+        changed_fraction += chrono::Duration::nanoseconds(1);
+    }
+    assert_eq!(
+        changed_fraction.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        indexed_at
+    );
     for (field, changed) in [
+        ("observed_at", serde_json::json!(changed_fraction)),
         ("report_id", serde_json::json!("absent")),
         ("report_sequence", serde_json::json!(999)),
         (

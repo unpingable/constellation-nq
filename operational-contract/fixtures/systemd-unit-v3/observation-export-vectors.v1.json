@@ -232,7 +232,8 @@
         "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
       }
     },
-    "standing": "historical_custody_only"
+    "standing": "historical_custody_only",
+    "reference_time_basis": "native_observation_time"
   },
   "cases": [
     {
@@ -321,7 +322,8 @@
             "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
           }
         },
-        "standing": "historical_custody_only"
+        "standing": "historical_custody_only",
+        "reference_time_basis": "native_observation_time"
       },
       "consumer": {
         "current_boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c",
@@ -415,7 +417,8 @@
             "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
           }
         },
-        "standing": "historical_custody_only"
+        "standing": "historical_custody_only",
+        "reference_time_basis": "native_observation_time"
       },
       "consumer": {
         "current_boot_id": "313a2679-0aa3-4a1b-9122-0caa5756e006",
@@ -509,7 +512,8 @@
             "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
           }
         },
-        "standing": "historical_custody_only"
+        "standing": "historical_custody_only",
+        "reference_time_basis": "native_observation_time"
       },
       "consumer": {
         "current_boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c",
@@ -603,7 +607,8 @@
             "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
           }
         },
-        "standing": "historical_custody_only"
+        "standing": "historical_custody_only",
+        "reference_time_basis": "native_observation_time"
       },
       "consumer": {
         "current_boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c",
@@ -697,7 +702,8 @@
             "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
           }
         },
-        "standing": "historical_custody_only"
+        "standing": "historical_custody_only",
+        "reference_time_basis": "native_observation_time"
       },
       "consumer": {
         "current_boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c",
@@ -791,7 +797,8 @@
             "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
           }
         },
-        "standing": "historical_custody_only"
+        "standing": "historical_custody_only",
+        "reference_time_basis": "native_observation_time"
       },
       "consumer": {
         "current_boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c",
@@ -885,7 +892,8 @@
             "boot_id": "invented"
           }
         },
-        "standing": "historical_custody_only"
+        "standing": "historical_custody_only",
+        "reference_time_basis": "native_observation_time"
       },
       "consumer": {
         "current_boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c",
@@ -979,13 +987,706 @@
             "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
           }
         },
-        "standing": "historical_custody_only"
+        "standing": "historical_custody_only",
+        "reference_time_basis": "native_observation_time"
       },
       "consumer": {
         "current_boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c",
         "resolution_at": "2026-10-04T11:59:59Z"
       },
       "expected_reliance": "refused"
+    },
+    {
+      "name": "nanos_native_reference",
+      "reference": {
+        "report_id": "report:systemd-v3-golden",
+        "report_sequence": 7,
+        "report_digest": "sha256:1050ecbf704eae70782ea6e157d2ffeb3cb252dd46ec607d6f1a8f7fd1d7227f",
+        "observation_ordinal": 0,
+        "observed_at": "2026-10-04T12:00:00.123456789Z"
+      },
+      "response": {
+        "schema": "nq.admitted-observation-export/v1",
+        "evidence": {
+          "report_id": "report:systemd-v3-golden",
+          "report_sequence": 7,
+          "report_digest": "sha256:1050ecbf704eae70782ea6e157d2ffeb3cb252dd46ec607d6f1a8f7fd1d7227f",
+          "observation_ordinal": 0,
+          "observed_at": "2026-10-04T12:00:00.123456789Z"
+        },
+        "instance_id": "systemd-v3-golden",
+        "received_at": "2026-10-04T12:00:00.123456789Z",
+        "profile": {
+          "id": "nq.systemd_unit",
+          "version": "3",
+          "digest": "sha256:25fbbdd320248701b79b3e5f6c3109667b6aa9388ed113678ee0e6ba3c04a853"
+        },
+        "binding": {
+          "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+          "scope": {
+            "kind": "systemd_unit",
+            "value": {
+              "schema": "nq.systemd_unit_scope.v3",
+              "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+              "unit_name": "constellation-beta-http-fixture.service"
+            }
+          },
+          "vantage": {
+            "kind": "local",
+            "value": {}
+          }
+        },
+        "report_observed_at": "2026-10-04T12:00:00.123456789Z",
+        "report_status": "complete",
+        "backend": {
+          "implementation": {
+            "name": "nq-host-resource-helper",
+            "version": "0.1.0"
+          },
+          "tools": []
+        },
+        "used_capabilities": [
+          "read_systemd_unit"
+        ],
+        "observation": {
+          "ordinal": 0,
+          "kind": "systemd_unit_state_snapshot",
+          "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+          "observed_at": "2026-10-04T12:00:00.123456789Z",
+          "payload": {
+            "evidence_basis": {
+              "scope": {
+                "kind": "systemd_unit",
+                "value": {
+                  "schema": "nq.systemd_unit_scope.v3",
+                  "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+                  "unit_name": "constellation-beta-http-fixture.service"
+                }
+              },
+              "vantage": {
+                "kind": "local",
+                "value": {}
+              },
+              "access_path": "systemd_dbus",
+              "basis": "manager_snapshot",
+              "regime": "normal",
+              "capabilities_used": [
+                "read_systemd_unit"
+              ]
+            },
+            "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+            "unit_name": "constellation-beta-http-fixture.service",
+            "load_state": "loaded",
+            "active_state": "inactive",
+            "sub_state": "dead",
+            "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
+          }
+        },
+        "standing": "historical_custody_only",
+        "reference_time_basis": "native_observation_time"
+      },
+      "consumer": {
+        "current_boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c",
+        "resolution_at": "2026-10-04T12:00:01Z"
+      },
+      "expected_reliance": "current",
+      "source_report": {
+        "schema": "nq.evidence_report.v1",
+        "profile": {
+          "id": "nq.systemd_unit",
+          "version": "3",
+          "digest": "sha256:25fbbdd320248701b79b3e5f6c3109667b6aa9388ed113678ee0e6ba3c04a853"
+        },
+        "binding": {
+          "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+          "scope": {
+            "kind": "systemd_unit",
+            "value": {
+              "schema": "nq.systemd_unit_scope.v3",
+              "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+              "unit_name": "constellation-beta-http-fixture.service"
+            }
+          },
+          "vantage": {
+            "kind": "local",
+            "value": {}
+          }
+        },
+        "observed_at": "2026-10-04T12:00:00.123456789Z",
+        "status": "complete",
+        "coverage": [
+          {
+            "kind": "systemd_unit_state",
+            "state": "complete"
+          }
+        ],
+        "observations": [
+          {
+            "ordinal": 0,
+            "kind": "systemd_unit_state_snapshot",
+            "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+            "observed_at": "2026-10-04T12:00:00.123456789Z",
+            "payload": {
+              "evidence_basis": {
+                "scope": {
+                  "kind": "systemd_unit",
+                  "value": {
+                    "schema": "nq.systemd_unit_scope.v3",
+                    "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+                    "unit_name": "constellation-beta-http-fixture.service"
+                  }
+                },
+                "vantage": {
+                  "kind": "local",
+                  "value": {}
+                },
+                "access_path": "systemd_dbus",
+                "basis": "manager_snapshot",
+                "regime": "normal",
+                "capabilities_used": [
+                  "read_systemd_unit"
+                ]
+              },
+              "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+              "unit_name": "constellation-beta-http-fixture.service",
+              "load_state": "loaded",
+              "active_state": "inactive",
+              "sub_state": "dead",
+              "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
+            }
+          }
+        ],
+        "errors": [],
+        "used_capabilities": [
+          "read_systemd_unit"
+        ],
+        "backend": {
+          "implementation": {
+            "name": "nq-host-resource-helper",
+            "version": "0.1.0"
+          },
+          "tools": []
+        }
+      }
+    },
+    {
+      "name": "nanos_evaluation_millisecond_reference",
+      "reference": {
+        "report_id": "report:systemd-v3-golden",
+        "report_sequence": 7,
+        "report_digest": "sha256:1050ecbf704eae70782ea6e157d2ffeb3cb252dd46ec607d6f1a8f7fd1d7227f",
+        "observation_ordinal": 0,
+        "observed_at": "2026-10-04T12:00:00.123Z"
+      },
+      "response": {
+        "schema": "nq.admitted-observation-export/v1",
+        "evidence": {
+          "report_id": "report:systemd-v3-golden",
+          "report_sequence": 7,
+          "report_digest": "sha256:1050ecbf704eae70782ea6e157d2ffeb3cb252dd46ec607d6f1a8f7fd1d7227f",
+          "observation_ordinal": 0,
+          "observed_at": "2026-10-04T12:00:00.123Z"
+        },
+        "instance_id": "systemd-v3-golden",
+        "received_at": "2026-10-04T12:00:00.123456789Z",
+        "profile": {
+          "id": "nq.systemd_unit",
+          "version": "3",
+          "digest": "sha256:25fbbdd320248701b79b3e5f6c3109667b6aa9388ed113678ee0e6ba3c04a853"
+        },
+        "binding": {
+          "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+          "scope": {
+            "kind": "systemd_unit",
+            "value": {
+              "schema": "nq.systemd_unit_scope.v3",
+              "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+              "unit_name": "constellation-beta-http-fixture.service"
+            }
+          },
+          "vantage": {
+            "kind": "local",
+            "value": {}
+          }
+        },
+        "report_observed_at": "2026-10-04T12:00:00.123456789Z",
+        "report_status": "complete",
+        "backend": {
+          "implementation": {
+            "name": "nq-host-resource-helper",
+            "version": "0.1.0"
+          },
+          "tools": []
+        },
+        "used_capabilities": [
+          "read_systemd_unit"
+        ],
+        "observation": {
+          "ordinal": 0,
+          "kind": "systemd_unit_state_snapshot",
+          "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+          "observed_at": "2026-10-04T12:00:00.123456789Z",
+          "payload": {
+            "evidence_basis": {
+              "scope": {
+                "kind": "systemd_unit",
+                "value": {
+                  "schema": "nq.systemd_unit_scope.v3",
+                  "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+                  "unit_name": "constellation-beta-http-fixture.service"
+                }
+              },
+              "vantage": {
+                "kind": "local",
+                "value": {}
+              },
+              "access_path": "systemd_dbus",
+              "basis": "manager_snapshot",
+              "regime": "normal",
+              "capabilities_used": [
+                "read_systemd_unit"
+              ]
+            },
+            "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+            "unit_name": "constellation-beta-http-fixture.service",
+            "load_state": "loaded",
+            "active_state": "inactive",
+            "sub_state": "dead",
+            "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
+          }
+        },
+        "standing": "historical_custody_only",
+        "reference_time_basis": "evaluation_millisecond_projection"
+      },
+      "consumer": {
+        "current_boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c",
+        "resolution_at": "2026-10-04T12:00:01Z"
+      },
+      "expected_reliance": "current",
+      "source_report": {
+        "schema": "nq.evidence_report.v1",
+        "profile": {
+          "id": "nq.systemd_unit",
+          "version": "3",
+          "digest": "sha256:25fbbdd320248701b79b3e5f6c3109667b6aa9388ed113678ee0e6ba3c04a853"
+        },
+        "binding": {
+          "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+          "scope": {
+            "kind": "systemd_unit",
+            "value": {
+              "schema": "nq.systemd_unit_scope.v3",
+              "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+              "unit_name": "constellation-beta-http-fixture.service"
+            }
+          },
+          "vantage": {
+            "kind": "local",
+            "value": {}
+          }
+        },
+        "observed_at": "2026-10-04T12:00:00.123456789Z",
+        "status": "complete",
+        "coverage": [
+          {
+            "kind": "systemd_unit_state",
+            "state": "complete"
+          }
+        ],
+        "observations": [
+          {
+            "ordinal": 0,
+            "kind": "systemd_unit_state_snapshot",
+            "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+            "observed_at": "2026-10-04T12:00:00.123456789Z",
+            "payload": {
+              "evidence_basis": {
+                "scope": {
+                  "kind": "systemd_unit",
+                  "value": {
+                    "schema": "nq.systemd_unit_scope.v3",
+                    "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+                    "unit_name": "constellation-beta-http-fixture.service"
+                  }
+                },
+                "vantage": {
+                  "kind": "local",
+                  "value": {}
+                },
+                "access_path": "systemd_dbus",
+                "basis": "manager_snapshot",
+                "regime": "normal",
+                "capabilities_used": [
+                  "read_systemd_unit"
+                ]
+              },
+              "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+              "unit_name": "constellation-beta-http-fixture.service",
+              "load_state": "loaded",
+              "active_state": "inactive",
+              "sub_state": "dead",
+              "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
+            }
+          }
+        ],
+        "errors": [],
+        "used_capabilities": [
+          "read_systemd_unit"
+        ],
+        "backend": {
+          "implementation": {
+            "name": "nq-host-resource-helper",
+            "version": "0.1.0"
+          },
+          "tools": []
+        }
+      }
+    },
+    {
+      "name": "nanos_substituted_fraction",
+      "reference": {
+        "report_id": "report:systemd-v3-golden",
+        "report_sequence": 7,
+        "report_digest": "sha256:1050ecbf704eae70782ea6e157d2ffeb3cb252dd46ec607d6f1a8f7fd1d7227f",
+        "observation_ordinal": 0,
+        "observed_at": "2026-10-04T12:00:00.123456790Z"
+      },
+      "response": {
+        "schema": "nq.admitted-observation-export/v1",
+        "evidence": {
+          "report_id": "report:systemd-v3-golden",
+          "report_sequence": 7,
+          "report_digest": "sha256:1050ecbf704eae70782ea6e157d2ffeb3cb252dd46ec607d6f1a8f7fd1d7227f",
+          "observation_ordinal": 0,
+          "observed_at": "2026-10-04T12:00:00.123456790Z"
+        },
+        "instance_id": "systemd-v3-golden",
+        "received_at": "2026-10-04T12:00:00.123456789Z",
+        "profile": {
+          "id": "nq.systemd_unit",
+          "version": "3",
+          "digest": "sha256:25fbbdd320248701b79b3e5f6c3109667b6aa9388ed113678ee0e6ba3c04a853"
+        },
+        "binding": {
+          "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+          "scope": {
+            "kind": "systemd_unit",
+            "value": {
+              "schema": "nq.systemd_unit_scope.v3",
+              "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+              "unit_name": "constellation-beta-http-fixture.service"
+            }
+          },
+          "vantage": {
+            "kind": "local",
+            "value": {}
+          }
+        },
+        "report_observed_at": "2026-10-04T12:00:00.123456789Z",
+        "report_status": "complete",
+        "backend": {
+          "implementation": {
+            "name": "nq-host-resource-helper",
+            "version": "0.1.0"
+          },
+          "tools": []
+        },
+        "used_capabilities": [
+          "read_systemd_unit"
+        ],
+        "observation": {
+          "ordinal": 0,
+          "kind": "systemd_unit_state_snapshot",
+          "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+          "observed_at": "2026-10-04T12:00:00.123456789Z",
+          "payload": {
+            "evidence_basis": {
+              "scope": {
+                "kind": "systemd_unit",
+                "value": {
+                  "schema": "nq.systemd_unit_scope.v3",
+                  "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+                  "unit_name": "constellation-beta-http-fixture.service"
+                }
+              },
+              "vantage": {
+                "kind": "local",
+                "value": {}
+              },
+              "access_path": "systemd_dbus",
+              "basis": "manager_snapshot",
+              "regime": "normal",
+              "capabilities_used": [
+                "read_systemd_unit"
+              ]
+            },
+            "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+            "unit_name": "constellation-beta-http-fixture.service",
+            "load_state": "loaded",
+            "active_state": "inactive",
+            "sub_state": "dead",
+            "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
+          }
+        },
+        "standing": "historical_custody_only",
+        "reference_time_basis": "native_observation_time"
+      },
+      "consumer": {
+        "current_boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c",
+        "resolution_at": "2026-10-04T12:00:01Z"
+      },
+      "expected_reliance": "refused",
+      "source_report": {
+        "schema": "nq.evidence_report.v1",
+        "profile": {
+          "id": "nq.systemd_unit",
+          "version": "3",
+          "digest": "sha256:25fbbdd320248701b79b3e5f6c3109667b6aa9388ed113678ee0e6ba3c04a853"
+        },
+        "binding": {
+          "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+          "scope": {
+            "kind": "systemd_unit",
+            "value": {
+              "schema": "nq.systemd_unit_scope.v3",
+              "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+              "unit_name": "constellation-beta-http-fixture.service"
+            }
+          },
+          "vantage": {
+            "kind": "local",
+            "value": {}
+          }
+        },
+        "observed_at": "2026-10-04T12:00:00.123456789Z",
+        "status": "complete",
+        "coverage": [
+          {
+            "kind": "systemd_unit_state",
+            "state": "complete"
+          }
+        ],
+        "observations": [
+          {
+            "ordinal": 0,
+            "kind": "systemd_unit_state_snapshot",
+            "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+            "observed_at": "2026-10-04T12:00:00.123456789Z",
+            "payload": {
+              "evidence_basis": {
+                "scope": {
+                  "kind": "systemd_unit",
+                  "value": {
+                    "schema": "nq.systemd_unit_scope.v3",
+                    "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+                    "unit_name": "constellation-beta-http-fixture.service"
+                  }
+                },
+                "vantage": {
+                  "kind": "local",
+                  "value": {}
+                },
+                "access_path": "systemd_dbus",
+                "basis": "manager_snapshot",
+                "regime": "normal",
+                "capabilities_used": [
+                  "read_systemd_unit"
+                ]
+              },
+              "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+              "unit_name": "constellation-beta-http-fixture.service",
+              "load_state": "loaded",
+              "active_state": "inactive",
+              "sub_state": "dead",
+              "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
+            }
+          }
+        ],
+        "errors": [],
+        "used_capabilities": [
+          "read_systemd_unit"
+        ],
+        "backend": {
+          "implementation": {
+            "name": "nq-host-resource-helper",
+            "version": "0.1.0"
+          },
+          "tools": []
+        }
+      }
+    },
+    {
+      "name": "nanos_substituted_time_basis",
+      "reference": {
+        "report_id": "report:systemd-v3-golden",
+        "report_sequence": 7,
+        "report_digest": "sha256:1050ecbf704eae70782ea6e157d2ffeb3cb252dd46ec607d6f1a8f7fd1d7227f",
+        "observation_ordinal": 0,
+        "observed_at": "2026-10-04T12:00:00.123456789Z"
+      },
+      "response": {
+        "schema": "nq.admitted-observation-export/v1",
+        "evidence": {
+          "report_id": "report:systemd-v3-golden",
+          "report_sequence": 7,
+          "report_digest": "sha256:1050ecbf704eae70782ea6e157d2ffeb3cb252dd46ec607d6f1a8f7fd1d7227f",
+          "observation_ordinal": 0,
+          "observed_at": "2026-10-04T12:00:00.123456789Z"
+        },
+        "instance_id": "systemd-v3-golden",
+        "received_at": "2026-10-04T12:00:00.123456789Z",
+        "profile": {
+          "id": "nq.systemd_unit",
+          "version": "3",
+          "digest": "sha256:25fbbdd320248701b79b3e5f6c3109667b6aa9388ed113678ee0e6ba3c04a853"
+        },
+        "binding": {
+          "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+          "scope": {
+            "kind": "systemd_unit",
+            "value": {
+              "schema": "nq.systemd_unit_scope.v3",
+              "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+              "unit_name": "constellation-beta-http-fixture.service"
+            }
+          },
+          "vantage": {
+            "kind": "local",
+            "value": {}
+          }
+        },
+        "report_observed_at": "2026-10-04T12:00:00.123456789Z",
+        "report_status": "complete",
+        "backend": {
+          "implementation": {
+            "name": "nq-host-resource-helper",
+            "version": "0.1.0"
+          },
+          "tools": []
+        },
+        "used_capabilities": [
+          "read_systemd_unit"
+        ],
+        "observation": {
+          "ordinal": 0,
+          "kind": "systemd_unit_state_snapshot",
+          "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+          "observed_at": "2026-10-04T12:00:00.123456789Z",
+          "payload": {
+            "evidence_basis": {
+              "scope": {
+                "kind": "systemd_unit",
+                "value": {
+                  "schema": "nq.systemd_unit_scope.v3",
+                  "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+                  "unit_name": "constellation-beta-http-fixture.service"
+                }
+              },
+              "vantage": {
+                "kind": "local",
+                "value": {}
+              },
+              "access_path": "systemd_dbus",
+              "basis": "manager_snapshot",
+              "regime": "normal",
+              "capabilities_used": [
+                "read_systemd_unit"
+              ]
+            },
+            "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+            "unit_name": "constellation-beta-http-fixture.service",
+            "load_state": "loaded",
+            "active_state": "inactive",
+            "sub_state": "dead",
+            "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
+          }
+        },
+        "standing": "historical_custody_only",
+        "reference_time_basis": "evaluation_millisecond_projection"
+      },
+      "consumer": {
+        "current_boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c",
+        "resolution_at": "2026-10-04T12:00:01Z"
+      },
+      "expected_reliance": "refused",
+      "source_report": {
+        "schema": "nq.evidence_report.v1",
+        "profile": {
+          "id": "nq.systemd_unit",
+          "version": "3",
+          "digest": "sha256:25fbbdd320248701b79b3e5f6c3109667b6aa9388ed113678ee0e6ba3c04a853"
+        },
+        "binding": {
+          "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+          "scope": {
+            "kind": "systemd_unit",
+            "value": {
+              "schema": "nq.systemd_unit_scope.v3",
+              "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+              "unit_name": "constellation-beta-http-fixture.service"
+            }
+          },
+          "vantage": {
+            "kind": "local",
+            "value": {}
+          }
+        },
+        "observed_at": "2026-10-04T12:00:00.123456789Z",
+        "status": "complete",
+        "coverage": [
+          {
+            "kind": "systemd_unit_state",
+            "state": "complete"
+          }
+        ],
+        "observations": [
+          {
+            "ordinal": 0,
+            "kind": "systemd_unit_state_snapshot",
+            "subject": "systemd-unit:1a5b08928e884e73bf4f60a3c73ef497/constellation-beta-http-fixture.service",
+            "observed_at": "2026-10-04T12:00:00.123456789Z",
+            "payload": {
+              "evidence_basis": {
+                "scope": {
+                  "kind": "systemd_unit",
+                  "value": {
+                    "schema": "nq.systemd_unit_scope.v3",
+                    "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+                    "unit_name": "constellation-beta-http-fixture.service"
+                  }
+                },
+                "vantage": {
+                  "kind": "local",
+                  "value": {}
+                },
+                "access_path": "systemd_dbus",
+                "basis": "manager_snapshot",
+                "regime": "normal",
+                "capabilities_used": [
+                  "read_systemd_unit"
+                ]
+              },
+              "machine_id": "1a5b08928e884e73bf4f60a3c73ef497",
+              "unit_name": "constellation-beta-http-fixture.service",
+              "load_state": "loaded",
+              "active_state": "inactive",
+              "sub_state": "dead",
+              "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
+            }
+          }
+        ],
+        "errors": [],
+        "used_capabilities": [
+          "read_systemd_unit"
+        ],
+        "backend": {
+          "implementation": {
+            "name": "nq-host-resource-helper",
+            "version": "0.1.0"
+          },
+          "tools": []
+        }
+      }
     }
   ],
   "limits": {
@@ -996,5 +1697,12 @@
     "Fixtures describe exact byte interpretation and consumer comparison rules, not a live acquired observation",
     "NQ custody export itself grants neither currentness nor authority",
     "The 60s NQ law boundary includes60s; Monitor present reliance intentionally expires at60s"
-  ]
+  ],
+  "reference_time_contract": {
+    "native_observation_time": "exact native observation DateTime",
+    "evaluation_millisecond_projection": "exact source native DateTime projected by existing engine timestamp(SecondsFormat::Millis,true); no tolerance interval",
+    "index_time": "exact canonical millisecond string of native source observation",
+    "full_native_time": "retained unchanged in observation",
+    "current_consumer": "engine.rs prepare_evaluations normalizes frozen result.evidence.observed_at to schema millisecond precision"
+  }
 }
