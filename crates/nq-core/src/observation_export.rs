@@ -117,7 +117,7 @@ pub fn export_admitted_observation(
         || admitted.report_digest != evidence.report_digest
         || admitted.profile.id != report.profile.id.as_str()
         || admitted.profile.version.to_string() != report.profile.version.as_str()
-        || admitted.profile_digest != report.profile.digest.as_str()
+        || admitted.profile_digest.as_str() != report.profile.digest.as_str()
     {
         return Err(invalid("admitted profile provenance mismatch"));
     }

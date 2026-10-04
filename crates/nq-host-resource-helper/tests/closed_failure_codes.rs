@@ -9,6 +9,7 @@ use nq_host_resource_helper::{CollectionFailure, failure_code_vocabularies};
 use nq_profiles::{
     ProfileModule, host_filesystem, host_filesystem::FilesystemFailureCode, host_memory,
     host_memory::MemoryFailureCode, systemd_unit_v2, systemd_unit_v2::SystemdUnitFailureCode,
+    systemd_unit_v3,
 };
 
 #[test]
@@ -36,6 +37,11 @@ fn the_helper_publishes_exactly_the_owner_vocabularies() {
             &entries[3],
             &systemd_unit_v2::MODULE as &dyn ProfileModule,
             SystemdUnitFailureCode::tokens(),
+        ),
+        (
+            &entries[4],
+            &systemd_unit_v3::MODULE as &dyn ProfileModule,
+            systemd_unit_v3::SystemdUnitFailureCode::tokens(),
         ),
     ] {
         assert_eq!(entry["id"], module.descriptor().profile.id);
