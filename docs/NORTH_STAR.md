@@ -232,14 +232,14 @@ excuse to make the normal host installation operationally empty.
 ## Host Operational Portrait
 
 The first role-complete constellation milestone is **Host Operational Portrait
-v1** for both logical `sushi-k` and logical `labelwatch-host`. It is not an
+v1** for both logical `development-node` and logical `reference-node`. It is not an
 NQ-alone product claim. Its
 normative specification and 44-row capability classification are now
 operator-ratified in the
 [`host-operational-portrait-v1-ratification`](../audit/host-operational-portrait-v1-ratification/RATIFICATION_DECISION.md)
 packet following the deployed-capability census in `SEQUENCING.md`.
 Specification ratification does not establish subject conformance:
-`sushi-k` and `labelwatch-host` are both `not_earned`, Classic remains
+`development-node` and `reference-node` are both `not_earned`, Classic remains
 authoritative, and no parallel qualification or cutover is authorized.
 
 The portrait must cover at least:
@@ -267,7 +267,7 @@ distinguishable. An empty configuration, absent series, or silent witness does
 not establish health.
 
 The Portrait v1 blocker-closure unit remains open: exact subject inventories,
-Labelwatch/Driftwatch semantic contracts, production namespace, sushi-k
+Labelwatch/Driftwatch semantic contracts, production namespace, development-node
 platform binding, and external-vantage identities are not closed. Later
 operator decisions separately authorized the bounded Stage-6 contract,
 published-consumer/concordance, and completeness-map campaigns; those

@@ -42,7 +42,7 @@ Classic is not the source architecture. Its collectors, pack framework,
 database, APIs, dashboard, executable names, configuration layout, and quirks
 are not implementation parity targets.
 
-Prefer a small disposable VM over `sushi-k` as the initial implementation and
+Prefer a small disposable VM over `development-node` as the initial implementation and
 qualification substrate. The VM should exercise installed artifacts from
 empty state, explicit role and synthetic subject identity, clean state
 directories, witness/provider admission, hostile evidence cases, package
@@ -50,7 +50,7 @@ lifecycle, upgrade/rollback, backup/restore, and repeatability without a
 developer checkout inside the guest.
 
 VM results may earn generic platform, installation, profile, witness, and
-operator-journey evidence. They cannot earn `sushi-k` or `labelwatch-host`
+operator-journey evidence. They cannot earn `development-node` or `reference-node`
 Portrait completeness, because those verdicts require the subjects' closed
 inventories, application contracts, real vantages, and later isolated
 qualification.
@@ -90,7 +90,7 @@ Two independent lanes may proceed in parallel.
 
 ### Lane B: deployed-capability declaration
 
-Inventory the actual logical `sushi-k` and logical `labelwatch-host`
+Inventory the actual logical `development-node` and logical `reference-node`
 (currently Linode-hosted) installations:
 
 - exact Classic binary/schema/config identities;
@@ -118,7 +118,7 @@ silently delete a required row.
 **Current gate decision (2026-07-27):** the
 [Portrait v1 specification](../audit/host-operational-portrait-v1-ratification/HOST_OPERATIONAL_PORTRAIT_V1.md)
 and [44-row manifest](../audit/host-operational-portrait-v1-ratification/RATIFIED_CAPABILITY_MANIFEST.json)
-are operator-ratified. `sushi-k` and `labelwatch-host` completeness are both
+are operator-ratified. `development-node` and `reference-node` completeness are both
 not earned. Classic replacement, parallel qualification, and cutover remain
 unauthorized.
 
@@ -129,7 +129,7 @@ design, evidence gathering, and narrowly necessary implementation to close:
 1. exact versioned per-subject inventories and exclusions;
 2. Labelwatch/Driftwatch native observation and profile-semantic contracts;
 3. the non-colliding production namespace;
-4. sushi-k's exact platform binding; and
+4. development-node's exact platform binding; and
 5. required external-vantage identities and qualification inputs.
 
 It may not deploy, mutate services, begin parallel qualification, switch
@@ -312,8 +312,8 @@ Nothing in this stage grants actuation authority.
 
 ## Stage 7 — estate qualification and replacement
 
-1. Install isolated NQ-NG candidates for logical `sushi-k` and logical
-   `labelwatch-host` with
+1. Install isolated NQ-NG candidates for logical `development-node` and logical
+   `reference-node` with
    distinct configuration, database, admission, socket, service, console, and
    archive identities.
 2. Observe the same declared targets while Classic remains alert and

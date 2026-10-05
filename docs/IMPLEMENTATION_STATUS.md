@@ -13,7 +13,7 @@ addendum does not change the v1 operational-core or authority boundary.
 
 Host Operational Portrait v1 is now an
 [operator-ratified specification](../audit/host-operational-portrait-v1-ratification/RATIFICATION_DECISION.md).
-That is a policy result, not an implementation result. Neither `sushi-k` nor
+That is a policy result, not an implementation result. Neither `development-node` nor
 `reference-host` has earned Portrait v1 completeness; Classic remains
 authoritative; parallel qualification and cutover are not authorized. The
 current preview package and executable names are explicitly not the final
@@ -187,7 +187,7 @@ therefore invents neither historical intake bytes nor diagnostic executions.
 The following governing-plan stages are not claimed by this preview:
 
 - conformance to the ratified Host Operational Portrait v1 specification for
-  either `sushi-k` or `reference-host`;
+  either `development-node` or `reference-host`;
 - role-oriented core/host/application packaging or an independently installed
   witness authoring and conformance surface;
 - static private profile-cohort assembly, cohort lifecycle, or recursive child
@@ -209,7 +209,7 @@ The following governing-plan stages are not claimed by this preview:
   any kind;
 - daemon/SQLite/API/CLI publication or consumption of system cuts, NetBox
   snapshot import, Porter plan or receipt integration, AG cut binding, the
-  disposable Noble QEMU specimen, and the `sushi-k` deployment described by
+  disposable Noble QEMU specimen, and the `development-node` deployment described by
   the Porter/NetBox addendum;
 - typed endpoint, persistent-storage, backup-capability, and actuation-surface
   properties, plus compiled expected detector/result semantics for transition
