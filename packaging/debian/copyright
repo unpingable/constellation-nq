@@ -1,10 +1,14 @@
-Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: nq-ng
-Source: private source distribution
+NQ-ng
+Source: https://github.com/unpingable/constellation-nq
+Copyright 2026 NQ contributors
 
-Files: *
-Copyright: 2026 NQ contributors
-License: Apache-2.0
- The complete Apache License 2.0 text is shipped at
- /usr/share/doc/nq-ng/LICENSE. On Debian systems it is also available at
- /usr/share/common-licenses/Apache-2.0.
+NQ-authored source, helpers, profiles, schemas, units and documentation are
+licensed under Apache-2.0. The full text is /usr/share/doc/nq-ng/LICENSE
+(and /usr/share/common-licenses/Apache-2.0 on Debian systems).
+
+Compiled executables also contain third-party components, including the Rust
+standard library and selected bundled SQLite. Those portions retain their
+respective licenses and copyrights; this first-party grant does not relicense
+them. Distribute this package with the Constellation release's complete
+notices/ collection and THIRD-PARTY-LICENSES.md. Its versioned license index
+maps upstream source checksums to original license/copyright texts.
