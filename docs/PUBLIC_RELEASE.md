@@ -1,5 +1,15 @@
 # Constellation NQ source and integration guide
 
+## NQ 0.2.5 combined source candidate
+
+The neutral combined candidate adds the accepted boot-bound `nq.systemd_unit/v3`
+profile/helper and exact historical `observations export --reference` interface
+to the accepted 0.2.4 source line. Source time, evaluation time and present
+reliance remain distinct. No store/schema migration, clock-tolerance change or
+notification routing change is introduced. The patch version distinguishes exact
+combined package bytes from the earlier spine package for upgrade/rollback.
+This is combined-candidate preparation, not a component release tag or BC1.
+
 ## NQ 0.2.4 source candidate
 
 The source tree is version 0.2.4, an unreleased candidate. A daemon
