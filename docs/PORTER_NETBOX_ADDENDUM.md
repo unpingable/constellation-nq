@@ -34,7 +34,7 @@ The deployment program has two deliberately different specimens:
 | Specimen | Claim it is intended to prove | What it does not need to prove |
 |---|---|---|
 | APT-in-QEMU v0 | Porter can deliver the exact nq-ng Debian package to a disposable Ubuntu Noble QEMU guest under a bounded plan, preserve installation receipts, and verify the shipped protocol and profile catalog. | Persistent application custody, upgrades, backups, production authority, or long-lived host reconciliation. |
-| NetBox on `sushi-k` | Porter can deploy and maintain a persistent application on an admitted development host without losing state or widening effects. | The minimal APT mechanism or a general container orchestrator. |
+| NetBox on `development-node` | Porter can deploy and maintain a persistent application on an admitted development host without losing state or widening effects. | The minimal APT mechanism or a general container orchestrator. |
 
 NetBox must not expand the APT-in-QEMU specimen into a multi-service
 application exercise. The QEMU specimen remains small enough to isolate the
@@ -87,7 +87,7 @@ Before the first NetBox deployment, Porter must consume a small bootstrap
 target admission checked into the deployment source cohort:
 
 ```text
-bootstrap-targets/sushi-k.yaml
+bootstrap-targets/development-node.yaml
 ```
 
 That document must bind an exact host identity, the `persistent-dev` target
@@ -112,7 +112,7 @@ authority grant.
 The approved plan binds at least the following facts:
 
 ```text
-target: sushi-k
+target: development-node
 target_class: persistent-dev
 application: netbox
 native_executor: docker-compose
@@ -251,7 +251,7 @@ nq-ng
 NetBox says what inventory objects exist. A published nq-ng cut says what
 versioned system those objects constitute. The future `home-netbox` theory
 should state that the web and worker components, PostgreSQL, and Redis form one
-system, are hosted on `sushi-k`, expose the approved TCP endpoint, require
+system, are hosted on `development-node`, expose the approved TCP endpoint, require
 persistent database and backup capabilities, and have named observation and
 actuation projections. Endpoint, storage, backup, and actuation-surface
 properties are not present in the current contract.
@@ -380,7 +380,7 @@ It does **not** currently implement:
 - NetBox inventory import, snapshot custody, or reconciliation;
 - Porter plan generation, banking, execution, or receipts;
 - AG plan display, authorization, or cut-digest binding;
-- the `sushi-k` bootstrap admission or a NetBox deployment; or
+- the `development-node` bootstrap admission or a NetBox deployment; or
 - any automatic feedback from observations or receipts into declared state.
 
 The implemented rebar preserves stable target identity, exact source

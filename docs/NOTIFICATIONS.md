@@ -18,7 +18,7 @@ intents, each with a person confirming receipt:
 - Slack on 2026-10-01, on a disposable VM and on the Linode observation host.
   Records: Cartography `audit/2026-10-01-observation-profile-vm-result.md` and
   `audit/2026-10-01-linode-observation-profile-live.md`.
-- Discord on 2026-10-02, on crow with the released 0.2.0 binary.
+- Discord on 2026-10-02, on the qualification host with the released 0.2.0 binary.
 - PagerDuty on 2026-10-02, against a non-production service: trigger, repeated
   trigger on one dedup key, resolve.
 
@@ -305,7 +305,7 @@ may be up to 1024 bytes) and, with the same closed field set:
 For example, as canonical JSON (compact, sorted keys, no trailing newline):
 
 ```json
-{"action":"trigger","attention_kind":"operator_assertion","attention_policy_digest":"sha256:<64 hex of your operator policy>","attention_policy_id":"operator-test","condition":{"component":"nq","rule":"nq-no-fresh-acquisition","site":"crow-lab","target_class":"demo"},"destination_identity":"pagerduty:pagerduty-ops","inspection_reference":"nq notification inspect","response_class":"page","route_reference":"pagerduty-ops","schema":"nq.notification_delivery_intent.v2","severity":"critical","stable_event_id":"test-trigger-1","summary":"TEST: NQ route qualification","transition_id":"test-1"}
+{"action":"trigger","attention_kind":"operator_assertion","attention_policy_digest":"sha256:<64 hex of your operator policy>","attention_policy_id":"operator-test","condition":{"component":"nq","rule":"nq-no-fresh-acquisition","site":"example-site","target_class":"demo"},"destination_identity":"pagerduty:pagerduty-ops","inspection_reference":"nq notification inspect","response_class":"page","route_reference":"pagerduty-ops","schema":"nq.notification_delivery_intent.v2","severity":"critical","stable_event_id":"test-trigger-1","summary":"TEST: NQ route qualification","transition_id":"test-1"}
 ```
 
 `severity` is PagerDuty's payload field only. It does not make an intent
@@ -335,7 +335,7 @@ constellation:{site}:{component}:{rule}            (no target_class)
 constellation:{site}:{component}:{rule}:{target_class}
 ```
 
-For example `constellation:crow-lab:nq:nq-no-fresh-acquisition:demo`. A trigger
+For example `constellation:example-site:nq:nq-no-fresh-acquisition:demo`. A trigger
 sends `event_action`, `dedup_key` and `payload` (`summary`, `source` = site,
 `severity`, `component`, `group` = rule, `class` = target class, and
 `custom_details` = `details` plus `constellation` {schema, stable event id,

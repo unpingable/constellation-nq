@@ -7,7 +7,7 @@ starting path is the credential-free local saved-check example in
 [`NOTIFICATIONS.md`](NOTIFICATIONS.md): local deterministic transport and the
 Nightshift replay boundary have been exercised. Live destination delivery has
 been verified with a person confirming receipt: Slack on 2026-10-01 (disposable
-VM and the Linode host), Discord on 2026-10-02 (crow, released 0.2.0 binary),
+VM and the Linode host), Discord on 2026-10-02 (qualification host, released 0.2.0 binary),
 and PagerDuty on 2026-10-02 (non-production service: trigger, dedup, resolve).
 The records are in Cartography `audit/2026-10-01-observation-profile-vm-result.md`,
 `audit/2026-10-01-linode-observation-profile-live.md` and

@@ -74,7 +74,7 @@ Write a canonical v2 intent: compact JSON with sorted keys and no trailing
 newline. For example, with `jq -cjS . source.json > trigger.json`:
 
 ```json
-{"action":"trigger","attention_kind":"operator_assertion","attention_policy_digest":"sha256:<64 hex of your operator policy>","attention_policy_id":"operator-test","condition":{"component":"nq","rule":"nq-no-fresh-acquisition","site":"crow-lab","target_class":"demo"},"destination_identity":"pagerduty:pagerduty-ops","inspection_reference":"nq notification inspect","response_class":"page","route_reference":"pagerduty-ops","schema":"nq.notification_delivery_intent.v2","severity":"critical","stable_event_id":"test-trigger-1","summary":"TEST: NQ route qualification","transition_id":"test-1"}
+{"action":"trigger","attention_kind":"operator_assertion","attention_policy_digest":"sha256:<64 hex of your operator policy>","attention_policy_id":"operator-test","condition":{"component":"nq","rule":"nq-no-fresh-acquisition","site":"example-site","target_class":"demo"},"destination_identity":"pagerduty:pagerduty-ops","inspection_reference":"nq notification inspect","response_class":"page","route_reference":"pagerduty-ops","schema":"nq.notification_delivery_intent.v2","severity":"critical","stable_event_id":"test-trigger-1","summary":"TEST: NQ route qualification","transition_id":"test-1"}
 ```
 
 `response_class` must be `page`, for the trigger and for the resolve. PagerDuty
@@ -84,7 +84,7 @@ or anything else, and retains any other or absent class as the refusal
 
 Submit it with the key supplied as in step 3 and `--enable-network`. The
 result shows `delivery_state` and `dedup_key`
-(`constellation:crow-lab:nq:nq-no-fresh-acquisition:demo`). Check it:
+(`constellation:example-site:nq:nq-no-fresh-acquisition:demo`). Check it:
 
 ```sh
 nq --config /etc/nq/nq.toml notification inspect --notification-id ID
