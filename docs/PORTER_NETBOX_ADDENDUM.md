@@ -3,7 +3,7 @@
 Status: implemented contract rebar and future live-delivery boundary. This
 addendum does not claim a live Porter, NetBox, or AG integration in the current
 nq-ng developer preview. It supplements the governing plan in
-[`PLAN.md`](PLAN.md) without changing that plan's v1 operational-core scope or
+[`PLAN.md`](https://github.com/unpingable/constellation-nq/blob/7e2c821932c1607913e13445877628a67b9ee72e/docs/PLAN.md) without changing that plan's v1 operational-core scope or
 authority model.
 
 ## Claim boundary: raw cuts are not coherent system state
@@ -341,7 +341,7 @@ metadata; it does not authenticate a human decision.
 ## Current implementation boundary
 
 The developer preview described in
-[`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) implements NQ's local
+[`IMPLEMENTATION_STATUS.md`](https://github.com/unpingable/constellation-nq/blob/7e2c821932c1607913e13445877628a67b9ee72e/docs/IMPLEMENTATION_STATUS.md) implements NQ's local
 operational evidence spine and an isolated authority-free system-contract
 compiler. `nq-system-contract` strictly validates bounded `SystemSpecV1`
 documents, closes target/component/dependency/source membership, records an

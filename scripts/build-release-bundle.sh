@@ -26,6 +26,9 @@ USAGE
 [[ $# -ge 4 && $# -le 5 ]] || usage
 
 version=$1
+package_version=${NQ_PACKAGE_VERSION:-$version}
+case "$package_version" in "$version"|"$version"+*) ;; *) echo "package revision must extend exact binary version" >&2; exit 2;; esac
+case "$package_version" in *[!0-9A-Za-z.+:~-]*|'') exit 2;; esac
 arch=$2
 bin_dir=$3
 profile_dir=$4
@@ -334,16 +337,10 @@ install -Dm0644 "$root/packaging/systemd/nq.sysusers" \
     "$stage/lib/sysusers.d/nq.conf"
 install -Dm0644 "$root/packaging/systemd/nq.tmpfiles" \
     "$stage/lib/tmpfiles.d/nq.conf"
-install -Dm0644 "$root/docs/OPERATIONS.md" \
+install -Dm0644 "$root/packaging/debian/OPERATOR-OPERATIONS.md" \
     "$stage/share/doc/nq-ng/OPERATIONS.md"
-install -Dm0644 "$root/README.md" "$stage/share/doc/nq-ng/README.md"
+install -Dm0644 "$root/packaging/debian/OPERATOR.md" "$stage/share/doc/nq-ng/README.md"
 install -Dm0644 "$root/LICENSE" "$stage/share/doc/nq-ng/LICENSE"
-install -Dm0644 "$root/docs/PLAN.md" \
-    "$stage/share/doc/nq-ng/docs/PLAN.md"
-install -Dm0644 "$root/docs/DEVELOPMENT.md" \
-    "$stage/share/doc/nq-ng/docs/DEVELOPMENT.md"
-install -Dm0644 "$root/docs/IMPLEMENTATION_STATUS.md" \
-    "$stage/share/doc/nq-ng/docs/IMPLEMENTATION_STATUS.md"
 install -Dm0644 "$root/docs/PORTER_NETBOX_ADDENDUM.md" \
     "$stage/share/doc/nq-ng/docs/PORTER_NETBOX_ADDENDUM.md"
 install -Dm0644 "$root/packaging/debian/copyright" \
@@ -462,7 +459,7 @@ tarball="$out_dir/$tar_name"
 debroot="$work/debroot"
 mkdir -p -- "$debroot/usr" "$debroot/DEBIAN"
 cp -a -- "$stage/." "$debroot/usr/"
-sed -e "s/@VERSION@/$version/g" -e "s/@ARCH@/$arch/g" \
+sed -e "s/@VERSION@/$package_version/g" -e "s/@ARCH@/$arch/g" \
     "$root/packaging/debian/control.in" > "$debroot/DEBIAN/control"
 install -m0755 "$root/packaging/debian/postinst" "$debroot/DEBIAN/postinst"
 install -m0755 "$root/packaging/debian/prerm" "$debroot/DEBIAN/prerm"
@@ -473,7 +470,7 @@ install -m0755 "$root/packaging/debian/postrm" "$debroot/DEBIAN/postrm"
 )
 find "$debroot" -exec touch -h -d "@$epoch" {} +
 
-deb_name="nq-ng_${version}_${arch}.deb"
+deb_name="nq-ng_${package_version}_${arch}.deb"
 deb_staged="$publish/$deb_name"
 deb="$out_dir/$deb_name"
 dpkg-deb --root-owner-group --build "$debroot" "$deb_staged" >/dev/null

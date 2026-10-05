@@ -1,5 +1,16 @@
 # Constellation NQ
 
+## Current operator candidate
+
+The prepared combined candidate targets Ubuntu 22.04 amd64. Use its source-free
+[operator guide](https://github.com/unpingable/unpingable-site/blob/dev/operator-beta/constellation/combined-candidate/README.md) for download verification, exact package installation,
+separate enrollment, Workbench, currentness and day-two recovery. It is a neutral
+owner-review candidate; BC1 is not tagged or published. Component source alone
+does not install the composed product or grant authority.
+
+The component-specific development and historical records below retain their
+own narrower scope; they are not installation instructions for this candidate.
+
 NQ collects and checks bounded evidence for a specific question. It records what
 was admitted, what was refused, and the diagnostic conclusion its profile can
 support. It does not authorize or execute the work that might follow.
@@ -13,7 +24,7 @@ installable Constellation suite. See [the 0.2.0 release notes and known
 limitations](docs/PUBLIC_RELEASE.md#nq-020-component-package); the main one is
 that stores do not carry across NQ builds, so the documented procedure is to
 re-initialize ([OPERATIONS](docs/OPERATIONS.md#historical-binary-and-schema-upgrade)).
-The source tree is at 0.2.4, an unreleased candidate whose daemon collections
+The source tree is at 0.2.5, an unreleased candidate whose daemon collections
 no longer replay the evaluation history on every collection
 ([release notes](docs/PUBLIC_RELEASE.md#nq-024-source-candidate)).
 
@@ -64,7 +75,7 @@ historical read path does not supply automated retention or migration.
 > `022419593b1065da7e83802d1fb6efc77362f6a1`; exact independent component evidence
 > and final integrated witnesses are tracked in Constellation's
 > `coordination/CLASSIC_RETIREMENT_COMPLETION_GATE.md` and the campaign recovery
-> record. The retirement gate remains open pending those integrated results.
+> record. That historical gate was subsequently accepted; Classic runtime is retired and excluded from the current candidate.
 > This authorization does **not** establish fleet cutover, remote publication,
 > production deployment, or complete Host Operational Portrait coverage. M2's
 > original acceptance stays attached to its original revisions.
@@ -79,7 +90,7 @@ historical read path does not supply automated retention or migration.
 > [`docs/SEQUENCING.md`](docs/SEQUENCING.md). Host Operational Portrait v1 is
 > now a
 > [ratified specification](audit/host-operational-portrait-v1-ratification/RATIFICATION_DECISION.md),
-> but neither `sushi-k` nor `reference-host` has earned completeness. Classic
+> but neither the historical qualification host nor the reference qualification host has earned completeness. Classic
 > replacement, parallel qualification, and cutover remain unauthorized. The
 > minted `v0.1.0` release and post-release provider-intake receipts remain
 > frozen evidence. Current main is unpublished, untagged after `v0.1.0`, and
