@@ -704,6 +704,8 @@ fn build_staging(config: &NqConfig, config_path: &Path, staging: &Path) -> Resul
         validate_historical_semantics(&store)
             .context("validate source database semantics before archiving")?;
         store.backup_verified(&db)?;
+        #[cfg(test)]
+        inject_staging_fault(StagingFault::CorruptStagedDatabase, &db);
         let archived_copy = Store::open(&db).context("open archive database backup for freeze")?;
         validate_historical_semantics(&archived_copy)
             .context("validate copied database semantics before sealing")?;
@@ -716,6 +718,12 @@ fn build_staging(config: &NqConfig, config_path: &Path, staging: &Path) -> Resul
         Store::backup_incompatible(&config.database_path, &db)?;
         false
     };
+    // Every connection to the staged copy has closed. Its capacity lock and
+    // any empty WAL or SHM belong to this private staging copy, not to the
+    // live store (whose lock is never touched here), and the sealed archive
+    // holds the main file alone: a WAL with frames refuses instead.
+    nq_store::capacity::retire_private_copy_sidecars(&db)
+        .context("release the staged database copy's sidecars")?;
 
     // The exact verifier binary and interpretation config.
     let binary = std::env::current_exe()?;
@@ -745,6 +753,8 @@ fn build_staging(config: &NqConfig, config_path: &Path, staging: &Path) -> Resul
     let seal = sha256_bytes(&metadata_bytes);
     fs::write(staging.join(SEAL_FILE), &seal)?;
 
+    #[cfg(test)]
+    inject_staging_fault(StagingFault::UnmanifestedStagedEntry, &db);
     // Re-verify the fully staged archive before it can be sealed.
     let verified = verify_archive(staging)?;
     if !verified.integrity_verified {
@@ -756,6 +766,36 @@ fn build_staging(config: &NqConfig, config_path: &Path, staging: &Path) -> Resul
         source_openable,
         seal,
     })
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StagingFault {
+    CorruptStagedDatabase,
+    UnmanifestedStagedEntry,
+}
+
+#[cfg(test)]
+thread_local! {
+    static STAGING_FAULT: std::cell::Cell<Option<StagingFault>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn inject_staging_fault(fault: StagingFault, db: &Path) {
+    if STAGING_FAULT.get() != Some(fault) {
+        return;
+    }
+    match fault {
+        StagingFault::CorruptStagedDatabase => {
+            fs::write(db, vec![0_u8; 4096]).expect("corrupt staged database");
+        }
+        StagingFault::UnmanifestedStagedEntry => {
+            let mut shm = db.as_os_str().to_owned();
+            shm.push("-shm");
+            fs::write(PathBuf::from(shm), b"").expect("insert staged sidecar");
+        }
+    }
 }
 
 /// Verify a cold archive using only its own contents. Never opens the live store
@@ -1038,7 +1078,35 @@ mod tests {
         write_metadata_and_seal(archive, &mut metadata);
     }
 
+    /// A fixture that rewrites the sealed database through `Store::open`
+    /// leaves its last commit in the WAL (no checkpoint on close) beside the
+    /// copy's own capacity lock. Fold the WAL into the main file and retire
+    /// the closed copy's sidecars, as archive staging does, before resealing.
+    fn settle_rewritten_database(database: &Path) {
+        let connection = rusqlite::Connection::open(database).expect("open rewritten database");
+        let (busy, log, checkpointed): (i64, i64, i64) = connection
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .expect("checkpoint rewritten database");
+        assert_eq!(
+            (busy, log),
+            (0, checkpointed),
+            "fixture checkpoint completes"
+        );
+        let mode: String = connection
+            .pragma_update_and_check(None, "journal_mode", "DELETE", |row| row.get(0))
+            .expect("leave WAL mode");
+        assert_eq!(mode, "delete");
+        drop(connection);
+        match nq_store::capacity::retire_private_copy_sidecars(database) {
+            Ok(()) => {}
+            Err(error) => panic!("retire rewritten database sidecars: {error}"),
+        }
+    }
+
     fn reseal_after_database_change(archive: &Path) {
+        settle_rewritten_database(&archive.join("db/nq.db"));
         write_manifest(archive).expect("rewrite content manifest");
         reseal_metadata(archive);
     }
@@ -1638,6 +1706,23 @@ mod tests {
 
         let database = archive.join("db/nq.db");
         let connection = rusqlite::Connection::open(&database).expect("open archive database");
+        // Restore the archived schema's exact trigger text, whatever schema
+        // version produced it, so only the row substitution differs.
+        let append_only: Vec<String> = connection
+            .prepare(
+                "SELECT sql FROM sqlite_schema
+                  WHERE type = 'trigger'
+                    AND name IN ('immutable_provider_intake_attempts_update',
+                                 'immutable_provider_intake_acknowledgments_update')
+                  ORDER BY rowid",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()
+            })
+            .expect("read exact append-only triggers");
+        assert_eq!(append_only.len(), 2);
         connection
             .execute_batch(
                 "DROP TRIGGER immutable_provider_intake_attempts_update;
@@ -1674,12 +1759,11 @@ mod tests {
                 ],
             )
             .expect("replace acknowledgment with self-consistent intake digest");
-        connection
-            .execute_batch(
-                "CREATE TRIGGER immutable_provider_intake_attempts_update BEFORE UPDATE ON provider_intake_attempts BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-                 CREATE TRIGGER immutable_provider_intake_acknowledgments_update BEFORE UPDATE ON provider_intake_acknowledgments BEGIN SELECT RAISE(ABORT, 'append-only table'); END;",
-            )
-            .expect("restore exact append-only schema");
+        for trigger in &append_only {
+            connection
+                .execute_batch(trigger)
+                .expect("restore exact append-only schema");
+        }
         drop(connection);
         reseal_after_database_change(archive);
     }
@@ -1992,6 +2076,30 @@ mod tests {
             })),
         };
         drop(Store::upgrade_v12_to_v13(&database, &v12_receipt).expect("upgrade schema-v12 store"));
+        let v13_backup_path = root.join("nq-v13.pre-upgrade.db");
+        let v13_backup =
+            Store::backup_v13_verified(&database, &v13_backup_path).expect("verify v13 backup");
+        let v13_receipt = nq_store::UpgradeReceiptInput {
+            receipt_id: "upgrade-archive-v13-v14".into(),
+            from_schema_version: 13,
+            to_schema_version: 14,
+            migrations: canonical(&serde_json::json!(["schema_v13_to_v14_bounded_retention"])),
+            binary_digest: nq_protocol::sha256_bytes(b"archive-upgrade-binary").into_string(),
+            backup_digest: v13_backup.sha256,
+            backup_location: v13_backup.path.to_string_lossy().into_owned(),
+            started_at: "2026-07-20T12:00:10Z".into(),
+            finished_at: "2026-07-20T12:00:11Z".into(),
+            result: "migrated".into(),
+            operator_identity: canonical(&serde_json::json!({"uid":991})),
+            verification: canonical(&serde_json::json!({
+                "integrity":"ok",
+                "source_schema_version":13,
+                "source_schema_artifact_digest":nq_store::SCHEMA_V13_ARTIFACT_DIGEST,
+                "backup_reopened":true,
+                "historical_expiry":"absent_not_synthesized"
+            })),
+        };
+        drop(Store::upgrade_v13_to_v14(&database, &v13_receipt).expect("upgrade schema-v13 store"));
         let config = write_config(root, &database);
         let archive = root.join("archive");
         create_archive(&config, &archive).expect("create migrated-v3 archive");
@@ -3089,6 +3197,208 @@ mod tests {
         .expect("write");
         let error = verify_archive(&archive).expect_err("unknown format refuses");
         assert!(error.to_string().contains("unsupported archive format"));
+    }
+
+    fn live_lock(database: &Path) -> PathBuf {
+        let mut name = database.as_os_str().to_owned();
+        name.push(".capacity.lock");
+        PathBuf::from(name)
+    }
+
+    fn inode(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        fs::symlink_metadata(path).expect("inode").ino()
+    }
+
+    fn record_daemon_status(database: &Path, code: &str) {
+        let mut store = Store::open(database).expect("open live store writable");
+        nq_core::engine::record_component_status(
+            &mut store,
+            "daemon",
+            "nqd",
+            "unknown",
+            code,
+            &serde_json::json!({}),
+        )
+        .expect("record daemon status");
+    }
+
+    fn no_staging_remains(parent: &Path) {
+        let partial = fs::read_dir(parent)
+            .expect("archive parent")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.starts_with(".nq-archive-"))
+            .collect::<Vec<_>>();
+        assert!(partial.is_empty(), "staging survived: {partial:?}");
+    }
+
+    /// The live store keeps the same lock inode, no process retains its
+    /// guard, a held guard still serializes a writable open, and the store
+    /// reopens and records after release.
+    fn assert_live_lock_effective(database: &Path, lock_inode: u64) {
+        let lock = live_lock(database);
+        assert_eq!(inode(&lock), lock_inode, "the live lock was replaced");
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock)
+            .expect("open live lock");
+        let held = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
+            .map_err(|(_, error)| error)
+            .expect("no process retains the live guard");
+        let Err(refused) = Store::open(database) else {
+            panic!("a held live guard serializes writers");
+        };
+        assert!(
+            refused
+                .to_string()
+                .contains("concurrent writer owns operation guard"),
+            "{refused}"
+        );
+        drop(held);
+        record_daemon_status(database, "restarted");
+        assert_eq!(inode(&lock), lock_inode);
+    }
+
+    #[test]
+    fn a_v14_store_archives_its_wal_resident_history_and_keeps_its_live_lock() {
+        let dir = tempfile::tempdir().expect("dir");
+        let database = dir.path().join("nq.db");
+        drop(Store::initialize(&database).expect("init store"));
+        record_daemon_status(&database, "stopped");
+        let mut wal = database.as_os_str().to_owned();
+        wal.push("-wal");
+        assert!(
+            fs::metadata(PathBuf::from(wal)).expect("live WAL").len() > 0,
+            "the last live commit is WAL-resident"
+        );
+        let lock_inode = inode(&live_lock(&database));
+        let config = write_config(dir.path(), &database);
+        let archive = dir.path().join("archive");
+
+        let report = create_archive(&config, &archive).expect("archive a v14 store");
+
+        assert!(report.source_openable);
+        let mut expected = CONTENT_FILES
+            .iter()
+            .map(|entry| (*entry).to_owned())
+            .chain(
+                [
+                    SEAL_FILE,
+                    ARCHIVE_FILE,
+                    MANIFEST_FILE,
+                    "db",
+                    "bin",
+                    "config",
+                ]
+                .map(str::to_owned),
+            )
+            .collect::<Vec<_>>();
+        expected.sort();
+        let inventory = complete_inventory(&archive)
+            .into_iter()
+            .map(|(entry, _)| entry)
+            .collect::<Vec<_>>();
+        assert_eq!(inventory, expected, "staging leaves no sidecar");
+        let sealed = complete_inventory(&archive);
+        let verified = verify_archive(&archive).expect("verify");
+        assert!(verified.integrity_verified);
+        assert_eq!(verified.historical_database_verified, Some(true));
+        assert_eq!(
+            verified.historical_status_events_verified,
+            Some(1),
+            "the WAL-resident commit is in the sealed main file"
+        );
+        let manifest = fs::read_to_string(archive.join(MANIFEST_FILE)).expect("manifest");
+        let database_digest = sha256_file(&archive.join("db/nq.db")).expect("digest");
+        assert!(
+            manifest.lines().any(|line| line.ends_with("db/nq.db")
+                && line.contains(database_digest.trim_start_matches("sha256:"))),
+            "{manifest}"
+        );
+        assert_eq!(
+            complete_inventory(&archive),
+            sealed,
+            "immutable verification creates no sidecar"
+        );
+        assert_live_lock_effective(&database, lock_inode);
+        no_staging_remains(dir.path());
+    }
+
+    fn failed_archive_preserves_the_live_store(fault: StagingFault, expected: &str) {
+        let dir = tempfile::tempdir().expect("dir");
+        let database = dir.path().join("nq.db");
+        drop(Store::initialize(&database).expect("init store"));
+        record_daemon_status(&database, "stopped");
+        let lock_inode = inode(&live_lock(&database));
+        let config = write_config(dir.path(), &database);
+        let archive = dir.path().join("archive");
+
+        STAGING_FAULT.set(Some(fault));
+        let error = create_archive(&config, &archive).expect_err("injected staging fault");
+        STAGING_FAULT.set(None);
+
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+        assert!(!archive.exists(), "a failed archive has no destination");
+        no_staging_remains(dir.path());
+        assert_live_lock_effective(&database, lock_inode);
+        // The same store archives once the fault is gone.
+        create_archive(&config, &archive).expect("archive after a failed attempt");
+        assert!(verify_archive(&archive).expect("verify").integrity_verified);
+    }
+
+    #[test]
+    fn a_corrupted_staged_database_leaves_no_archive_and_the_live_lock_effective() {
+        failed_archive_preserves_the_live_store(
+            StagingFault::CorruptStagedDatabase,
+            "open archive database backup for freeze",
+        );
+    }
+
+    #[test]
+    fn a_staging_inventory_mismatch_leaves_no_archive_and_the_live_lock_effective() {
+        failed_archive_preserves_the_live_store(
+            StagingFault::UnmanifestedStagedEntry,
+            "unmanifested entry: db/nq.db-shm",
+        );
+    }
+
+    #[test]
+    fn a_held_live_lock_refuses_the_archive_without_a_partial_result() {
+        let dir = tempfile::tempdir().expect("dir");
+        let database = dir.path().join("nq.db");
+        drop(Store::initialize(&database).expect("init store"));
+        let lock = live_lock(&database);
+        let lock_inode = inode(&lock);
+        let config = write_config(dir.path(), &database);
+        let archive = dir.path().join("archive");
+        let held = nix::fcntl::Flock::lock(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock)
+                .expect("open live lock"),
+            nix::fcntl::FlockArg::LockExclusiveNonblock,
+        )
+        .map_err(|(_, error)| error)
+        .expect("hold the live guard");
+
+        let error = create_archive(&config, &archive).expect_err("a held guard refuses");
+
+        assert!(
+            format!("{error:#}").contains("concurrent writer owns operation guard"),
+            "{error:#}"
+        );
+        assert!(!archive.exists());
+        no_staging_remains(dir.path());
+        drop(held);
+        assert_live_lock_effective(&database, lock_inode);
     }
 
     #[test]
