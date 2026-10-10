@@ -703,6 +703,18 @@ fn backup_restore_and_already_current_upgrade_are_verified_and_non_destructive()
     let doctor = success(run(nq, &config, &["doctor"]));
     assert_eq!(doctor["diagnostic_artifacts"]["state"], "empty");
     assert_ne!(doctor["diagnostic_artifacts"]["state"], "current");
+    // Doctor reports retention and capacity explicitly (NQ #27 G2).
+    assert_eq!(doctor["database"], "healthy");
+    assert_eq!(doctor["capacity"]["preflight"], "admit");
+    assert!(doctor["capacity"]["aggregate_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(doctor["retention"]["generation"], 0);
+    assert_eq!(doctor["retention"]["evaluation_floor"], 0);
+    assert_eq!(doctor["retention"]["horizon_seconds"], 604_800);
+    assert_eq!(doctor["retention"]["custody_pending_events"], 0);
+    let validated = success(run(nq, &config, &["admin", "validate", "--full"]));
+    assert_eq!(validated["validated"], "full");
+    assert_eq!(validated["history"]["coverage"], "complete");
+    assert_eq!(validated["history"]["retention"]["generation"], 0);
     let status_before = success(run(nq, &config, &["status", "export"]));
     let findings_before = success(run(nq, &config, &["findings", "export"]));
 
@@ -1122,8 +1134,8 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     let receipts = read_only_upgrade_receipts(&database);
     assert_eq!(
         receipts.len(),
-        5,
-        "v3 to the current schema requires five exact receipts"
+        6,
+        "v3 to the current schema requires six exact receipts"
     );
     let receipt = &receipts[0];
     assert_eq!(receipt.from_version, 3);
@@ -1197,6 +1209,22 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
         expiry_verification["historical_expiry"],
         "absent_not_synthesized"
     );
+    let receipt_v14 = &receipts[5];
+    assert_eq!(receipt_v14.from_version, 14);
+    assert_eq!(receipt_v14.to_version, 15);
+    assert_eq!(receipt_v14.result, "migrated");
+    let v14_backup = PathBuf::from(&receipt_v14.backup_location);
+    assert_eq!(sha256_file(&v14_backup), receipt_v14.backup_digest);
+    assert_eq!(
+        nq_store::Store::database_schema_version(&v14_backup).unwrap(),
+        14
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&receipt_v14.migrations_json).unwrap(),
+        serde_json::json!(["schema_v14_to_v15_declared_holes"])
+    );
+    let holes_verification: Value = serde_json::from_str(&receipt_v14.verification_json).unwrap();
+    assert_eq!(holes_verification["persisted_envelope"], "unchanged");
     let verification: Value = serde_json::from_str(&receipt.verification_json).unwrap();
     assert_eq!(
         verification["historical_saved_checks"],

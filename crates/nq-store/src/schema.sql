@@ -1,10 +1,10 @@
 PRAGMA application_id = 1313951303; -- "NQNG"
-PRAGMA user_version = 14;
+PRAGMA user_version = 15;
 
 CREATE TABLE schema_metadata (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     product TEXT NOT NULL CHECK (product = 'nq-ng'),
-    schema_version INTEGER NOT NULL CHECK (schema_version = 14),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 15),
     -- Digest of the exact schema.sql artifact compiled into the writing binary.
     -- Rejects stale provisional-candidate databases at startup; it is NOT a
     -- tamper attestation of the live SQLite schema (which the structural
@@ -223,7 +223,7 @@ CREATE TABLE raw_submissions (
     received_at TEXT NOT NULL,
     protocol_outcome TEXT NOT NULL,
     admission_outcome TEXT NOT NULL CHECK (admission_outcome IN ('admitted', 'rejected')),
-    rejection_code TEXT,
+    rejection_code TEXT, source_expired INTEGER NOT NULL DEFAULT 0 CHECK(source_expired IN (0,1)),
     CHECK ((admission_outcome = 'admitted' AND rejection_code IS NULL)
         OR admission_outcome = 'rejected'),
     FOREIGN KEY (run_id) REFERENCES watcher_runs(run_id)
@@ -256,7 +256,7 @@ CREATE TABLE admitted_reports (
     -- admission reached through its run. The trigger below forbids any other value.
     admission_context_digest TEXT NOT NULL CHECK (length(admission_context_digest) = 71 AND substr(admission_context_digest, 1, 7) = 'sha256:'),
     next_checkpoint_json BLOB CHECK (next_checkpoint_json IS NULL OR json_valid(CAST(next_checkpoint_json AS TEXT))),
-    admitted_at TEXT NOT NULL,
+    admitted_at TEXT NOT NULL, source_expired INTEGER NOT NULL DEFAULT 0 CHECK(source_expired IN (0,1)),
     UNIQUE (report_id, semantic_digest),
     FOREIGN KEY (submission_id) REFERENCES raw_submissions(submission_id),
     FOREIGN KEY (profile_id, profile_version, profile_digest)
@@ -354,7 +354,7 @@ CREATE TABLE evaluation_runs (
     started_at TEXT NOT NULL,
     evaluated_at TEXT NOT NULL,
     outcome TEXT NOT NULL CHECK (outcome IN ('condition_present', 'condition_explicitly_absent', 'cannot_evaluate')),
-    detail_json BLOB NOT NULL CHECK (json_valid(CAST(detail_json AS TEXT))),
+    detail_json BLOB NOT NULL CHECK (json_valid(CAST(detail_json AS TEXT))), source_expired INTEGER NOT NULL DEFAULT 0 CHECK(source_expired IN (0,1)),
     UNIQUE (detector_id, detector_version, evaluation_revision),
     FOREIGN KEY (trigger_run_id) REFERENCES watcher_runs(run_id),
     FOREIGN KEY (profile_id, profile_version, profile_digest)
@@ -779,9 +779,9 @@ CREATE TRIGGER immutable_local_watcher_provider_intakes_update BEFORE UPDATE ON 
 CREATE TRIGGER immutable_local_watcher_provider_intakes_delete BEFORE DELETE ON local_watcher_provider_intakes WHEN COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0) != 1 BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_legacy_v3_watcher_run_intake_gaps_update BEFORE UPDATE ON legacy_v3_watcher_run_intake_gaps BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_legacy_v3_watcher_run_intake_gaps_delete BEFORE DELETE ON legacy_v3_watcher_run_intake_gaps WHEN COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0) != 1 BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_raw_submissions_update BEFORE UPDATE ON raw_submissions BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+CREATE TRIGGER immutable_raw_submissions_update BEFORE UPDATE ON raw_submissions WHEN NOT (COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0)=1 AND OLD.source_expired=0 AND NEW.source_expired=1 AND length(NEW.raw_bytes)=0 AND NEW.submission_id IS OLD.submission_id AND NEW.run_id IS OLD.run_id AND NEW.raw_sha256 IS OLD.raw_sha256 AND NEW.received_at IS OLD.received_at AND NEW.protocol_outcome IS OLD.protocol_outcome AND NEW.admission_outcome IS OLD.admission_outcome AND NEW.rejection_code IS OLD.rejection_code) BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_raw_submissions_delete BEFORE DELETE ON raw_submissions WHEN COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0) != 1 BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_admitted_reports_update BEFORE UPDATE ON admitted_reports BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+CREATE TRIGGER immutable_admitted_reports_update BEFORE UPDATE ON admitted_reports WHEN NOT (COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0)=1 AND OLD.source_expired=0 AND NEW.source_expired=1 AND NEW.canonical_json=CAST('{}' AS BLOB) AND NEW.validated_report_json=CAST('{}' AS BLOB) AND NEW.next_checkpoint_json IS NULL AND NEW.report_sequence IS OLD.report_sequence AND NEW.report_id IS OLD.report_id AND NEW.submission_id IS OLD.submission_id AND NEW.instance_id IS OLD.instance_id AND NEW.profile_id IS OLD.profile_id AND NEW.profile_version IS OLD.profile_version AND NEW.profile_digest IS OLD.profile_digest AND NEW.observed_at IS OLD.observed_at AND NEW.received_at IS OLD.received_at AND NEW.report_status IS OLD.report_status AND NEW.semantic_digest IS OLD.semantic_digest AND NEW.judgment_schema_version IS OLD.judgment_schema_version AND NEW.judgment_digest IS OLD.judgment_digest AND NEW.admission_context_digest IS OLD.admission_context_digest AND NEW.admitted_at IS OLD.admitted_at) BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_admitted_reports_delete BEFORE DELETE ON admitted_reports WHEN COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0) != 1 BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_observations_update BEFORE UPDATE ON observations BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_observations_delete BEFORE DELETE ON observations WHEN COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0) != 1 BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
@@ -791,7 +791,7 @@ CREATE TRIGGER immutable_observation_coverage_update BEFORE UPDATE ON observatio
 CREATE TRIGGER immutable_observation_coverage_delete BEFORE DELETE ON observation_coverage WHEN COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0) != 1 BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_report_errors_update BEFORE UPDATE ON report_errors BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_report_errors_delete BEFORE DELETE ON report_errors WHEN COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0) != 1 BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_evaluation_runs_update BEFORE UPDATE ON evaluation_runs BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+CREATE TRIGGER immutable_evaluation_runs_update BEFORE UPDATE ON evaluation_runs WHEN NOT (COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0)=1 AND OLD.source_expired=0 AND NEW.source_expired=1 AND NEW.detail_json=CAST('{}' AS BLOB) AND NEW.evaluation_id IS OLD.evaluation_id AND NEW.evaluation_sequence IS OLD.evaluation_sequence AND NEW.detector_id IS OLD.detector_id AND NEW.detector_version IS OLD.detector_version AND NEW.detector_digest IS OLD.detector_digest AND NEW.evaluator_artifact_digest IS OLD.evaluator_artifact_digest AND NEW.trigger_run_id IS OLD.trigger_run_id AND NEW.profile_id IS OLD.profile_id AND NEW.profile_version IS OLD.profile_version AND NEW.profile_digest IS OLD.profile_digest AND NEW.profile_semantic_id IS OLD.profile_semantic_id AND NEW.evaluation_revision IS OLD.evaluation_revision AND NEW.started_at IS OLD.started_at AND NEW.evaluated_at IS OLD.evaluated_at AND NEW.outcome IS OLD.outcome) BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_evaluation_runs_delete BEFORE DELETE ON evaluation_runs WHEN COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0) != 1 BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_evaluation_watermarks_update BEFORE UPDATE ON evaluation_watermarks BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_evaluation_watermarks_delete BEFORE DELETE ON evaluation_watermarks WHEN COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0) != 1 BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
@@ -876,3 +876,13 @@ CREATE UNIQUE INDEX provider_intake_attempts_by_retired_run_id ON provider_intak
 CREATE UNIQUE INDEX provider_intake_attempts_by_retired_submission_id ON provider_intake_attempts(retired_submission_id) WHERE retired_submission_id IS NOT NULL;
 
 CREATE UNIQUE INDEX provider_intake_attempts_by_retired_report_id ON provider_intake_attempts(retired_report_id) WHERE retired_report_id IS NOT NULL;
+
+CREATE INDEX evaluation_runs_full_by_sequence ON evaluation_runs(evaluation_sequence) WHERE source_expired=0;
+
+CREATE INDEX admitted_reports_full_by_sequence ON admitted_reports(report_sequence) WHERE source_expired=0;
+
+CREATE INDEX evaluation_watermarks_by_report ON evaluation_watermarks(instance_id, max_report_sequence);
+
+CREATE INDEX finding_evidence_by_report ON finding_evidence(report_id);
+
+CREATE INDEX finding_events_by_evaluation ON finding_events(evaluation_id);

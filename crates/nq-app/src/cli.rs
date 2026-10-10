@@ -2244,11 +2244,22 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
             "available_supported"
         };
     let artifact_custody_complete = matches!(artifact_state, "empty" | "available_supported");
-    let healthy = instances_healthy && artifact_custody_complete;
+    // Retention and capacity are reported, not inferred: a store that would
+    // refuse its next write is not reported healthy.
+    let retention = store.retention_report()?;
+    let capacity = store.capacity_report()?;
+    let database = if capacity.preflight == "admit" {
+        "healthy"
+    } else {
+        "capacity_refusing"
+    };
+    let healthy = instances_healthy && artifact_custody_complete && database == "healthy";
     print_value(
         &json!({
             "healthy": healthy,
-            "database": "healthy",
+            "database": database,
+            "retention": retention,
+            "capacity": capacity,
             "diagnostic_artifacts": {
                 "state": artifact_state,
                 "commitments": diagnostic_artifacts.commitments,
@@ -2636,6 +2647,41 @@ fn upgrade_v13_to_current(
         retention.auxiliary_bytes,
     )?
     .validate()?;
+    upgrade_v14_to_current(database_path, backup_directory, binary_digest, operator_identity)?;
+    Ok((backup, artifact.sha256))
+}
+
+/// Add declared protected holes to a schema-v14 store under its persisted
+/// operating envelope, through an explicit verified backup.
+fn upgrade_v14_to_current(
+    database_path: &Path,
+    backup_directory: &Path,
+    binary_digest: &str,
+    operator_identity: &CanonicalDocument,
+) -> Result<(PathBuf, String)> {
+    let started_at = chrono::Utc::now();
+    let temporary = backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
+    let artifact = Store::backup_v14_verified(database_path, &temporary)?;
+    let backup = finalize_upgrade_backup(&temporary, backup_directory, &artifact.sha256)?;
+    let receipt = UpgradeReceiptInput {
+        receipt_id: uuid::Uuid::new_v4().to_string(),
+        from_schema_version: 14,
+        to_schema_version: 15,
+        migrations: CanonicalDocument::from_serializable(&["schema_v14_to_v15_declared_holes"])?,
+        binary_digest: binary_digest.to_owned(),
+        backup_digest: artifact.sha256.clone(),
+        backup_location: backup.display().to_string(),
+        started_at: started_at.to_rfc3339(),
+        finished_at: started_at.to_rfc3339(),
+        result: "migrated".into(),
+        operator_identity: operator_identity.clone(),
+        verification: CanonicalDocument::from_serializable(&json!({
+            "integrity":"ok", "source_schema_version":14,
+            "source_schema_artifact_digest":nq_store::SCHEMA_V14_ARTIFACT_DIGEST,
+            "backup_reopened":true, "persisted_envelope":"unchanged"
+        }))?,
+    };
+    Store::upgrade_v14_to_v15(database_path, &receipt)?.validate()?;
     Ok((backup, artifact.sha256))
 }
 
@@ -2687,9 +2733,16 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
             let config = NqConfig::load(config_path)?;
             let started = std::time::Instant::now();
             let (verification, watermark) = record_full_validation(&config.database_path)?;
+            let retention = Store::open_read_only(&config.database_path)?.retention_report()?;
             print_value(
                 &json!({
                     "validated": "full",
+                    // Full validation of the surviving history; after expiry
+                    // this is not full-history verification.
+                    "history": {
+                        "coverage": if retention.generation == 0 { "complete" } else { "bounded" },
+                        "retention": retention,
+                    },
                     "database": config.database_path,
                     "watermark": watermark.as_ref().map(|_| {
                         nq_store::watermark_path(&config.database_path)
@@ -2976,6 +3029,21 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                     record_full_validation(&config.database_path)?;
                     print_value(
                         &json!({"result":"migrated","from_schema_version":12,"schema_version":nq_store::SCHEMA_VERSION,"backup":backup,"backup_digest":backup_digest,"historical_local_successor_acquisitions":"absent_not_synthesized"}),
+                        json_output,
+                    )
+                }
+                14 => {
+                    let (backup, backup_digest) = upgrade_v14_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                    )?;
+                    record_full_validation(&config.database_path)?;
+                    print_value(
+                        &json!({"result":"migrated","from_schema_version":14,
+                        "schema_version":nq_store::SCHEMA_VERSION,"backup":backup,
+                        "backup_digest":backup_digest,"persisted_envelope":"unchanged"}),
                         json_output,
                     )
                 }

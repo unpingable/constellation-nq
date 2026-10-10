@@ -1,7 +1,7 @@
 //! Conservative prefix reclamation inside the existing store. Dependencies
 //! stop the prefix; capacity refusal is preferable to guessing their release.
 use crate::{CanonicalDocument, HistoryFrontier, Store, StoreError, ValidationState};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -99,34 +99,7 @@ pub(crate) fn validate_boundary_scoped(
 
 pub(crate) fn validate_boundary(connection: &Connection) -> Result<(), StoreError> {
     let b = validate_boundary_header(connection)?;
-    for (table, column, floor) in [
-        ("evaluation_runs", "evaluation_sequence", b.evaluation_floor),
-        ("admitted_reports", "report_sequence", b.report_floor),
-        (
-            "provider_intake_attempts",
-            "intake_sequence",
-            b.intake_floor,
-        ),
-        ("status_events", "status_sequence", b.status_floor),
-    ] {
-        let subtype = if table == "status_events" {
-            " AND run_id IS NOT NULL"
-        } else if table == "provider_intake_attempts" {
-            " AND history_expired=0"
-        } else {
-            ""
-        };
-        let count: i64 = connection.query_row(
-            &format!("SELECT COUNT(*) FROM {table} WHERE {column}<=?1{subtype}"),
-            [floor],
-            |r| r.get(0),
-        )?;
-        if count != 0 {
-            return Err(StoreError::Integrity(format!(
-                "{table} revives an expired prefix"
-            )));
-        }
-    }
+    validate_retained_below_floors(connection, &b)?;
     for (table, column, floor) in [
         ("admitted_reports", "report_sequence", b.report_floor),
         (
@@ -163,6 +136,125 @@ pub(crate) fn validate_boundary(connection: &Connection) -> Result<(), StoreErro
     }
     Ok(())
 }
+/// Evaluation `e` (full) has a root relationship that may keep it below the
+/// floor: a finding or saved-check row names it, it is a diagnostic origin,
+/// or it is the newest evaluation of its lineage at or below the floor.
+fn evaluation_root_sql(e: &str) -> String {
+    let lineage_e = lineage_sql(e);
+    let lineage_n = lineage_sql("root_newer");
+    format!(
+        "(EXISTS(SELECT 1 FROM finding_events root_f WHERE root_f.evaluation_id={e}.evaluation_id) OR EXISTS(SELECT 1 FROM saved_check_events root_c WHERE root_c.evaluation_id={e}.evaluation_id) OR EXISTS(SELECT 1 FROM local_diagnostic_artifact_origins root_o WHERE root_o.evaluation_id={e}.evaluation_id) OR NOT EXISTS(SELECT 1 FROM evaluation_watermarks root_w JOIN evaluation_runs root_newer ON root_newer.evaluation_id=root_w.evaluation_id WHERE root_w.instance_id=(SELECT own.instance_id FROM evaluation_watermarks own WHERE own.evaluation_id={e}.evaluation_id) AND root_newer.detector_id={e}.detector_id AND root_newer.detector_version={e}.detector_version AND root_newer.evaluation_revision>{e}.evaluation_revision AND root_newer.evaluation_sequence<=?1 AND root_newer.source_expired=0 AND {lineage_n}={lineage_e}))"
+    )
+}
+
+/// Run `x` has a root relationship that justifies keeping its whole closure
+/// below the floors. Liveness is not required: a root released since the last
+/// expiry stays legal until the next expiry reclaims it. Parameters: ?1
+/// evaluation floor, ?2 report floor, ?4 status floor.
+fn justified_run_sql(x: &str) -> String {
+    let evaluation_root = evaluation_root_sql("je");
+    format!(
+        "(EXISTS(SELECT 1 FROM local_successor_acquisition_intents js WHERE js.run_id={x})
+          OR EXISTS(SELECT 1 FROM local_diagnostic_artifact_origins jo WHERE jo.run_id={x})
+          OR EXISTS(SELECT 1 FROM evaluation_runs je WHERE je.trigger_run_id={x} AND je.source_expired=0 AND {evaluation_root})
+          OR EXISTS(SELECT 1 FROM raw_submissions jr JOIN admitted_reports ja ON ja.submission_id=jr.submission_id WHERE jr.run_id={x} AND ja.source_expired=0 AND (
+               ja.report_id IN (SELECT report_id FROM finding_evidence)
+            OR ja.report_sequence=(SELECT MAX(jx.report_sequence) FROM admitted_reports jx WHERE jx.instance_id=ja.instance_id AND jx.report_sequence<=?2)
+            OR EXISTS(SELECT 1 FROM evaluation_watermarks jw JOIN evaluation_runs jwe ON jwe.evaluation_id=jw.evaluation_id WHERE jw.instance_id=ja.instance_id AND jw.max_report_sequence=ja.report_sequence AND jwe.source_expired=0)
+            OR ja.report_id IN (SELECT j.value FROM evaluation_runs jj, json_tree(CAST(jj.detail_json AS TEXT)) j WHERE jj.source_expired=0 AND j.type='text')
+            OR (ja.next_checkpoint_json IS NOT NULL AND EXISTS(SELECT 1 FROM watcher_runs jcw JOIN local_watcher_provider_intakes jcl ON jcl.run_id=jcw.run_id JOIN provider_intake_acknowledgments jca ON jca.intake_id=jcl.intake_id AND jca.run_id=jcl.run_id WHERE jcw.run_id={x} AND NOT EXISTS(SELECT 1 FROM admitted_reports newer JOIN raw_submissions ns ON ns.submission_id=newer.submission_id JOIN watcher_runs nw ON nw.run_id=ns.run_id JOIN local_watcher_provider_intakes nl ON nl.run_id=nw.run_id JOIN provider_intake_acknowledgments na ON na.intake_id=nl.intake_id AND na.run_id=nl.run_id WHERE newer.instance_id=ja.instance_id AND nw.checkpoint_contract_digest=jcw.checkpoint_contract_digest AND newer.next_checkpoint_json IS NOT NULL AND newer.report_sequence>ja.report_sequence AND newer.report_sequence<=?2)))))
+          OR EXISTS(SELECT 1 FROM status_events jt WHERE jt.run_id={x} AND jt.status_sequence=(SELECT MAX(jo2.status_sequence) FROM status_events jo2 WHERE jo2.component_kind=jt.component_kind AND jo2.component_id=jt.component_id AND jo2.run_id IS NOT NULL AND jo2.status_sequence<=?4)))"
+    )
+}
+
+/// Declared protected holes: every row that survives at or below a floor is
+/// either part of a whole collection some root relationship justifies, or a
+/// compact source record a retained consequential row names. Anything else is
+/// an undeclared retained row and fails closed. A live root whose closure was
+/// compacted fails closed too (under-retention).
+#[allow(clippy::too_many_lines)]
+fn validate_retained_below_floors(
+    connection: &Connection,
+    b: &RetentionBoundary,
+) -> Result<(), StoreError> {
+    let floors = [
+        b.evaluation_floor,
+        b.report_floor,
+        b.intake_floor,
+        b.status_floor,
+    ];
+    // Each check binds exactly the floors it names (?1..?4 by position).
+    let first = |sql: &str| -> Result<Option<String>, StoreError> {
+        let mut statement = connection.prepare(sql)?;
+        let count = statement.parameter_count();
+        Ok(statement
+            .query_row(rusqlite::params_from_iter(&floors[..count]), |r| r.get(0))
+            .optional()?)
+    };
+    let justified = |x: &str| justified_run_sql(x);
+    let evaluation_root = evaluation_root_sql("e");
+    for (table, floor, sql) in [
+        (
+            "evaluation_runs",
+            b.evaluation_floor,
+            format!("SELECT e.evaluation_id FROM evaluation_runs e WHERE e.evaluation_sequence<=?1 AND e.source_expired=0 AND NOT ({evaluation_root} OR (e.trigger_run_id IS NOT NULL AND {})) ORDER BY e.evaluation_sequence LIMIT 1", justified("e.trigger_run_id")),
+        ),
+        (
+            "admitted_reports",
+            b.report_floor,
+            format!("SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE a.report_sequence<=?2 AND a.source_expired=0 AND NOT {} ORDER BY a.report_sequence LIMIT 1", justified("r.run_id")),
+        ),
+        (
+            "provider_intake_attempts",
+            b.intake_floor,
+            format!("SELECT p.intake_id FROM provider_intake_attempts p LEFT JOIN local_watcher_provider_intakes l ON l.intake_id=p.intake_id WHERE p.intake_sequence<=?3 AND p.history_expired=0 AND (l.run_id IS NULL OR NOT {}) ORDER BY p.intake_sequence LIMIT 1", justified("l.run_id")),
+        ),
+        (
+            "status_events",
+            b.status_floor,
+            format!("SELECT s.status_event_id FROM status_events s WHERE s.status_sequence<=?4 AND s.run_id IS NOT NULL AND NOT {} ORDER BY s.status_sequence LIMIT 1", justified("s.run_id")),
+        ),
+    ] {
+        if let Some(key) = first(&sql)? {
+            return Err(StoreError::Integrity(format!(
+                "{table} revives an expired prefix: undeclared retained row {key} below floor {floor}"
+            )));
+        }
+    }
+    if let Some(id) = first("SELECT e.evaluation_id FROM evaluation_runs e WHERE e.source_expired=1 AND (e.evaluation_sequence>?1 OR e.detail_json<>CAST('{}' AS BLOB) OR NOT (EXISTS(SELECT 1 FROM finding_events f WHERE f.evaluation_id=e.evaluation_id) OR EXISTS(SELECT 1 FROM saved_check_events c WHERE c.evaluation_id=e.evaluation_id)) OR EXISTS(SELECT 1 FROM evaluation_watermarks w WHERE w.evaluation_id=e.evaluation_id) OR EXISTS(SELECT 1 FROM refusals x WHERE x.evaluation_id=e.evaluation_id) OR (e.trigger_run_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM raw_submissions s WHERE s.run_id=e.trigger_run_id AND s.source_expired=1))) LIMIT 1")? {
+        return Err(StoreError::Integrity(format!(
+            "source-expired evaluation {id} is not a declared decision record"
+        )));
+    }
+    if let Some(id) = first("SELECT a.report_id FROM admitted_reports a WHERE a.source_expired=1 AND (a.report_sequence>?2 OR a.canonical_json<>CAST('{}' AS BLOB) OR a.validated_report_json<>CAST('{}' AS BLOB) OR a.next_checkpoint_json IS NOT NULL OR NOT (a.report_id IN (SELECT report_id FROM finding_evidence) OR EXISTS(SELECT 1 FROM raw_submissions r JOIN evaluation_runs e ON e.trigger_run_id=r.run_id WHERE r.submission_id=a.submission_id AND e.source_expired=1)) OR EXISTS(SELECT 1 FROM observations o WHERE o.report_id=a.report_id) OR EXISTS(SELECT 1 FROM report_coverage c WHERE c.report_id=a.report_id) OR EXISTS(SELECT 1 FROM report_errors x WHERE x.report_id=a.report_id) OR NOT EXISTS(SELECT 1 FROM raw_submissions r WHERE r.submission_id=a.submission_id AND r.source_expired=1)) LIMIT 1")? {
+        return Err(StoreError::Integrity(format!(
+            "source-expired report {id} is not a declared evidence record"
+        )));
+    }
+    if let Some(id) = first("SELECT r.submission_id FROM raw_submissions r WHERE r.source_expired=1 AND (length(r.raw_bytes)<>0 OR r.admission_outcome<>'admitted' OR NOT EXISTS(SELECT 1 FROM admitted_reports a WHERE a.submission_id=r.submission_id AND a.source_expired=1) OR EXISTS(SELECT 1 FROM status_events s WHERE s.run_id=r.run_id) OR EXISTS(SELECT 1 FROM local_watcher_provider_intakes l WHERE l.run_id=r.run_id)) LIMIT 1")? {
+        return Err(StoreError::Integrity(format!(
+            "source-expired submission {id} is not a declared anchor"
+        )));
+    }
+    if let Some(id) = first("SELECT e.evaluation_id FROM evaluation_runs e JOIN raw_submissions s ON s.run_id=e.trigger_run_id WHERE e.source_expired=0 AND s.source_expired=1 LIMIT 1")? {
+        return Err(StoreError::Integrity(format!(
+            "evaluation {id} keeps full history for a source-expired run"
+        )));
+    }
+    let live = live_finding_event_sql("f");
+    if let Some(id) = first(&format!("SELECT f.event_id FROM finding_events f WHERE {live} AND (EXISTS(SELECT 1 FROM evaluation_runs e WHERE e.evaluation_id=f.evaluation_id AND e.source_expired=1) OR EXISTS(SELECT 1 FROM finding_evidence v JOIN admitted_reports a ON a.report_id=v.report_id WHERE v.event_id=f.event_id AND a.source_expired=1)) LIMIT 1"))? {
+        return Err(StoreError::Integrity(format!(
+            "live protected closure compacted: finding event {id}"
+        )));
+    }
+    if let Some(id) = first("SELECT c.evaluation_id FROM saved_check_events c JOIN evaluation_runs e ON e.evaluation_id=c.evaluation_id WHERE e.source_expired=1 AND c.outcome='claimed' AND NOT EXISTS(SELECT 1 FROM saved_check_events t WHERE t.evaluation_id=c.evaluation_id AND t.outcome IN ('refused','passed','failed')) LIMIT 1")? {
+        return Err(StoreError::Integrity(format!(
+            "live protected closure compacted: saved-check claim {id}"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn lineage_floor(
     connection: &Connection,
     id: &str,
@@ -271,13 +363,389 @@ fn prefix_may_advance(
             AND NOT EXISTS(SELECT 1 FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE r.run_id=w.run_id AND (julianday(a.received_at)>=julianday(?1) OR julianday(a.admitted_at)>=julianday(?1) OR julianday(a.received_at) IS NULL OR julianday(a.admitted_at) IS NULL))
             AND NOT EXISTS(SELECT 1 FROM local_watcher_provider_intakes l JOIN provider_intake_attempts p ON p.intake_id=l.intake_id WHERE l.run_id=w.run_id AND (julianday(p.received_at)>=julianday(?1) OR julianday(p.received_at) IS NULL)))",
         params![cutoff,b.report_floor,b.intake_floor,b.status_floor,b.evaluation_floor], |r| r.get(0),
+    )? || released_island_exists(connection, b)?)
+}
+
+/// A full evaluation kept below the floor for a finding or saved-check root
+/// whose obligation has ended (resolved and custody terminal, or claim
+/// completed), and which no other evaluation root still holds. Such an
+/// island becomes reclaimable even when no new row has aged.
+fn released_island_exists(
+    connection: &Connection,
+    b: &RetentionBoundary,
+) -> Result<bool, StoreError> {
+    Ok(released_islands(connection, b)? > 0)
+}
+
+/// Count of [`released_island_exists`] candidates.
+fn released_islands(connection: &Connection, b: &RetentionBoundary) -> Result<i64, StoreError> {
+    if b.generation == 0 || !holes_schema(connection)? {
+        return Ok(0);
+    }
+    let live = live_finding_event_sql("f");
+    let newest = lineage_newest_sql("e");
+    Ok(connection.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM evaluation_runs e WHERE e.evaluation_sequence<=?1 AND e.source_expired=0
+               AND (EXISTS(SELECT 1 FROM finding_events f WHERE f.evaluation_id=e.evaluation_id) OR EXISTS(SELECT 1 FROM saved_check_events c WHERE c.evaluation_id=e.evaluation_id))
+               AND NOT EXISTS(SELECT 1 FROM finding_events f WHERE f.evaluation_id=e.evaluation_id AND {live})
+               AND NOT EXISTS(SELECT 1 FROM saved_check_events c WHERE c.evaluation_id=e.evaluation_id AND c.outcome='claimed' AND NOT EXISTS(SELECT 1 FROM saved_check_events t WHERE t.evaluation_id=c.evaluation_id AND t.outcome IN ('refused','passed','failed')))
+               AND NOT EXISTS(SELECT 1 FROM local_diagnostic_artifact_origins o WHERE o.evaluation_id=e.evaluation_id)
+               AND NOT EXISTS(SELECT 1 FROM local_diagnostic_artifact_origins o WHERE o.run_id=e.trigger_run_id)
+               AND NOT EXISTS(SELECT 1 FROM local_successor_acquisition_intents s WHERE s.run_id=e.trigger_run_id)
+               AND NOT {newest})"
+        ),
+        [b.evaluation_floor],
+        |r| r.get(0),
     )?)
+}
+
+/// SQL for the evaluation-lineage identity of `evaluation_runs` row `alias`,
+/// over the same envelope fields the engine's lineage key covers. Compact
+/// rows carry no envelope and never match a full row.
+pub(crate) fn lineage_sql(alias: &str) -> String {
+    let field = |path: &str| {
+        format!("json_extract(CAST({alias}.detail_json AS TEXT),'{path}')")
+    };
+    format!(
+        "json_array({},{},{},{},{},{},{})",
+        field("$.context.instance_id"),
+        field("$.detector"),
+        field("$.profile"),
+        field("$.context.subject"),
+        field("$.context.scope"),
+        field("$.context.vantage"),
+        field("$.result.condition"),
+    )
+}
+
+/// Evaluation `e` is the newest full evaluation of its evaluation lineage.
+/// Candidates are read through the instance-scoped watermark index, so a
+/// stale lineage of a removed instance is decided from that instance's rows.
+pub(crate) fn lineage_newest_sql(e: &str) -> String {
+    let lineage_e = lineage_sql(e);
+    let lineage_n = lineage_sql("newer");
+    format!(
+        "NOT EXISTS(SELECT 1 FROM evaluation_watermarks newer_watermark JOIN evaluation_runs newer ON newer.evaluation_id=newer_watermark.evaluation_id WHERE newer_watermark.instance_id=(SELECT own.instance_id FROM evaluation_watermarks own WHERE own.evaluation_id={e}.evaluation_id) AND newer.detector_id={e}.detector_id AND newer.detector_version={e}.detector_version AND newer.evaluation_revision>{e}.evaluation_revision AND newer.source_expired=0 AND {lineage_n}={lineage_e})"
+    )
+}
+
+/// Whether the connection's schema has declared protected holes (v15+).
+pub(crate) fn holes_schema(connection: &Connection) -> Result<bool, StoreError> {
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    Ok(version >= 15)
+}
+
+/// Predicate selecting full (not source-expired) rows of `alias`.
+pub(crate) fn full_source_condition(
+    connection: &Connection,
+    alias: &str,
+) -> Result<String, StoreError> {
+    Ok(if holes_schema(connection)? {
+        format!("{alias}.source_expired=0")
+    } else {
+        "1".into()
+    })
+}
+
+/// Predicate over a run alias excluding compact anchor runs: runs kept only as
+/// the identity a compact report or evaluation names. Their result, intake and
+/// evaluation closure expired; they are validated as commitments instead.
+pub(crate) fn non_anchor_run_condition(
+    connection: &Connection,
+    run_alias: &str,
+) -> Result<String, StoreError> {
+    Ok(if holes_schema(connection)? {
+        format!(
+            "NOT EXISTS (SELECT 1 FROM raw_submissions AS anchor_submission WHERE anchor_submission.run_id = {run_alias}.run_id AND anchor_submission.source_expired = 1)"
+        )
+    } else {
+        "1".into()
+    })
+}
+
+/// Notification custody for outbox row `o` has ended: a delivery intent has an
+/// accepted, refused or failed outcome, or a legacy outbox reached delivered,
+/// failed, or exhausted its retryable attempts. `unknown` and pending keep it.
+const CUSTODY_TERMINAL: &str = "((EXISTS(SELECT 1 FROM notification_delivery_intents i WHERE i.notification_id=o.notification_id) AND EXISTS(SELECT 1 FROM notification_delivery_events d WHERE d.notification_id=o.notification_id AND d.outcome IN ('accepted','refused','failed'))) OR (NOT EXISTS(SELECT 1 FROM notification_delivery_intents i WHERE i.notification_id=o.notification_id) AND (COALESCE((SELECT a.outcome FROM notification_attempts a WHERE a.notification_id=o.notification_id ORDER BY a.attempt_number DESC LIMIT 1),'') IN ('delivered','failed') OR (COALESCE((SELECT a.outcome FROM notification_attempts a WHERE a.notification_id=o.notification_id ORDER BY a.attempt_number DESC LIMIT 1),'')='retryable' AND (SELECT COUNT(*) FROM notification_attempts a WHERE a.notification_id=o.notification_id)>=o.max_attempts))))";
+
+/// Finding events `e` whose closure must stay complete: the latest event and
+/// the current episode's opening event of an unresolved finding, and any event
+/// whose notification custody has not ended.
+pub(crate) fn live_finding_event_sql(e: &str) -> String {
+    format!(
+        "(EXISTS(SELECT 1 FROM finding_current c JOIN finding_events h ON h.event_id=c.latest_event_id WHERE c.finding_id={e}.finding_id AND h.condition_state<>'explicitly_absent' AND (h.event_id={e}.event_id OR {e}.event_revision=(SELECT MAX(x.event_revision) FROM finding_events x WHERE x.finding_id={e}.finding_id AND x.event_kind IN ('opened','reopened')))) OR EXISTS(SELECT 1 FROM notification_outbox o WHERE o.finding_event_id={e}.event_id AND NOT {CUSTODY_TERMINAL}))"
+    )
+}
+
+/// The expiry decision computed inside the guarded transaction. Temporary
+/// tables carry the selected rows to the mutation phase:
+/// `expiry_runs` (aged candidates), `expiry_protected` (island runs),
+/// `expiry_evaluations` (full evaluations at or below the new floor with their
+/// disposition: island, compact, or delete), `expiry_compact_reports`, and
+/// `expiry_dead_runs` (runs whose closure retires; `anchor=1` keeps the run
+/// row because a compact report names it).
+struct ExpiryPlan {
+    evaluation_floor: i64,
+    report_floor: i64,
+    intake_floor: i64,
+    status_floor: i64,
+    affected_runs: i64,
+    affected_evaluations: i64,
+}
+
+#[allow(clippy::too_many_lines)]
+fn plan_expiry(
+    tx: &Connection,
+    cutoff: &str,
+    before: &RetentionBoundary,
+) -> Result<ExpiryPlan, StoreError> {
+    tx.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS expiry_runs(run_id TEXT PRIMARY KEY); DELETE FROM expiry_runs;
+         CREATE TEMP TABLE IF NOT EXISTS expiry_protected(run_id TEXT PRIMARY KEY); DELETE FROM expiry_protected;
+         CREATE TEMP TABLE IF NOT EXISTS expiry_evaluations(evaluation_id TEXT PRIMARY KEY, trigger_run_id TEXT, disposition TEXT NOT NULL); DELETE FROM expiry_evaluations;
+         CREATE TEMP TABLE IF NOT EXISTS expiry_compact_reports(report_id TEXT PRIMARY KEY); DELETE FROM expiry_compact_reports;
+         CREATE TEMP TABLE IF NOT EXISTS expiry_dead_runs(run_id TEXT PRIMARY KEY, anchor INTEGER NOT NULL); DELETE FROM expiry_dead_runs;",
+    )?;
+    // Aged, completed runs. Anchor runs (a compact report names them) are
+    // already retired and never candidates again.
+    tx.execute("INSERT INTO expiry_runs SELECT run_id FROM watcher_runs w WHERE julianday(finished_at)<julianday(?1) AND NOT EXISTS(SELECT 1 FROM raw_submissions r WHERE r.run_id=w.run_id AND (julianday(r.received_at)>=julianday(?1) OR julianday(r.received_at) IS NULL)) AND NOT EXISTS(SELECT 1 FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE r.run_id=w.run_id AND (julianday(a.received_at)>=julianday(?1) OR julianday(a.admitted_at)>=julianday(?1) OR julianday(a.received_at) IS NULL OR julianday(a.admitted_at) IS NULL)) AND NOT EXISTS(SELECT 1 FROM local_watcher_provider_intakes l JOIN provider_intake_attempts p ON p.intake_id=l.intake_id WHERE l.run_id=w.run_id AND (julianday(p.received_at)>=julianday(?1) OR julianday(p.received_at) IS NULL)) AND NOT EXISTS(SELECT 1 FROM raw_submissions s WHERE s.run_id=w.run_id AND s.source_expired=1)", [cutoff])?;
+    // Floors stop only at young rows or rows of non-candidate runs; protected
+    // dependencies no longer stop them (declared holes). Rows already at or
+    // below a floor are islands or compact records and never lower it.
+    let (ef, rf, inf, sf) = loop {
+        let run_count: i64 = tx.query_row("SELECT COUNT(*) FROM expiry_runs", [], |r| r.get(0))?;
+        let ef: i64 = tx.query_row("SELECT MAX(?2, COALESCE((SELECT MIN(evaluation_sequence)-1 FROM evaluation_runs e WHERE evaluation_sequence>?2 AND (julianday(evaluated_at)>=julianday(?1) OR julianday(evaluated_at) IS NULL OR (trigger_run_id IS NOT NULL AND trigger_run_id NOT IN (SELECT run_id FROM expiry_runs)))),(SELECT MAX(evaluation_sequence) FROM evaluation_runs),?2))", params![cutoff, before.evaluation_floor], |r| r.get(0))?;
+        let rf: i64 = tx.query_row("SELECT MAX(?1, COALESCE((SELECT MIN(a.report_sequence)-1 FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE a.report_sequence>?1 AND r.run_id NOT IN (SELECT run_id FROM expiry_runs)),(SELECT MAX(report_sequence) FROM admitted_reports),?1))", [before.report_floor], |r| r.get(0))?;
+        let inf: i64 = tx.query_row("SELECT MAX(?1, COALESCE((SELECT MIN(p.intake_sequence)-1 FROM provider_intake_attempts p LEFT JOIN local_watcher_provider_intakes l ON l.intake_id=p.intake_id WHERE p.intake_sequence>?1 AND p.history_expired=0 AND (l.run_id IS NULL OR l.run_id NOT IN (SELECT run_id FROM expiry_runs))),(SELECT MAX(intake_sequence) FROM provider_intake_attempts),?1))", [before.intake_floor], |r| r.get(0))?;
+        let sf: i64 = tx.query_row("SELECT MAX(?1, COALESCE((SELECT MIN(status_sequence)-1 FROM status_events WHERE status_sequence>?1 AND run_id IS NOT NULL AND run_id NOT IN (SELECT run_id FROM expiry_runs)),(SELECT MAX(status_sequence) FROM status_events WHERE run_id IS NOT NULL),?1))", [before.status_floor], |r| r.get(0))?;
+        tx.execute("DELETE FROM expiry_runs WHERE run_id IN(SELECT trigger_run_id FROM evaluation_runs WHERE evaluation_sequence>?1 UNION SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE a.report_sequence>?2 UNION SELECT l.run_id FROM local_watcher_provider_intakes l JOIN provider_intake_attempts p ON p.intake_id=l.intake_id WHERE p.intake_sequence>?3 UNION SELECT run_id FROM status_events WHERE status_sequence>?4)", params![ef, rf, inf, sf])?;
+        let after: i64 = tx.query_row("SELECT COUNT(*) FROM expiry_runs", [], |r| r.get(0))?;
+        if after == run_count {
+            break (ef, rf, inf, sf);
+        }
+    };
+    // Full evaluations at or below the new floor: newly eligible ones and
+    // existing islands, each re-examined against the live roots.
+    tx.execute("INSERT INTO expiry_evaluations SELECT evaluation_id, trigger_run_id, 'delete' FROM evaluation_runs WHERE evaluation_sequence<=?1 AND source_expired=0", [ef])?;
+    let live = live_finding_event_sql("e");
+    let newest = lineage_newest_sql("e");
+    // Evaluation roots: live finding events, pending saved-check claims,
+    // diagnostic origins, and the newest evaluation of every evaluation
+    // lineage (so no lineage ever disappears from status).
+    tx.execute(&format!("UPDATE expiry_evaluations SET disposition='island' WHERE evaluation_id IN (
+            SELECT e.evaluation_id FROM finding_events e WHERE e.evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations) AND {live}
+            UNION SELECT c.evaluation_id FROM saved_check_events c WHERE c.evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations) AND c.outcome='claimed' AND NOT EXISTS(SELECT 1 FROM saved_check_events t WHERE t.evaluation_id=c.evaluation_id AND t.outcome IN ('refused','passed','failed'))
+            UNION SELECT o.evaluation_id FROM local_diagnostic_artifact_origins o WHERE o.evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations)
+            UNION SELECT e.evaluation_id FROM evaluation_runs e WHERE e.evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations) AND {newest})"), [])?;
+    // Run roots. Every root names a candidate run only through the
+    // `expiry_runs` join, so non-candidate runs are untouched.
+    tx.execute(&format!("INSERT OR IGNORE INTO expiry_protected SELECT run_id FROM expiry_runs WHERE run_id IN (
+            SELECT run_id FROM local_successor_acquisition_intents
+            UNION SELECT run_id FROM local_diagnostic_artifact_origins
+            UNION SELECT run_id FROM status_events WHERE status_event_id IN (SELECT latest_status_event_id FROM status_current)
+            UNION SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE a.report_sequence IN (SELECT MAX(report_sequence) FROM admitted_reports GROUP BY instance_id)
+            UNION SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id JOIN watcher_runs w ON w.run_id=r.run_id JOIN local_watcher_provider_intakes l ON l.run_id=w.run_id JOIN provider_intake_acknowledgments ack ON ack.intake_id=l.intake_id AND ack.run_id=l.run_id WHERE a.next_checkpoint_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM admitted_reports newer JOIN raw_submissions ns ON ns.submission_id=newer.submission_id JOIN watcher_runs nw ON nw.run_id=ns.run_id JOIN local_watcher_provider_intakes nl ON nl.run_id=nw.run_id JOIN provider_intake_acknowledgments na ON na.intake_id=nl.intake_id AND na.run_id=nl.run_id WHERE newer.instance_id=a.instance_id AND nw.checkpoint_contract_digest=w.checkpoint_contract_digest AND newer.next_checkpoint_json IS NOT NULL AND newer.report_sequence>a.report_sequence)
+            UNION SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id JOIN finding_evidence f ON f.report_id=a.report_id JOIN finding_events e ON e.event_id=f.event_id WHERE {live})"), [])?;
+    // Closure: an island run keeps every evaluation it triggered, and every
+    // surviving full evaluation keeps the reports it names (watermark report
+    // and any report id its envelope carries).
+    loop {
+        let protected: i64 = tx.query_row("SELECT COUNT(*) FROM expiry_protected", [], |r| r.get(0))?;
+        let islands: i64 = tx.query_row("SELECT COUNT(*) FROM expiry_evaluations WHERE disposition='island'", [], |r| r.get(0))?;
+        tx.execute("INSERT OR IGNORE INTO expiry_protected SELECT trigger_run_id FROM expiry_evaluations WHERE disposition='island' AND trigger_run_id IS NOT NULL AND trigger_run_id IN (SELECT run_id FROM expiry_runs)", [])?;
+        tx.execute("UPDATE expiry_evaluations SET disposition='island' WHERE trigger_run_id IN (SELECT run_id FROM expiry_protected)", [])?;
+        tx.execute("INSERT OR IGNORE INTO expiry_protected SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_runs) AND (EXISTS(SELECT 1 FROM evaluation_watermarks w JOIN evaluation_runs e ON e.evaluation_id=w.evaluation_id WHERE w.instance_id=a.instance_id AND w.max_report_sequence=a.report_sequence AND (e.evaluation_sequence>?1 OR e.evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='island'))) OR a.report_id IN (SELECT j.value FROM evaluation_runs e, json_tree(CAST(e.detail_json AS TEXT)) j WHERE (e.evaluation_sequence>?1 OR e.evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='island')) AND j.type='text'))", [ef])?;
+        let protected_after: i64 = tx.query_row("SELECT COUNT(*) FROM expiry_protected", [], |r| r.get(0))?;
+        let islands_after: i64 = tx.query_row("SELECT COUNT(*) FROM expiry_evaluations WHERE disposition='island'", [], |r| r.get(0))?;
+        if protected == protected_after && islands == islands_after {
+            break;
+        }
+    }
+    // Released decisions that retained finding or saved-check rows still name
+    // stay as compact records; everything else at or below the floor retires.
+    tx.execute("UPDATE expiry_evaluations SET disposition='compact' WHERE disposition='delete' AND (evaluation_id IN (SELECT evaluation_id FROM finding_events) OR evaluation_id IN (SELECT evaluation_id FROM saved_check_events WHERE evaluation_id IS NOT NULL))", [])?;
+    tx.execute("INSERT INTO expiry_compact_reports SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE a.source_expired=0 AND a.report_sequence<=?1 AND r.run_id IN (SELECT run_id FROM expiry_runs) AND r.run_id NOT IN (SELECT run_id FROM expiry_protected) AND (a.report_id IN (SELECT report_id FROM finding_evidence) OR r.run_id IN (SELECT trigger_run_id FROM expiry_evaluations WHERE disposition='compact'))", [rf])?;
+    tx.execute("INSERT INTO expiry_dead_runs SELECT e.run_id, EXISTS(SELECT 1 FROM raw_submissions r JOIN expiry_compact_reports c ON c.report_id=(SELECT a.report_id FROM admitted_reports a WHERE a.submission_id=r.submission_id) WHERE r.run_id=e.run_id) FROM expiry_runs e WHERE e.run_id NOT IN (SELECT run_id FROM expiry_protected)", [])?;
+    let affected_runs: i64 = tx.query_row("SELECT COUNT(*) FROM expiry_dead_runs", [], |r| r.get(0))?;
+    let affected_evaluations: i64 = tx.query_row("SELECT COUNT(*) FROM expiry_evaluations WHERE disposition<>'island'", [], |r| r.get(0))?;
+    Ok(ExpiryPlan {
+        evaluation_floor: ef,
+        report_floor: rf,
+        intake_floor: inf,
+        status_floor: sf,
+        affected_runs,
+        affected_evaluations,
+    })
+}
+
+/// Operator-facing retention state (`nq doctor`): the expired-through
+/// boundary, the declared islands kept below it by root kind, the compact
+/// records, notification custody holds, and the age of the oldest history
+/// still above the floors. Counts are per root kind; one island can have
+/// several roots.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct RetentionReport {
+    pub generation: i64,
+    pub evaluation_floor: i64,
+    pub report_floor: i64,
+    pub intake_floor: i64,
+    pub status_floor: i64,
+    pub cutoff: Option<String>,
+    pub horizon_seconds: Option<u64>,
+    pub island_runs: i64,
+    pub island_evaluations: i64,
+    pub islands_by_root: std::collections::BTreeMap<String, i64>,
+    pub compact_evaluations: i64,
+    pub compact_reports: i64,
+    pub retired_intake_commitments: i64,
+    pub custody_pending_events: i64,
+    pub custody_unknown_events: i64,
+    pub oldest_unexpired_run_finished_at: Option<String>,
+}
+
+/// Operator-facing capacity state: the persisted envelope against current
+/// occupancy, and whether an ordinary write would be admitted now.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CapacityReport {
+    pub aggregate_bytes: u64,
+    pub occupied_bytes: u64,
+    pub main_bytes: u64,
+    pub max_pages: u64,
+    pub page_count: i64,
+    pub freelist_pages: i64,
+    pub reserve_bytes: u64,
+    pub available_bytes: u64,
+    pub preflight: String,
 }
 
 impl Store {
     pub fn retention_boundary(&self) -> Result<RetentionBoundary, StoreError> {
         boundary(&self.connection)
     }
+    /// The retention state `nq doctor` reports. Read-only.
+    #[allow(clippy::too_many_lines)]
+    pub fn retention_report(&self) -> Result<RetentionReport, StoreError> {
+        let b = self.retention_boundary()?;
+        let c = &self.connection;
+        let cutoff: Option<String> =
+            c.query_row("SELECT cutoff FROM retention_state WHERE singleton=1", [], |r| r.get(0))?;
+        let horizon_seconds = self
+            .retention_capacity_document()
+            .ok()
+            .and_then(|document| {
+                serde_json::from_slice::<crate::capacity::OperatingEnvelope>(document.as_bytes()).ok()
+            })
+            .map(|envelope| envelope.policy.horizon_seconds);
+        let count = |sql: &str| -> Result<i64, StoreError> {
+            let mut statement = c.prepare(sql)?;
+            let n = statement.parameter_count();
+            let floors = [b.evaluation_floor, b.report_floor, b.intake_floor, b.status_floor];
+            Ok(statement.query_row(rusqlite::params_from_iter(&floors[..n]), |r| r.get(0))?)
+        };
+        let mut report = RetentionReport {
+            generation: b.generation,
+            evaluation_floor: b.evaluation_floor,
+            report_floor: b.report_floor,
+            intake_floor: b.intake_floor,
+            status_floor: b.status_floor,
+            cutoff,
+            horizon_seconds,
+            ..RetentionReport::default()
+        };
+        report.retired_intake_commitments =
+            count("SELECT COUNT(*) FROM provider_intake_attempts WHERE history_expired=1")?;
+        let custody = format!(
+            "SELECT COUNT(DISTINCT o.finding_event_id) FROM notification_outbox o WHERE o.finding_event_id IS NOT NULL AND NOT {CUSTODY_TERMINAL}"
+        );
+        report.custody_pending_events = count(&custody)?;
+        report.custody_unknown_events = count("SELECT COUNT(DISTINCT o.finding_event_id) FROM notification_outbox o JOIN notification_delivery_events d ON d.notification_id=o.notification_id WHERE o.finding_event_id IS NOT NULL AND d.outcome='unknown'")?;
+        report.oldest_unexpired_run_finished_at = c.query_row(
+            "SELECT MIN(w.finished_at) FROM watcher_runs w JOIN status_events s ON s.run_id=w.run_id WHERE s.status_sequence>?1",
+            [b.status_floor],
+            |r| r.get(0),
+        )?;
+        if b.generation == 0 || !holes_schema(c)? {
+            return Ok(report);
+        }
+        report.compact_evaluations =
+            count("SELECT COUNT(*) FROM evaluation_runs WHERE source_expired=1")?;
+        report.compact_reports =
+            count("SELECT COUNT(*) FROM admitted_reports WHERE source_expired=1")?;
+        report.island_evaluations = count(
+            "SELECT COUNT(*) FROM evaluation_runs WHERE evaluation_sequence<=?1 AND source_expired=0",
+        )?;
+        report.island_runs = count("SELECT COUNT(*) FROM watcher_runs w WHERE EXISTS(SELECT 1 FROM status_events s WHERE s.run_id=w.run_id AND s.status_sequence<=?4)")?;
+        let live = live_finding_event_sql("f");
+        let newest = lineage_newest_sql("e");
+        let island = "e.evaluation_sequence<=?1 AND e.source_expired=0";
+        let island_run = "EXISTS(SELECT 1 FROM status_events s WHERE s.run_id=x.run_id AND s.status_sequence<=?4)";
+        for (kind, sql) in [
+            ("unresolved_finding", format!("SELECT COUNT(*) FROM evaluation_runs e WHERE {island} AND EXISTS(SELECT 1 FROM finding_events f JOIN finding_current c ON c.finding_id=f.finding_id JOIN finding_events h ON h.event_id=c.latest_event_id WHERE f.evaluation_id=e.evaluation_id AND h.condition_state<>'explicitly_absent' AND {live})")),
+            ("notification_custody", format!("SELECT COUNT(*) FROM evaluation_runs e WHERE {island} AND EXISTS(SELECT 1 FROM finding_events f JOIN notification_outbox o ON o.finding_event_id=f.event_id WHERE f.evaluation_id=e.evaluation_id AND NOT {CUSTODY_TERMINAL})")),
+            ("saved_check_claim", format!("SELECT COUNT(*) FROM evaluation_runs e WHERE {island} AND EXISTS(SELECT 1 FROM saved_check_events c WHERE c.evaluation_id=e.evaluation_id AND c.outcome='claimed' AND NOT EXISTS(SELECT 1 FROM saved_check_events t WHERE t.evaluation_id=c.evaluation_id AND t.outcome IN ('refused','passed','failed')))")),
+            ("lineage_latest", format!("SELECT COUNT(*) FROM evaluation_runs e WHERE {island} AND {newest}")),
+            ("diagnostic_origin", format!("SELECT COUNT(*) FROM watcher_runs x WHERE {island_run} AND EXISTS(SELECT 1 FROM local_diagnostic_artifact_origins o WHERE o.run_id=x.run_id)")),
+            ("successor_intent", format!("SELECT COUNT(*) FROM watcher_runs x WHERE {island_run} AND EXISTS(SELECT 1 FROM local_successor_acquisition_intents i WHERE i.run_id=x.run_id)")),
+            ("status_current", format!("SELECT COUNT(*) FROM watcher_runs x WHERE {island_run} AND EXISTS(SELECT 1 FROM status_events s JOIN status_current c ON c.latest_status_event_id=s.status_event_id WHERE s.run_id=x.run_id)")),
+            ("latest_report", format!("SELECT COUNT(*) FROM watcher_runs x WHERE {island_run} AND EXISTS(SELECT 1 FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE r.run_id=x.run_id AND a.report_sequence=(SELECT MAX(m.report_sequence) FROM admitted_reports m WHERE m.instance_id=a.instance_id))")),
+        ] {
+            report.islands_by_root.insert(kind.to_owned(), count(&sql)?);
+        }
+        report
+            .islands_by_root
+            .insert("released_pending".to_owned(), released_islands(c, &b)?);
+        Ok(report)
+    }
+
+    /// Persisted envelope against current occupancy, and whether an ordinary
+    /// write would be admitted now. Read-only.
+    pub fn capacity_report(&self) -> Result<CapacityReport, StoreError> {
+        let envelope: crate::capacity::OperatingEnvelope =
+            serde_json::from_slice(self.retention_capacity_document()?.as_bytes())
+                .map_err(|error| StoreError::Invariant(format!("persisted capacity envelope invalid: {error}")))?;
+        let path = self
+            .path()
+            .ok_or_else(|| StoreError::Invariant("capacity report requires a file-backed store".into()))?;
+        let observed = crate::capacity::observe(path)?;
+        let page_count: i64 = self.connection.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let freelist_pages: i64 =
+            self.connection.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        Ok(CapacityReport {
+            aggregate_bytes: envelope.aggregate_bytes,
+            occupied_bytes: observed.occupied_bytes,
+            main_bytes: envelope.main_bytes,
+            max_pages: envelope.max_pages,
+            page_count,
+            freelist_pages,
+            reserve_bytes: envelope.policy.reserve_bytes,
+            available_bytes: observed.available_bytes,
+            preflight: match envelope.preflight(path) {
+                Ok(()) => "admit".to_owned(),
+                Err(error) => format!("refuse: {error}"),
+            },
+        })
+    }
+
+    /// Full evaluations kept at or below the evaluation floor (declared
+    /// islands), in sequence order.
+    pub fn island_evaluation_sequences(&self) -> Result<Vec<i64>, StoreError> {
+        let b = self.retention_boundary()?;
+        if b.generation == 0 || !holes_schema(&self.connection)? {
+            return Ok(Vec::new());
+        }
+        self.connection
+            .prepare("SELECT evaluation_sequence FROM evaluation_runs WHERE evaluation_sequence<=?1 AND source_expired=0 ORDER BY evaluation_sequence")?
+            .query_map([b.evaluation_floor], |r| r.get(0))?
+            .collect::<Result<_, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Count of [`Self::island_evaluation_sequences`].
+    pub fn retained_evaluations_below_floor(&self) -> Result<i64, StoreError> {
+        Ok(i64::try_from(self.island_evaluation_sequences()?.len()).unwrap_or(i64::MAX))
+    }
+
     pub fn retention_generation(&self) -> Result<i64, StoreError> {
         Ok(self.retention_boundary()?.generation)
     }
@@ -288,6 +756,7 @@ impl Store {
         if b.generation > 0 {
             return Err(StoreError::HistoryExpired {
                 through_evaluation_sequence: b.evaluation_floor,
+                retained_below_floor: self.retained_evaluations_below_floor()?,
             });
         }
         Ok(())
@@ -397,38 +866,22 @@ impl Store {
         // Do not trust an advisory validation sidecar when selecting deletion.
         crate::validate_stored_digests(&tx, crate::Scope::FULL)?;
         let before = boundary(&tx)?;
-        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS expiry_runs(run_id TEXT PRIMARY KEY); DELETE FROM expiry_runs;")?;
-        tx.execute("INSERT INTO expiry_runs SELECT run_id FROM watcher_runs w WHERE julianday(finished_at)<julianday(?1) AND NOT EXISTS(SELECT 1 FROM raw_submissions r WHERE r.run_id=w.run_id AND (julianday(r.received_at)>=julianday(?1) OR julianday(r.received_at) IS NULL)) AND NOT EXISTS(SELECT 1 FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE r.run_id=w.run_id AND (julianday(a.received_at)>=julianday(?1) OR julianday(a.admitted_at)>=julianday(?1) OR julianday(a.received_at) IS NULL OR julianday(a.admitted_at) IS NULL)) AND NOT EXISTS(SELECT 1 FROM local_watcher_provider_intakes l JOIN provider_intake_attempts p ON p.intake_id=l.intake_id WHERE l.run_id=w.run_id AND (julianday(p.received_at)>=julianday(?1) OR julianday(p.received_at) IS NULL))", [cutoff])?;
-        // These roots have no observable downstream release condition. Every
-        // diagnostic/successor and finding/notification/checkpoint dependency
-        // is protected even if the occurrence completed a long time ago.
-        tx.execute_batch("DELETE FROM expiry_runs WHERE run_id IN (
-            SELECT run_id FROM local_successor_acquisition_intents
-            UNION SELECT run_id FROM local_diagnostic_artifact_origins
-            UNION SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id JOIN finding_evidence f ON f.report_id=a.report_id
-            UNION SELECT e.trigger_run_id FROM evaluation_runs e JOIN finding_events f ON f.evaluation_id=e.evaluation_id
-            UNION SELECT e.trigger_run_id FROM evaluation_runs e JOIN saved_check_events s ON s.evaluation_id=e.evaluation_id
-            UNION SELECT run_id FROM status_events WHERE status_event_id IN (SELECT latest_status_event_id FROM status_current)
-            UNION SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE a.report_sequence IN (SELECT MAX(report_sequence) FROM admitted_reports GROUP BY instance_id)
-            UNION SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id JOIN watcher_runs w ON w.run_id=r.run_id JOIN local_watcher_provider_intakes l ON l.run_id=w.run_id JOIN provider_intake_acknowledgments ack ON ack.intake_id=l.intake_id AND ack.run_id=l.run_id WHERE a.next_checkpoint_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM admitted_reports newer JOIN raw_submissions ns ON ns.submission_id=newer.submission_id JOIN watcher_runs nw ON nw.run_id=ns.run_id JOIN local_watcher_provider_intakes nl ON nl.run_id=nw.run_id JOIN provider_intake_acknowledgments na ON na.intake_id=nl.intake_id AND na.run_id=nl.run_id WHERE newer.instance_id=a.instance_id AND nw.checkpoint_contract_digest=w.checkpoint_contract_digest AND newer.next_checkpoint_json IS NOT NULL AND newer.report_sequence>a.report_sequence)
-        );")?;
-        let (ef, rf, inf, sf) = loop {
-            let run_count: i64 =
-                tx.query_row("SELECT COUNT(*) FROM expiry_runs", [], |r| r.get(0))?;
-            // Retain one evaluation per detector lineage for monotonic issuance.
-            let ef=tx.query_row("SELECT COALESCE(MIN(evaluation_sequence)-1,(SELECT MAX(evaluation_sequence) FROM evaluation_runs),?2) FROM evaluation_runs e WHERE julianday(evaluated_at)>=julianday(?1) OR julianday(evaluated_at) IS NULL OR (trigger_run_id IS NOT NULL AND trigger_run_id NOT IN (SELECT run_id FROM expiry_runs)) OR evaluation_id IN (SELECT evaluation_id FROM finding_events UNION SELECT evaluation_id FROM saved_check_events UNION SELECT evaluation_id FROM local_diagnostic_artifact_origins) OR evaluation_sequence IN (SELECT MAX(evaluation_sequence) FROM evaluation_runs GROUP BY detector_id,detector_version)",params![cutoff,before.evaluation_floor],|r|r.get(0))?;
-            // All surviving canonical evaluation references protect their
-            // report, including references represented only in JSON.
-            tx.execute("DELETE FROM expiry_runs WHERE run_id IN (SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE a.report_sequence IN (SELECT max_report_sequence FROM evaluation_watermarks w JOIN evaluation_runs e ON e.evaluation_id=w.evaluation_id WHERE e.evaluation_sequence>?1) OR a.report_id IN (SELECT j.value FROM evaluation_runs e,json_tree(CAST(e.detail_json AS TEXT)) j WHERE e.evaluation_sequence>?1 AND j.type='text'))",[ef])?;
-            let rf=tx.query_row("SELECT COALESCE(MIN(a.report_sequence)-1,(SELECT MAX(report_sequence) FROM admitted_reports),?1) FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id NOT IN(SELECT run_id FROM expiry_runs)",[before.report_floor],|r|r.get(0))?;
-            let inf=tx.query_row("SELECT COALESCE(MIN(p.intake_sequence)-1,(SELECT MAX(intake_sequence) FROM provider_intake_attempts),?1) FROM provider_intake_attempts p LEFT JOIN local_watcher_provider_intakes l ON l.intake_id=p.intake_id WHERE p.history_expired=0 AND (l.run_id IS NULL OR l.run_id NOT IN(SELECT run_id FROM expiry_runs))",[before.intake_floor],|r|r.get(0))?;
-            let sf=tx.query_row("SELECT COALESCE(MIN(status_sequence)-1,(SELECT MAX(status_sequence) FROM status_events WHERE run_id IS NOT NULL),?1) FROM status_events WHERE run_id IS NOT NULL AND run_id NOT IN(SELECT run_id FROM expiry_runs)",[before.status_floor],|r|r.get(0))?;
-            tx.execute("DELETE FROM expiry_runs WHERE run_id IN(SELECT trigger_run_id FROM evaluation_runs WHERE evaluation_sequence>?1 UNION SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE a.report_sequence>?2 UNION SELECT l.run_id FROM local_watcher_provider_intakes l JOIN provider_intake_attempts p ON p.intake_id=l.intake_id WHERE p.intake_sequence>?3 UNION SELECT run_id FROM status_events WHERE status_sequence>?4)",params![ef,rf,inf,sf])?;
-            let after: i64 = tx.query_row("SELECT COUNT(*) FROM expiry_runs", [], |r| r.get(0))?;
-            if after == run_count {
-                break (ef, rf, inf, sf);
-            }
-        };
+        let plan = plan_expiry(&tx, cutoff, &before)?;
+        let (ef, rf, inf, sf) = (plan.evaluation_floor, plan.report_floor, plan.intake_floor, plan.status_floor);
+        let floors_moved = (ef, rf, inf, sf)
+            != (
+                before.evaluation_floor,
+                before.report_floor,
+                before.intake_floor,
+                before.status_floor,
+            );
+        if !floors_moved && plan.affected_runs == 0 && plan.affected_evaluations == 0 {
+            tx.rollback()?;
+            return Ok(RetentionResult {
+                boundary: before,
+                deleted_rows: 0,
+            });
+        }
         let mut next = RetentionBoundary {
             generation: before.generation,
             evaluation_floor: ef,
@@ -436,13 +889,6 @@ impl Store {
             intake_floor: inf,
             status_floor: sf,
         };
-        if next == before {
-            tx.rollback()?;
-            return Ok(RetentionResult {
-                boundary: before,
-                deleted_rows: 0,
-            });
-        }
         next.generation = next
             .generation
             .checked_add(1)
@@ -459,7 +905,7 @@ impl Store {
             if let Some(old) = floors.iter_mut().find(|old| {
                 old.detector_id == f.detector_id && old.detector_version == f.detector_version
             }) {
-                old.revision = f.revision;
+                old.revision = old.revision.max(f.revision);
             } else {
                 floors.push(f);
             }
@@ -468,7 +914,7 @@ impl Store {
             (&a.detector_id, &a.detector_version).cmp(&(&b.detector_id, &b.detector_version))
         });
         let document = CanonicalDocument::from_serializable(&floors)?;
-        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS expiry_links(intake_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,submission_id TEXT,report_id TEXT,semantic_digest TEXT);DELETE FROM expiry_links;INSERT INTO expiry_links SELECT l.intake_id,l.run_id,r.submission_id,a.report_id,a.semantic_digest FROM local_watcher_provider_intakes l JOIN expiry_runs e ON e.run_id=l.run_id LEFT JOIN raw_submissions r ON r.run_id=l.run_id LEFT JOIN admitted_reports a ON a.submission_id=r.submission_id;")?;
+        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS expiry_links(intake_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,submission_id TEXT,report_id TEXT,semantic_digest TEXT);DELETE FROM expiry_links;INSERT INTO expiry_links SELECT l.intake_id,l.run_id,r.submission_id,a.report_id,a.semantic_digest FROM local_watcher_provider_intakes l JOIN expiry_dead_runs e ON e.run_id=l.run_id LEFT JOIN raw_submissions r ON r.run_id=l.run_id LEFT JOIN admitted_reports a ON a.submission_id=r.submission_id;")?;
         #[cfg(test)]
         crash_phase_for_test("before_mutations", 71);
         tx.execute(
@@ -476,33 +922,34 @@ impl Store {
             [],
         )?;
         let mut deleted = 0usize;
+        // Evaluations at or below the floor that are neither islands nor
+        // compact decision records retire with their watermarks and refusals.
         for sql in [
-            "DELETE FROM refusals WHERE evaluation_id IN(SELECT evaluation_id FROM evaluation_runs WHERE evaluation_sequence<=?1) OR run_id IN(SELECT run_id FROM expiry_runs) OR submission_id IN(SELECT submission_id FROM raw_submissions WHERE run_id IN(SELECT run_id FROM expiry_runs))",
-            "DELETE FROM evaluation_watermarks WHERE evaluation_id IN(SELECT evaluation_id FROM evaluation_runs WHERE evaluation_sequence<=?1)",
-            "DELETE FROM evaluation_runs WHERE evaluation_sequence<=?1",
-        ] {
-            deleted += tx.execute(sql, [ef])?;
-        }
-        for sql in [
-            "DELETE FROM observation_coverage WHERE report_id IN(SELECT report_id FROM admitted_reports WHERE report_sequence<=?1)",
-            "DELETE FROM observations WHERE report_id IN(SELECT report_id FROM admitted_reports WHERE report_sequence<=?1)",
-            "DELETE FROM report_coverage WHERE report_id IN(SELECT report_id FROM admitted_reports WHERE report_sequence<=?1)",
-            "DELETE FROM report_errors WHERE report_id IN(SELECT report_id FROM admitted_reports WHERE report_sequence<=?1)",
-            "DELETE FROM admitted_reports WHERE report_sequence<=?1",
-        ] {
-            deleted += tx.execute(sql, [rf])?;
-        }
-        for sql in [
-            "DELETE FROM provider_intake_acknowledgments WHERE run_id IN(SELECT run_id FROM expiry_runs)",
-            "DELETE FROM local_watcher_provider_intakes WHERE run_id IN(SELECT run_id FROM expiry_runs)",
-            "DELETE FROM legacy_v3_watcher_run_intake_gaps WHERE run_id IN(SELECT run_id FROM expiry_runs)",
-            "DELETE FROM raw_submissions WHERE run_id IN(SELECT run_id FROM expiry_runs)",
-            "DELETE FROM status_events WHERE run_id IN(SELECT run_id FROM expiry_runs)",
-            "DELETE FROM watcher_runs WHERE run_id IN(SELECT run_id FROM expiry_runs)",
+            "DELETE FROM refusals WHERE evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition<>'island') OR run_id IN (SELECT run_id FROM expiry_dead_runs) OR submission_id IN (SELECT submission_id FROM raw_submissions WHERE run_id IN (SELECT run_id FROM expiry_dead_runs))",
+            "DELETE FROM evaluation_watermarks WHERE evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition<>'island')",
+            "DELETE FROM evaluation_runs WHERE evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='delete')",
+            "UPDATE evaluation_runs SET source_expired=1, detail_json=CAST('{}' AS BLOB) WHERE evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='compact')",
         ] {
             deleted += tx.execute(sql, [])?;
         }
-        let retire_ids:Vec<String>=tx.prepare("SELECT intake_id FROM provider_intake_attempts WHERE history_expired=0 AND intake_sequence<=?1")?.query_map([inf],|r|r.get(0))?.collect::<Result<_,_>>()?;
+        for sql in [
+            "DELETE FROM observation_coverage WHERE report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))",
+            "DELETE FROM observations WHERE report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))",
+            "DELETE FROM report_coverage WHERE report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))",
+            "DELETE FROM report_errors WHERE report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))",
+            "DELETE FROM admitted_reports WHERE submission_id IN (SELECT submission_id FROM raw_submissions WHERE run_id IN (SELECT run_id FROM expiry_dead_runs)) AND report_id NOT IN (SELECT report_id FROM expiry_compact_reports)",
+            "UPDATE admitted_reports SET source_expired=1, canonical_json=CAST('{}' AS BLOB), validated_report_json=CAST('{}' AS BLOB), next_checkpoint_json=NULL WHERE report_id IN (SELECT report_id FROM expiry_compact_reports)",
+            "DELETE FROM provider_intake_acknowledgments WHERE run_id IN (SELECT run_id FROM expiry_dead_runs)",
+            "DELETE FROM local_watcher_provider_intakes WHERE run_id IN (SELECT run_id FROM expiry_dead_runs)",
+            "DELETE FROM legacy_v3_watcher_run_intake_gaps WHERE run_id IN (SELECT run_id FROM expiry_dead_runs)",
+            "DELETE FROM raw_submissions WHERE run_id IN (SELECT run_id FROM expiry_dead_runs) AND submission_id NOT IN (SELECT a.submission_id FROM admitted_reports a JOIN expiry_compact_reports c ON c.report_id=a.report_id)",
+            "UPDATE raw_submissions SET source_expired=1, raw_bytes=X'' WHERE submission_id IN (SELECT a.submission_id FROM admitted_reports a JOIN expiry_compact_reports c ON c.report_id=a.report_id)",
+            "DELETE FROM status_events WHERE run_id IN (SELECT run_id FROM expiry_dead_runs)",
+            "DELETE FROM watcher_runs WHERE run_id IN (SELECT run_id FROM expiry_dead_runs WHERE anchor=0)",
+        ] {
+            deleted += tx.execute(sql, [])?;
+        }
+        let retire_ids:Vec<String>=tx.prepare("SELECT intake_id FROM provider_intake_attempts WHERE history_expired=0 AND intake_sequence<=?1 AND intake_id IN (SELECT intake_id FROM expiry_links)")?.query_map([inf],|r|r.get(0))?.collect::<Result<_,_>>()?;
         for id in retire_ids {
             let (run,submission,report,digest):(String,Option<String>,Option<String>,Option<String>)=tx.query_row("SELECT run_id,submission_id,report_id,semantic_digest FROM expiry_links WHERE intake_id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
             let mut links = serde_json::Map::new();

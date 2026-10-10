@@ -1044,6 +1044,34 @@ pub(crate) fn admit_maintenance(
     Ok((guard, envelope))
 }
 
+/// Admit maintenance of an established store under its persisted operating
+/// envelope, exactly as recorded: nothing is re-derived or resized.
+pub(crate) fn admit_persisted_maintenance(
+    path: &Path,
+) -> Result<(OperationGuard, OperatingEnvelope), StoreError> {
+    let observed = observe(path)?;
+    if observed.file_limit_bytes.is_some_and(|limit| limit < 8192) {
+        return Err(refusal(
+            "per-file limit cannot admit maintenance inspection",
+        ));
+    }
+    let guard = operation_guard(path)?;
+    bootstrap_preflight(path)?;
+    recover_hot_journal(path)?;
+    let read = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    read.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
+    let bytes: Vec<u8> = read.query_row(
+        "SELECT capacity_json FROM retention_state WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    let envelope: OperatingEnvelope = serde_json::from_slice(&bytes).map_err(|error| {
+        StoreError::Invariant(format!("persisted capacity envelope invalid: {error}"))
+    })?;
+    envelope.preflight(path)?;
+    Ok((guard, envelope))
+}
+
 pub(crate) fn admit_backup_destination(
     source: &Path,
     destination: &Path,

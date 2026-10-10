@@ -26,7 +26,7 @@ use thiserror::Error;
 pub mod capacity;
 mod history_scope;
 mod retention;
-pub use retention::{RetentionBoundary, RetentionResult};
+pub use retention::{CapacityReport, RetentionBoundary, RetentionReport, RetentionResult};
 
 pub use history_scope::{
     EvaluationHead, FullValidationReason, HistoryFrontier, LineageHead, OpenValidation,
@@ -41,6 +41,10 @@ const SCHEMA: &str = include_str!("schema.sql");
 // v12-to-v13 migration paths. Normal store opens never use this artifact.
 const SCHEMA_V13: &str = include_str!("schema_v13.sql");
 const SCHEMA_V13_TO_V14_RETENTION: &str = include_str!("schema_v13_to_v14_retention.sql");
+// Pinned bounded-retention predecessor accepted only by the explicit
+// v14-to-v15 declared-holes migration. Normal store opens never use it.
+const SCHEMA_V14: &str = include_str!("schema_v14.sql");
+const SCHEMA_V14_TO_V15_HOLES: &str = include_str!("schema_v14_to_v15_holes.sql");
 const SCHEMA_V12: &str = include_str!("schema_v12.sql");
 const SCHEMA_V3: &str = include_str!("schema_v3.sql");
 const SCHEMA_V4: &str = include_str!("schema_v4.sql");
@@ -121,6 +125,18 @@ const SCHEMA_METADATA_V14: &str = r"CREATE TABLE schema_metadata (
     initialized_at TEXT NOT NULL
 ) STRICT;";
 
+const SCHEMA_METADATA_V15: &str = r"CREATE TABLE schema_metadata (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    product TEXT NOT NULL CHECK (product = 'nq-ng'),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 15),
+    -- Digest of the exact schema.sql artifact compiled into the writing binary.
+    -- Rejects stale provisional-candidate databases at startup; it is NOT a
+    -- tamper attestation of the live SQLite schema (which the structural
+    -- fingerprint checks separately).
+    schema_artifact_digest TEXT NOT NULL CHECK (length(schema_artifact_digest) = 71 AND substr(schema_artifact_digest, 1, 7) = 'sha256:'),
+    initialized_at TEXT NOT NULL
+) STRICT;";
+
 /// Exact schema-artifact digest of the qualified v0.1.0 store. It is retained
 /// only to validate an explicit v3-to-v4 upgrade source; normal opening never
 /// interprets v3 bytes as current storage.
@@ -141,6 +157,11 @@ pub const SCHEMA_V5_ARTIFACT_DIGEST: &str =
 /// the additive local-successor fence migration.
 pub const SCHEMA_V13_ARTIFACT_DIGEST: &str =
     "sha256:ff0963409ac50369d83c6ba9b74041c5eb67d738d97d3c93e30c22aa709f75a7";
+
+/// Exact schema-v14 (bounded retention, strict prefix) artifact accepted only
+/// as the direct predecessor of the declared-holes migration.
+pub const SCHEMA_V14_ARTIFACT_DIGEST: &str =
+    "sha256:fc09a12bbfbacaa6522c46524a7e96be8bade5801484c89150a9a4f1557802b5";
 
 pub const SCHEMA_V12_ARTIFACT_DIGEST: &str =
     "sha256:3a24b66098fb645a0facdb9bb8cae56ba52c5e2930b7c3e33d8dcfa253736064";
@@ -202,7 +223,7 @@ static EXPECTED_SCHEMA_V12_FINGERPRINT: LazyLock<Result<String, String>> = LazyL
 });
 
 /// The only schema version understood by this crate.
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 /// Hard ceiling for one page returned through the public read model helpers.
 pub const MAX_PUBLIC_QUERY_ROWS: u32 = 1_000;
@@ -228,10 +249,16 @@ const MAX_BINDING_MATERIALIZATION_BYTES: usize = 3 * 1_048_576;
 #[derive(Debug, Error)]
 pub enum StoreError {
     /// Deliberate expiry makes original full-history replay unavailable.
+    /// `retained_below_floor` counts the protected evaluations kept at or
+    /// below the floor (declared islands); they are not contiguous history.
     #[error(
-        "full history unavailable: ordinary history expired through evaluation sequence {through_evaluation_sequence}"
+        "full history unavailable: ordinary history expired through evaluation sequence {through_evaluation_sequence}{}",
+        retained_suffix(*.retained_below_floor)
     )]
-    HistoryExpired { through_evaluation_sequence: i64 },
+    HistoryExpired {
+        through_evaluation_sequence: i64,
+        retained_below_floor: i64,
+    },
     #[error(
         "historical identity {0} is unavailable; retained coverage cannot establish prior membership"
     )]
@@ -277,6 +304,14 @@ pub enum StoreError {
     /// failures. A refused write leaves the store unchanged.
     #[error(transparent)]
     Refused(#[from] Refusal),
+}
+
+fn retained_suffix(retained: i64) -> String {
+    if retained > 0 {
+        format!("; {retained} protected evaluations retained below it")
+    } else {
+        String::new()
+    }
 }
 
 /// Why a write or retention operation was refused without effect.
@@ -1894,9 +1929,10 @@ impl Default for ValidationState {
 /// ordinary writes or be created by an ordinary open.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StoreSchemaMode {
-    CurrentV14,
+    Current,
     LegacyUpgradeV12,
     LegacyUpgradeV13,
+    LegacyUpgradeV14,
 }
 
 impl Store {
@@ -1972,7 +2008,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
-            schema_mode: StoreSchemaMode::CurrentV14,
+            schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
             capacity: Some(envelope),
         };
@@ -2080,7 +2116,7 @@ impl Store {
         let inspection = Self {
             connection: read,
             path: Some(path.to_path_buf()),
-            schema_mode: StoreSchemaMode::CurrentV14,
+            schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
             capacity: None,
         };
@@ -2107,7 +2143,7 @@ impl Store {
         let mut store = Self {
             connection,
             path: Some(path.to_path_buf()),
-            schema_mode: StoreSchemaMode::CurrentV14,
+            schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
             capacity: Some(envelope),
         };
@@ -2135,7 +2171,7 @@ impl Store {
         let mut store = Self {
             connection,
             path: Some(path.to_path_buf()),
-            schema_mode: StoreSchemaMode::CurrentV14,
+            schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
             capacity: None,
         };
@@ -2174,7 +2210,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(canonical_path),
-            schema_mode: StoreSchemaMode::CurrentV14,
+            schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
             capacity: None,
         };
@@ -2202,7 +2238,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
-            schema_mode: StoreSchemaMode::CurrentV14,
+            schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
             capacity: None,
         };
@@ -2231,7 +2267,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
-            schema_mode: StoreSchemaMode::CurrentV14,
+            schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
             capacity: None,
         };
@@ -2274,7 +2310,7 @@ impl Store {
         let store = Self {
             connection,
             path: None,
-            schema_mode: StoreSchemaMode::CurrentV14,
+            schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
             capacity: None,
         };
@@ -2463,6 +2499,9 @@ impl Store {
     fn validate_scoped(&self, scope: Scope<'_>) -> Result<(), StoreError> {
         if self.schema_mode == StoreSchemaMode::LegacyUpgradeV13 {
             return validate_v13_upgrade_source_connection(&self.connection);
+        }
+        if self.schema_mode == StoreSchemaMode::LegacyUpgradeV14 {
+            return validate_v14_upgrade_source_connection(&self.connection);
         }
         if self.schema_mode == StoreSchemaMode::LegacyUpgradeV12 {
             return validate_v12_upgrade_source_connection(&self.connection);
@@ -2786,13 +2825,17 @@ impl Store {
         let report = self
             .connection
             .query_row(
+                &format!(
                 "SELECT submission_id, instance_id, profile_id, profile_version,
                         profile_digest, observed_at, received_at, report_status,
                         semantic_digest, canonical_json, next_checkpoint_json,
                         validated_report_json,
                         judgment_schema_version, judgment_digest,
                         admission_context_digest
-                 FROM admitted_reports WHERE report_id = ?1",
+                 FROM admitted_reports AS report WHERE report_id = ?1 AND {}",
+                    retention::full_source_condition(&self.connection, "report")
+                        .map_err(|error| SnapshotVerificationError::BindingBroken(error.to_string()))?
+                ),
                 [report_id],
                 |row| {
                     Ok(StoredAdmittedReport {
@@ -2818,7 +2861,7 @@ impl Store {
             .map_err(|error| SnapshotVerificationError::BindingBroken(error.to_string()))?
             .ok_or_else(|| {
                 if self.retention_generation().unwrap_or(1) > 0 {
-                    if self.connection.query_row("SELECT EXISTS(SELECT 1 FROM provider_intake_attempts WHERE history_expired=1 AND retired_report_id=?1)",[report_id],|r|r.get::<_,bool>(0)).unwrap_or(false) {SnapshotVerificationError::ReportExpired(report_id.to_owned())} else {SnapshotVerificationError::ReportUnavailable(report_id.to_owned())}
+                    if self.report_source_expired(report_id).unwrap_or(false) || self.connection.query_row("SELECT EXISTS(SELECT 1 FROM provider_intake_attempts WHERE history_expired=1 AND retired_report_id=?1)",[report_id],|r|r.get::<_,bool>(0)).unwrap_or(false) {SnapshotVerificationError::ReportExpired(report_id.to_owned())} else {SnapshotVerificationError::ReportUnavailable(report_id.to_owned())}
                 } else {
                     SnapshotVerificationError::ReportNotFound(report_id.to_owned())
                 }
@@ -4249,12 +4292,18 @@ impl Store {
         let result = self
             .connection
             .query_row(
-                "SELECT raw_bytes FROM raw_submissions WHERE submission_id = ?1",
+                &format!(
+                    "SELECT raw_bytes FROM raw_submissions AS submission WHERE submission_id = ?1 AND {}",
+                    retention::full_source_condition(&self.connection, "submission")?
+                ),
                 [submission_id],
                 |row| row.get(0),
             )
             .optional()
             .map_err(StoreError::from)?;
+        if result.is_none() && self.source_expired_submission(submission_id)? {
+            return Err(StoreError::HistoricalEvidenceExpired(submission_id.to_owned()));
+        }
         if result.is_none() && self.retention_generation()? > 0 {
             return Err(StoreError::HistoryIdentityUnavailable(
                 submission_id.to_owned(),
@@ -4272,14 +4321,15 @@ impl Store {
         let row = self
             .connection
             .query_row(
-                "SELECT run.run_id, run.instance_id, report.report_id,
+                &format!("SELECT run.run_id, run.instance_id, report.report_id,
                         report.report_sequence, report.report_status, report.semantic_digest,
                         report.canonical_json
                  FROM watcher_runs AS run
                  JOIN raw_submissions AS submission ON submission.run_id = run.run_id
                  JOIN admitted_reports AS report
                    ON report.submission_id = submission.submission_id
-                 WHERE run.run_id = ?1 AND submission.admission_outcome = 'admitted'",
+                 WHERE run.run_id = ?1 AND submission.admission_outcome = 'admitted' AND {}",
+                    retention::full_source_condition(&self.connection, "report")?),
                 [run_id],
                 |row| {
                     Ok(AdmittedCollectionRow {
@@ -4352,14 +4402,40 @@ impl Store {
     ) -> Result<Vec<String>, StoreError> {
         validate_public_limit(limit)?;
         let mut statement = self.connection.prepare(
-            "SELECT report_id FROM admitted_reports
-             WHERE ?1 IS NULL OR report_id > ?1
+            &format!(
+                "SELECT report_id FROM admitted_reports AS report
+             WHERE (?1 IS NULL OR report_id > ?1) AND {}
              ORDER BY report_id LIMIT ?2",
+                retention::full_source_condition(&self.connection, "report")?
+            ),
         )?;
         statement
             .query_map(params![after_report_id, limit], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
+    }
+
+    fn source_expired_submission(&self, submission_id: &str) -> Result<bool, StoreError> {
+        if !retention::holes_schema(&self.connection)? {
+            return Ok(false);
+        }
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM raw_submissions WHERE submission_id=?1 AND source_expired=1)",
+            [submission_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Whether `report_id` survives only as a compact evidence record.
+    pub fn report_source_expired(&self, report_id: &str) -> Result<bool, StoreError> {
+        if !retention::holes_schema(&self.connection)? {
+            return Ok(false);
+        }
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM admitted_reports WHERE report_id=?1 AND source_expired=1)",
+            [report_id],
+            |row| row.get(0),
+        )?)
     }
 
     /// Prove exact one-to-one admitted submission/report association and its
@@ -4662,7 +4738,7 @@ impl Store {
     }
 
     fn require_current_schema(&self) -> Result<(), StoreError> {
-        if self.schema_mode != StoreSchemaMode::CurrentV14 {
+        if self.schema_mode != StoreSchemaMode::Current {
             return Err(StoreError::SchemaVersionMismatch {
                 found: 12,
                 supported: SCHEMA_VERSION,
@@ -5885,7 +5961,7 @@ impl Store {
         let mut store = Self {
             connection,
             path: Some(path.to_path_buf()),
-            schema_mode: StoreSchemaMode::CurrentV14,
+            schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
             capacity: None,
         };
@@ -6048,7 +6124,7 @@ impl Store {
         let mut store = Self {
             connection,
             path: Some(path.to_path_buf()),
-            schema_mode: StoreSchemaMode::CurrentV14,
+            schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
             capacity: None,
         };
@@ -6163,7 +6239,7 @@ impl Store {
         let mut store = Self {
             connection,
             path: Some(path.to_path_buf()),
-            schema_mode: StoreSchemaMode::CurrentV14,
+            schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
             capacity: None,
         };
@@ -6314,7 +6390,7 @@ impl Store {
         }
         transaction.execute_batch("DROP TRIGGER immutable_schema_metadata_update; DROP TRIGGER immutable_schema_metadata_delete; ALTER TABLE schema_metadata RENAME TO schema_metadata_v13;")?;
         transaction.execute_batch(SCHEMA_METADATA_V14)?;
-        transaction.execute("INSERT INTO schema_metadata (singleton, product, schema_version, schema_artifact_digest, initialized_at) SELECT singleton, product, 14, ?1, initialized_at FROM schema_metadata_v13", [schema_artifact_digest()])?;
+        transaction.execute("INSERT INTO schema_metadata (singleton, product, schema_version, schema_artifact_digest, initialized_at) SELECT singleton, product, 14, ?1, initialized_at FROM schema_metadata_v13", [SCHEMA_V14_ARTIFACT_DIGEST])?;
         transaction.execute("DROP TABLE schema_metadata_v13", [])?;
         transaction.execute_batch(SCHEMA_METADATA_V5_TRIGGERS)?;
         transaction.execute_batch(SCHEMA_V13_TO_V14_RETENTION)?;
@@ -6323,15 +6399,167 @@ impl Store {
             "UPDATE retention_state SET capacity_json=?1 WHERE singleton=1",
             [capacity_document.as_bytes()],
         )?;
+        transaction.pragma_update(None, "user_version", 14)?;
+        insert_upgrade_receipt(&transaction, receipt)?;
+        transaction.commit()?;
+        let store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+            schema_mode: StoreSchemaMode::LegacyUpgradeV14,
+            validation: ValidationState::default(),
+            capacity: Some(maintenance_envelope),
+        };
+        store.validate()?;
+        configure_connection(&store.connection, true)?;
+        Ok(store)
+    }
+
+    /// Back up the exact schema-v14 predecessor before the declared-holes
+    /// migration. This source is never opened as current writable storage.
+    pub fn backup_v14_verified(
+        source: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+    ) -> Result<BackupArtifact, StoreError> {
+        validate_v14_upgrade_source(source.as_ref())?;
+        let source_connection = Connection::open_with_flags(
+            source.as_ref(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let source_logical_digest = v14_logical_state_digest(&source_connection)?;
+        drop(source_connection);
+        let destination = destination.as_ref();
+        let (_source_guard, _destination_guard, destination_envelope) =
+            capacity::admit_backup_destination(source.as_ref(), destination)?;
+        if destination.exists() {
+            return Err(StoreError::Invariant(format!(
+                "backup destination already exists: {}",
+                destination.display()
+            )));
+        }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)?;
+        let result = (|| {
+            let source_connection = Connection::open_with_flags(
+                source.as_ref(),
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            let mut target =
+                Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+            capacity::configure_backup_target(&target, &destination_envelope)?;
+            rusqlite::backup::Backup::new(&source_connection, &mut target)?.run_to_completion(
+                64,
+                std::time::Duration::from_millis(10),
+                None,
+            )?;
+            drop(target);
+            validate_v14_upgrade_source(destination)?;
+            let copied = Connection::open_with_flags(
+                destination,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            if v14_logical_state_digest(&copied)? != source_logical_digest {
+                return Err(StoreError::Integrity(
+                    "v14 backup logical state differs from its source".into(),
+                ));
+            }
+            drop(copied);
+            Ok(BackupArtifact {
+                path: destination.to_path_buf(),
+                sha256: sha256_file(destination)?,
+                size_bytes: std::fs::metadata(destination)?.len(),
+            })
+        })();
+        if result.is_err() {
+            remove_database_artifact(destination);
+        }
+        result
+    }
+
+    /// Add declared protected holes to the exact schema-v14 store. The
+    /// persisted operating envelope is reused unchanged: this migration only
+    /// adds columns, replaces three update triggers, and adds indexes, so it
+    /// never resizes or re-derives capacity.
+    pub fn upgrade_v14_to_v15(
+        path: impl AsRef<Path>,
+        receipt: &UpgradeReceiptInput,
+    ) -> Result<Self, StoreError> {
+        if receipt.from_schema_version != 14 || receipt.to_schema_version != 15 {
+            return Err(StoreError::Invariant(
+                "v14-to-v15 receipt has wrong schema endpoints".into(),
+            ));
+        }
+        validate_digest("backup_digest", &receipt.backup_digest)?;
+        let path = path.as_ref();
+        let (_capacity_guard, envelope) = capacity::admit_persisted_maintenance(path)?;
+        let backup = Path::new(&receipt.backup_location);
+        if !backup.is_file() || sha256_file(backup)? != receipt.backup_digest {
+            return Err(StoreError::Invariant(
+                "v14-to-v15 migration requires its exact verified backup".into(),
+            ));
+        }
+        if std::fs::canonicalize(path)? == std::fs::canonicalize(backup)? {
+            return Err(StoreError::Invariant(
+                "v14-to-v15 backup must differ from source database".into(),
+            ));
+        }
+        validate_v14_upgrade_source(path)?;
+        validate_v14_upgrade_source(backup)?;
+        let mut connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        capacity::configure(&connection, &envelope)?;
+        configure_connection(&connection, false)?;
+        capacity::checkpoint_before_write(&connection, path, &envelope)?;
+        validate_v14_upgrade_source_connection(&connection)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if sha256_file(backup)? != receipt.backup_digest {
+            return Err(StoreError::Invariant(
+                "v14-to-v15 migration backup changed after preflight validation".into(),
+            ));
+        }
+        let locked_backup = Connection::open_with_flags(
+            backup,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        if v14_logical_state_digest(&transaction)? != v14_logical_state_digest(&locked_backup)? {
+            return Err(StoreError::Invariant(
+                "v14-to-v15 migration locked source differs from its verified backup".into(),
+            ));
+        }
+        drop(locked_backup);
+        let persisted_envelope: Vec<u8> = transaction.query_row(
+            "SELECT capacity_json FROM retention_state WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        transaction.execute_batch("DROP TRIGGER immutable_schema_metadata_update; DROP TRIGGER immutable_schema_metadata_delete; ALTER TABLE schema_metadata RENAME TO schema_metadata_v14;")?;
+        transaction.execute_batch(SCHEMA_METADATA_V15)?;
+        transaction.execute("INSERT INTO schema_metadata (singleton, product, schema_version, schema_artifact_digest, initialized_at) SELECT singleton, product, 15, ?1, initialized_at FROM schema_metadata_v14", [schema_artifact_digest()])?;
+        transaction.execute("DROP TABLE schema_metadata_v14", [])?;
+        transaction.execute_batch(SCHEMA_METADATA_V5_TRIGGERS)?;
+        transaction.execute_batch(SCHEMA_V14_TO_V15_HOLES)?;
+        let unchanged: Vec<u8> = transaction.query_row(
+            "SELECT capacity_json FROM retention_state WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        if unchanged != persisted_envelope {
+            return Err(StoreError::Integrity(
+                "v14-to-v15 migration changed the persisted operating envelope".into(),
+            ));
+        }
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         insert_upgrade_receipt(&transaction, receipt)?;
         transaction.commit()?;
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
-            schema_mode: StoreSchemaMode::CurrentV14,
+            schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
-            capacity: Some(maintenance_envelope),
+            capacity: Some(envelope),
         };
         store.validate()?;
         configure_connection(&store.connection, true)?;
@@ -6941,6 +7169,7 @@ impl Store {
         let finding = |alias: &str| finding_range.replace("{alias}", alias);
         let (with, count_columns, joins) =
             counts.sql(&refusal("range_refusal"), &finding("range_finding"));
+        let full = retention::full_source_condition(&self.connection, "evaluation")?;
         let mut statement = self.connection.prepare(&format!(
             "{with}SELECT evaluation.evaluation_id, evaluation.trigger_run_id,
                     evaluation.detector_id, evaluation.detector_version,
@@ -6973,7 +7202,7 @@ impl Store {
                     evaluation.evaluation_sequence, {count_columns}
              FROM evaluation_runs AS evaluation{joins}
              WHERE evaluation.evaluation_sequence > COALESCE(?1, 0)
-               AND evaluation.evaluation_sequence <= ?2
+               AND evaluation.evaluation_sequence <= ?2 AND {full}
              ORDER BY evaluation.evaluation_sequence
              LIMIT ?3"
         ))?;
@@ -8060,6 +8289,78 @@ fn validate_v5_public_upgrade_source(path: &Path) -> Result<(), StoreError> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     validate_v5_public_upgrade_source_connection(&connection)
+}
+
+fn validate_v14_upgrade_source(path: &Path) -> Result<(), StoreError> {
+    capacity::bootstrap_preflight(path)?;
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    validate_v14_upgrade_source_connection(&connection)
+}
+
+/// Validate the exact schema-v14 predecessor structurally before the
+/// declared-holes migration. The complete current validation runs on the
+/// migrated store before it is returned.
+fn validate_v14_upgrade_source_connection(connection: &Connection) -> Result<(), StoreError> {
+    if pragma_i64(connection, "user_version")? != 14
+        || pragma_i64(connection, "application_id")? != APPLICATION_ID
+    {
+        return Err(StoreError::SchemaVersionMismatch {
+            found: pragma_i64(connection, "user_version")?,
+            supported: 14,
+        });
+    }
+    let digest: String = connection.query_row(
+        "SELECT schema_artifact_digest FROM schema_metadata WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if digest != SCHEMA_V14_ARTIFACT_DIGEST {
+        return Err(StoreError::Invariant(
+            "v14-to-v15 source is not the pinned schema-v14 artifact".into(),
+        ));
+    }
+    if sha256_digest(SCHEMA_V14.as_bytes()) != SCHEMA_V14_ARTIFACT_DIGEST {
+        return Err(StoreError::Integrity(
+            "compiled pinned schema-v14 artifact digest disagrees with its declared provenance"
+                .into(),
+        ));
+    }
+    let quick: String = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if quick != "ok" {
+        return Err(StoreError::Integrity(quick));
+    }
+    let foreign_key_failures: i64 =
+        connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if foreign_key_failures != 0 {
+        return Err(StoreError::Integrity(format!(
+            "{foreign_key_failures} foreign-key violations"
+        )));
+    }
+    let expected_schema = Connection::open_in_memory()?;
+    expected_schema.execute_batch(SCHEMA_V14)?;
+    let expected = schema_fingerprint(&expected_schema)?;
+    let actual = schema_fingerprint(connection)?;
+    if actual != expected {
+        return Err(StoreError::Integrity(format!(
+            "schema-v14 definition fingerprint {actual} differs from pinned {expected}"
+        )));
+    }
+    let delete_enabled: i64 = connection.query_row(
+        "SELECT delete_enabled FROM retention_state WHERE singleton=1",
+        [],
+        |row| row.get(0),
+    )?;
+    if delete_enabled != 0 {
+        return Err(StoreError::Integrity(
+            "schema-v14 source has an unfinished deletion transaction".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_v13_upgrade_source(path: &Path) -> Result<(), StoreError> {
@@ -9424,14 +9725,16 @@ fn evidence_snapshot_from_connection(
             watermark_received_at,
         });
 
-        let mut statement = connection.prepare(
+        // Source-expired reports are retained identities, not evidence.
+        let mut statement = connection.prepare(&format!(
             "SELECT report_sequence, report_id, instance_id, profile_id,
                     profile_version, profile_digest, observed_at, received_at,
                     report_status, canonical_json, semantic_digest
-             FROM admitted_reports
-             WHERE instance_id = ?1 AND report_sequence <= ?2
+             FROM admitted_reports AS report
+             WHERE instance_id = ?1 AND report_sequence <= ?2 AND {}
              ORDER BY report_sequence",
-        )?;
+            retention::full_source_condition(connection, "report")?
+        ))?;
         let rows = statement.query_map(params![instance_id, max_report_sequence], |row| {
             Ok(AdmittedReportRow {
                 report_sequence: row.get(0)?,
@@ -9795,6 +10098,10 @@ fn v13_logical_state_digest(connection: &Connection) -> Result<String, StoreErro
     logical_state_digest(connection, b"nq.schema_v13.logical_state.v1\0")
 }
 
+fn v14_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
+    logical_state_digest(connection, b"nq.schema_v14.logical_state.v1\0")
+}
+
 fn v12_logical_state_digest(connection: &Connection) -> Result<String, StoreError> {
     logical_state_digest(connection, b"nq.schema_v12.logical_state.v1\0")
 }
@@ -9971,10 +10278,13 @@ fn schema_fingerprint(connection: &Connection) -> Result<String, StoreError> {
 /// recorded identity. O(rows in scope); descriptors are configuration-scale
 /// and always rehashed.
 fn validate_stored_digests(connection: &Connection, scope: Scope<'_>) -> Result<(), StoreError> {
+    // Source-expired rows cleared their bytes; retention validation proves
+    // them as declared commitments instead.
     let mut raw = connection.prepare(&format!(
         "SELECT submission_id, raw_bytes, raw_sha256 FROM raw_submissions AS submission
-         WHERE {} ORDER BY {}",
+         WHERE {} AND {} ORDER BY {}",
         scope.new_rows("raw_submissions", "submission"),
+        retention::full_source_condition(connection, "submission")?,
         scope.order("submission", "submission_id")
     ))?;
     let mut raw_rows = raw.query([])?;
@@ -9992,8 +10302,9 @@ fn validate_stored_digests(connection: &Connection, scope: Scope<'_>) -> Result<
 
     let mut reports = connection.prepare(&format!(
         "SELECT report_id, canonical_json, semantic_digest FROM admitted_reports AS report
-         WHERE {} ORDER BY {}",
+         WHERE {} AND {} ORDER BY {}",
         scope.new_rows("admitted_reports", "report"),
+        retention::full_source_condition(connection, "report")?,
         scope.order("report", "report_id")
     ))?;
     let mut report_rows = reports.query([])?;
@@ -10285,11 +10596,12 @@ fn validate_provider_intake_selection(
              FROM watcher_runs AS run
              LEFT JOIN local_watcher_provider_intakes AS local ON local.run_id = run.run_id
              LEFT JOIN legacy_v3_watcher_run_intake_gaps AS legacy ON legacy.run_id = run.run_id
-             WHERE {}
+             WHERE ({}) AND {}
              GROUP BY run.run_id
              HAVING COUNT(DISTINCT local.intake_id) + COUNT(DISTINCT legacy.run_id) <> 1
              ORDER BY run.run_id LIMIT 1",
-                selection.runs()
+                selection.runs(),
+                retention::non_anchor_run_condition(connection, "run")?
             ),
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -10749,8 +11061,13 @@ fn validate_refusal_invariants(
 /// Admission-refused statuses have no watcher run and remain out of scope.
 fn validate_run_results(connection: &Connection, scope: Scope<'_>) -> Result<(), StoreError> {
     // A run's result obligations change when the run is new or a new
-    // submission, report, evaluation, or status event names it.
-    let runs = run_result_scope(scope);
+    // submission, report, evaluation, or status event names it. Anchor runs
+    // (kept only as the identity a compact report names) retired theirs.
+    let runs = format!(
+        "({}) AND {}",
+        run_result_scope(scope),
+        retention::non_anchor_run_condition(connection, "run")?
+    );
     let missing_or_duplicate: Option<(String, i64)> = connection
         .query_row(
             &format!(
@@ -11299,6 +11616,8 @@ fn validate_evaluation_refusal_invariants(
         ],
     );
     let new_findings = scope.new_rows("finding_events", "event");
+    // Compact decision records retired their refusals and watermarks.
+    let full = retention::full_source_condition(connection, "evaluation")?;
     let wrong_count: Option<(String, String, i64)> = connection
         .query_row(
             &format!(
@@ -11307,7 +11626,7 @@ fn validate_evaluation_refusal_invariants(
              FROM evaluation_runs AS evaluation
              LEFT JOIN refusals AS refusal
                ON refusal.evaluation_id = evaluation.evaluation_id
-             WHERE {evaluations}
+             WHERE ({evaluations}) AND {full}
              GROUP BY evaluation.evaluation_id
              HAVING (evaluation.outcome = 'cannot_evaluate'
                      AND COUNT(refusal.refusal_id) <> 1)
@@ -11431,7 +11750,7 @@ fn validate_evaluation_refusal_invariants(
                         AND finding.condition_state <> 'present')
                     OR (evaluation.outcome = 'condition_explicitly_absent'
                         AND finding.condition_state <> 'explicitly_absent')
-                    OR (refusal.refusal_id IS NULL AND finding.refusal_json IS NOT NULL)
+                    OR (refusal.refusal_id IS NULL AND finding.refusal_json IS NOT NULL AND {full})
                     OR (refusal.refusal_id IS NOT NULL
                         AND finding.refusal_json IS NOT refusal.detail_json)
                  ))
@@ -11526,14 +11845,16 @@ fn validate_evaluation_revision_shape(
             return validate_evaluation_revision_shape_since(connection, frontier);
         }
     }
+    // Rows at or below the floor are declared islands or compact records,
+    // proven by retention validation; the append sequence above it is exact.
+    let floor = retention::boundary(connection)?.evaluation_floor;
     let sequence_shape: (i64, i64, i64) = connection.query_row(
         "SELECT COALESCE(MIN(evaluation_sequence), 0),
                 COALESCE(MAX(evaluation_sequence), 0), COUNT(*)
-         FROM evaluation_runs",
-        [],
+         FROM evaluation_runs WHERE evaluation_sequence > ?1",
+        [floor],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
-    let floor = retention::boundary(connection)?.evaluation_floor;
     if sequence_shape.2 != 0
         && (sequence_shape.0 != floor + 1 || sequence_shape.1 != floor + sequence_shape.2)
     {
@@ -11542,9 +11863,9 @@ fn validate_evaluation_revision_shape(
             sequence_shape.0, sequence_shape.1, sequence_shape.2
         )));
     }
-    let mut statement = connection.prepare("SELECT detector_id,detector_version,MIN(evaluation_revision),MAX(evaluation_revision),COUNT(*) FROM evaluation_runs GROUP BY detector_id,detector_version")?;
+    let mut statement = connection.prepare("SELECT detector_id,detector_version,MIN(evaluation_revision),MAX(evaluation_revision),COUNT(*) FROM evaluation_runs WHERE evaluation_sequence > ?1 GROUP BY detector_id,detector_version")?;
     let lineages = statement
-        .query_map([], |row| {
+        .query_map([floor], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -14142,7 +14463,9 @@ mod tests {
         let first = store
             .expire_ordinary_before("2100-01-01T00:00:00Z")
             .expect("first expiry");
-        assert_eq!(first.boundary.report_floor, 2);
+        // Declared holes: the floor passes the instance's latest report,
+        // which survives below it as a protected island.
+        assert_eq!(first.boundary.report_floor, 3);
         assert!(first.deleted_rows > 0);
         assert_eq!(admitted_report_count(&store), 1);
         store.validate().expect("retained store validates");
@@ -14197,7 +14520,7 @@ mod tests {
         let second = store
             .expire_ordinary_before("2100-01-03T00:00:00Z")
             .expect("second expiry");
-        assert_eq!(second.boundary.report_floor, 4);
+        assert_eq!(second.boundary.report_floor, 5);
         assert_eq!(admitted_report_count(&store), 1);
         assert!(second.boundary.generation > first.boundary.generation);
         store.validate().expect("second retained store validates");
@@ -20290,6 +20613,88 @@ mod tests {
         assert_eq!(Store::database_schema_version(&source).unwrap(), 13);
         assert_eq!(Store::database_schema_version(&v12_backup).unwrap(), 12);
         assert_eq!(sha256_file(&v12_backup).unwrap(), backup.sha256);
+    }
+
+    fn exact_upgrade_receipt(
+        backup: &BackupArtifact,
+        from: u32,
+        to: u32,
+        migration: &str,
+    ) -> UpgradeReceiptInput {
+        UpgradeReceiptInput {
+            receipt_id: format!("upgrade-v{from}-v{to}"),
+            from_schema_version: from,
+            to_schema_version: to,
+            migrations: document(json!([migration])),
+            binary_digest: digest("migration-binary-v15"),
+            backup_digest: backup.sha256.clone(),
+            backup_location: backup.path.to_string_lossy().into_owned(),
+            started_at: TIME.to_owned(),
+            finished_at: "2026-07-16T12:00:02.000Z".to_owned(),
+            result: "migrated".to_owned(),
+            operator_identity: document(json!({"operator": "fixture"})),
+            verification: document(json!({"integrity":"ok","source_schema_version":from})),
+        }
+    }
+
+    /// The declared-holes migration runs on a store produced by the existing
+    /// v13-to-v14 path, under the persisted envelope unchanged, through its
+    /// own verified backup; the v14 source never opens as current storage.
+    #[test]
+    fn v13_to_v14_store_upgrades_to_v15_with_unchanged_envelope() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("source.db");
+        write_exact_v12_from_v5(&source, &directory.path().join("backup-v5.db"));
+        let v12 = Store::backup_v12_verified(&source, directory.path().join("backup-v12.db"))
+            .expect("verified v12 backup");
+        drop(
+            Store::upgrade_v12_to_v13(&source, &exact_v12_to_v13_receipt(&v12))
+                .expect("v12 upgrades to v13"),
+        );
+        let v13 = Store::backup_v13_verified(&source, directory.path().join("backup-v13.db"))
+            .expect("verified v13 backup");
+        let legacy = Store::upgrade_v13_to_v14(
+            &source,
+            &exact_upgrade_receipt(&v13, 13, 14, "schema_v13_to_v14_bounded_retention"),
+        )
+        .expect("v13 upgrades to v14");
+        legacy.validate().expect("legacy v14 validates");
+        drop(legacy);
+        assert_eq!(Store::database_schema_version(&source).unwrap(), 14);
+        assert!(matches!(
+            Store::open(&source),
+            Err(StoreError::SchemaVersionMismatch { found: 14, supported: SCHEMA_VERSION })
+        ));
+        let envelope: Vec<u8> = Connection::open(&source)
+            .unwrap()
+            .query_row("SELECT capacity_json FROM retention_state WHERE singleton=1", [], |r| r.get(0))
+            .unwrap();
+        // The v13 backup is not the v14 source's backup.
+        assert!(Store::upgrade_v14_to_v15(
+            &source,
+            &exact_upgrade_receipt(&v13, 14, 15, "schema_v14_to_v15_declared_holes"),
+        )
+        .is_err());
+        let v14 = Store::backup_v14_verified(&source, directory.path().join("backup-v14.db"))
+            .expect("verified v14 backup");
+        let current = Store::upgrade_v14_to_v15(
+            &source,
+            &exact_upgrade_receipt(&v14, 14, 15, "schema_v14_to_v15_declared_holes"),
+        )
+        .expect("v14 upgrades to v15");
+        current.validate().expect("current v15 validates");
+        drop(current);
+        assert_eq!(Store::database_schema_version(&source).unwrap(), SCHEMA_VERSION);
+        assert_eq!(Store::database_schema_version(&v14.path).unwrap(), 14);
+        assert_eq!(sha256_file(&v14.path).unwrap(), v14.sha256);
+        let after: Vec<u8> = Connection::open(&source)
+            .unwrap()
+            .query_row("SELECT capacity_json FROM retention_state WHERE singleton=1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, envelope, "persisted envelope unchanged");
+        let reopened = Store::open(&source).expect("current store opens");
+        reopened.validate().expect("reopened v15 validates");
+        assert_eq!(reopened.retention_generation().unwrap(), 0);
     }
 
     #[test]

@@ -285,6 +285,22 @@ where
                     }))?;
                     return write_response(&mut stream, 400, "application/json", &body).await;
                 }
+                Err(error) if error.downcast_ref::<ExpiredEvaluationHistory>().is_some() => {
+                    let expired = error
+                        .downcast_ref::<ExpiredEvaluationHistory>()
+                        .expect("checked expired history");
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "error": "history_expired",
+                        "detail": expired.to_string(),
+                        "expired_through_evaluation_sequence": expired.expired_through,
+                        "retained_below_floor": expired.retained_below_floor,
+                        "resume": {
+                            "after_sequence": expired.expired_through,
+                            "through_sequence": expired.through,
+                        },
+                    }))?;
+                    return write_response(&mut stream, 410, "application/json", &body).await;
+                }
                 Err(error) => return Err(error),
             };
             write_response(&mut stream, 200, "application/json", &body).await
@@ -365,16 +381,53 @@ async fn read_evaluations(
 ) -> Result<Vec<u8>> {
     tokio::task::spawn_blocking(move || {
         let store = Store::open_read_only(database_path)?;
-        let page = nq_core::engine::evaluation_history_bounded(
+        let page = match nq_core::engine::evaluation_history_bounded(
             &store,
             limit,
             after_sequence,
             through_sequence,
-        )?;
+        ) {
+            Ok(page) => page,
+            Err(nq_core::engine::EngineError::Store(nq_store::StoreError::HistoryExpired {
+                through_evaluation_sequence,
+                retained_below_floor,
+            })) => {
+                return Err(ExpiredEvaluationHistory {
+                    expired_through: through_evaluation_sequence,
+                    retained_below_floor,
+                    through: store.latest_evaluation_sequence()?,
+                }
+                .into());
+            }
+            Err(error) => return Err(error.into()),
+        };
         serde_json::to_vec(&page).map_err(anyhow::Error::from)
     })
     .await?
 }
+
+/// The requested evaluation range starts in an expired region. The response
+/// names the floor, the protected evaluations retained below it, and the
+/// contiguous continuation a consumer can page instead; it never presents
+/// the surviving rows as complete history.
+#[derive(Debug)]
+struct ExpiredEvaluationHistory {
+    expired_through: i64,
+    retained_below_floor: i64,
+    through: i64,
+}
+
+impl std::fmt::Display for ExpiredEvaluationHistory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "evaluation history expired through sequence {}; {} protected evaluations retained below it",
+            self.expired_through, self.retained_below_floor
+        )
+    }
+}
+
+impl std::error::Error for ExpiredEvaluationHistory {}
 
 fn is_evaluation_query_bound_error(error: &anyhow::Error) -> bool {
     matches!(
@@ -669,6 +722,7 @@ async fn write_response<S: AsyncWrite + Unpin>(
         200 => "OK",
         400 => "Bad Request",
         409 => "Conflict",
+        410 => "Gone",
         404 => "Not Found",
         405 => "Method Not Allowed",
         _ => "Error",
@@ -1644,15 +1698,16 @@ mod tests {
         assert!(!destination.exists(), "no sealed archive");
     }
 
-    /// DEFECT SPECIMEN (NQ #27 audit, DEFECT 3): after expiry, the documented
-    /// first page `GET /v1/evaluations?limit=10` gets no HTTP response; the
-    /// handler returns the HistoryExpired error and the connection closes.
-    /// Passes while the defect is present.
+    /// NQ #27 D3 (repaired; the failing specimen is preserved on
+    /// audit/nq-27-specimens-20261010): after expiry, the cursorless first
+    /// page of `/v1/evaluations` is an explicit 410 naming the floor, the
+    /// protected evaluations retained below it, and the contiguous resume
+    /// interval; following that interval is answered.
     #[tokio::test]
-    async fn audit_specimen_evaluations_first_page_after_expiry_has_no_http_response() {
+    async fn evaluations_first_page_after_expiry_is_410_with_resume() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let database = audit_expired_evaluation_store(directory.path());
-        let probe = |path: &'static str| {
+        let probe = |path: String| {
             let database = database.clone();
             async move {
                 let (mut client, server) = tokio::io::duplex(64 * 1024);
@@ -1666,36 +1721,32 @@ mod tests {
                     .read_to_end(&mut response)
                     .await
                     .expect("read until close");
-                let handler = task.await.expect("request task joins");
-                (response, handler.map_err(|error| format!("{error:#}")))
+                task.await.expect("request task joins").expect("handler answers");
+                let text = String::from_utf8_lossy(&response).into_owned();
+                let (head, body) = text.split_once("\r\n\r\n").expect("HTTP response");
+                (
+                    head.lines().next().unwrap_or_default().to_owned(),
+                    serde_json::from_str::<serde_json::Value>(body).unwrap_or(serde_json::Value::Null),
+                )
             }
         };
-        let (response, handler) = probe("/v1/evaluations?limit=10").await;
-        println!(
-            "S3 no-cursor: response_bytes={} response={:?} handler={handler:?}",
-            response.len(),
-            String::from_utf8_lossy(&response)
-        );
-        assert!(response.is_empty(), "no HTTP response is written");
-        let handler_error = handler.expect_err("handler returns the expiry error");
-        assert!(handler_error.contains("full history unavailable"), "{handler_error}");
-        // Controls: `after` alone is a 400 by the query contract, so the
-        // consumer cannot discover the floor; a declared interval at the
-        // retained floor is answered.
-        for path in [
-            "/v1/evaluations?limit=10&after=2",
-            "/v1/evaluations?limit=10&after=2&through=3",
-        ] {
-            let (response, handler) = probe(path).await;
-            let text = String::from_utf8_lossy(&response).into_owned();
-            println!(
-                "S3 control {path}: status_line={:?} body={:?} handler_ok={}",
-                text.lines().next(),
-                text.split_once("\r\n\r\n")
-                    .map(|(_, body)| body.chars().take(160).collect::<String>()),
-                handler.is_ok()
-            );
-        }
+        let (status, body) = probe("/v1/evaluations?limit=10".to_owned()).await;
+        assert_eq!(status, "HTTP/1.1 410 Gone", "{body}");
+        assert_eq!(body["error"], "history_expired");
+        let floor = body["expired_through_evaluation_sequence"].as_i64().expect("floor");
+        assert!(floor > 0);
+        assert!(body["retained_below_floor"].as_i64().is_some());
+        assert_eq!(body["resume"]["after_sequence"].as_i64(), Some(floor));
+        let through = body["resume"]["through_sequence"].as_i64().expect("through");
+        assert!(through >= floor);
+        // `after` alone still violates the query contract.
+        let (status, _) = probe(format!("/v1/evaluations?limit=10&after={floor}")).await;
+        assert_eq!(status, "HTTP/1.1 400 Bad Request");
+        let (status, page) = probe(format!(
+            "/v1/evaluations?limit=10&after={floor}&through={through}"
+        ))
+        .await;
+        assert_eq!(status, "HTTP/1.1 200 OK", "{page}");
     }
 
     #[test]

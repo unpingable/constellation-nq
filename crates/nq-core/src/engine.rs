@@ -8564,6 +8564,7 @@ fn validate_semantic_planes_in_full_with(
     // The evaluation history is replayed once, first; status and rejected
     // custody then read their runs' evaluations without replaying it again.
     let (_, heads) = replay_evaluation_history_in_full(store)?;
+    visit_island_evaluations(store, |_, _, _| Ok(()))?;
     *evaluation = Some(heads.clone());
     validate_admitted_report_history(store)?;
     validate_watcher_run_history(store)?;
@@ -9419,6 +9420,21 @@ fn status_snapshot_v3_from_complete_history(
     status_snapshot_v3_with(store, |_, through| {
         validate_status_history_v2(store)?;
         let mut latest = LatestEvaluations::new();
+        // A lineage whose newest evaluation is a declared island below the
+        // floor keeps reporting it; a newer contiguous evaluation replaces it.
+        visit_island_evaluations(store, |row, envelope, lineage| {
+            if row.evaluation_sequence <= through
+                && latest
+                    .get(lineage)
+                    .is_none_or(|(revision, _, _)| row.evaluation_revision > *revision)
+            {
+                latest.insert(
+                    lineage.to_vec(),
+                    (row.evaluation_revision, row.evaluation_sequence, envelope),
+                );
+            }
+            Ok(())
+        })?;
         visit_evaluation_history_through(
             store,
             nq_store::MAX_PUBLIC_QUERY_ROWS,
@@ -9631,6 +9647,7 @@ pub fn evaluation_history_bounded(
     if after.unwrap_or(0) < expired {
         return Err(nq_store::StoreError::HistoryExpired {
             through_evaluation_sequence: expired,
+            retained_below_floor: store.retained_evaluations_below_floor()?,
         }
         .into());
     }
@@ -9873,12 +9890,64 @@ fn validate_evaluation_refusal_history_with_page_size(
     page_size: u32,
 ) -> Result<usize, EngineError> {
     let through_evaluation_sequence = store.latest_evaluation_sequence()?;
-    visit_evaluation_history_through(
+    let contiguous = visit_evaluation_history_through(
         store,
         page_size,
         through_evaluation_sequence,
         |_, _, _, _| Ok(()),
-    )
+    )?;
+    let islands = visit_island_evaluations(store, |_, _, _| Ok(()))?;
+    contiguous
+        .checked_add(islands)
+        .ok_or_else(|| EngineError::Invariant("evaluation history count overflowed".into()))
+}
+
+/// Reopen every declared island evaluation (a full evaluation kept at or
+/// below the evaluation floor by a protected root) on its own: typed
+/// validation of the row, then its finding transition from the lineage's
+/// latest finding event before it. Islands are not contiguous history and
+/// never seed or extend a replay walk.
+fn visit_island_evaluations<F>(store: &Store, mut visit: F) -> Result<usize, EngineError>
+where
+    F: FnMut(nq_store::EvaluationRefusalHistoryRow, EvaluationEnvelopeV2, &[u8]) -> Result<(), EngineError>,
+{
+    let mut reopened = 0usize;
+    for sequence in store.island_evaluation_sequences()? {
+        let mut rows = store.evaluation_refusal_history_bounded(1, Some(sequence - 1), sequence)?;
+        let (Some(row), None) = (rows.pop(), rows.pop()) else {
+            return Err(EngineError::Invariant(format!(
+                "retained evaluation at sequence {sequence} does not reopen"
+            )));
+        };
+        if row.evaluation_sequence != sequence {
+            return Err(EngineError::Invariant(format!(
+                "retained evaluation at sequence {sequence} reopened as {}",
+                row.evaluation_sequence
+            )));
+        }
+        let envelope = validate_evaluation_refusal_row(store, &row, true)?;
+        let lineage = evaluation_lineage_key(&envelope)?;
+        let mut findings = BTreeMap::new();
+        if let Some(prior) = store.prior_finding_for_evaluation_lineage(
+            sequence - 1,
+            &evaluation_finding_lineage(&envelope)?,
+        )? {
+            findings.insert(
+                lineage.clone(),
+                ReplayedFinding {
+                    finding_id: prior.finding_id,
+                    event_revision: prior.event_revision,
+                    condition_state: prior.condition_state,
+                },
+            );
+        }
+        validate_evaluation_finding_replay_step(&row, &envelope, &mut findings)?;
+        visit(row, envelope, &lineage)?;
+        reopened = reopened
+            .checked_add(1)
+            .ok_or_else(|| EngineError::Invariant("evaluation history count overflowed".into()))?;
+    }
+    Ok(reopened)
 }
 
 fn visit_evaluation_history_through<F>(
@@ -10224,6 +10293,15 @@ where
     ) -> Result<(), EngineError>,
 {
     let mut reopened = 0usize;
+    // After expiry, contiguous history starts above the evaluation floor.
+    // Lineages first met there resume from their latest finding event at or
+    // below the floor (finding events are never retired), so declared holes
+    // never change a finding transition.
+    let floor = store.retention_boundary()?.evaluation_floor;
+    if floor > 0 {
+        after_evaluation_sequence = Some(after_evaluation_sequence.unwrap_or(floor).max(floor));
+    }
+    let mut seeded = std::collections::BTreeSet::new();
     loop {
         let page = store.evaluation_refusal_history_beyond(
             page_size,
@@ -10238,6 +10316,9 @@ where
         for row in page {
             after_evaluation_sequence = Some(row.evaluation_sequence);
             let envelope = validate_evaluation_refusal_row(store, &row, true)?;
+            if floor > 0 {
+                seed_lineage_at_floor(store, floor, &envelope, &mut replay.findings, &mut seeded)?;
+            }
             validate_evaluation_finding_replay_step(&row, &envelope, &mut replay.findings)?;
             let lineage = evaluation_lineage_key(&envelope)?;
             let newest = replay.advance_evaluation(&lineage, &row);
@@ -10250,6 +10331,34 @@ where
             return Ok((reopened, replay));
         }
     }
+}
+
+/// Seed one lineage's finding replay state from its latest finding event at
+/// or below the evaluation floor, the first time a walk meets it.
+fn seed_lineage_at_floor(
+    store: &Store,
+    floor: i64,
+    envelope: &EvaluationEnvelopeV2,
+    findings: &mut BTreeMap<Vec<u8>, ReplayedFinding>,
+    seeded: &mut std::collections::BTreeSet<Vec<u8>>,
+) -> Result<(), EngineError> {
+    let key = evaluation_lineage_key(envelope)?;
+    if findings.contains_key(&key) || !seeded.insert(key.clone()) {
+        return Ok(());
+    }
+    if let Some(prior) =
+        store.prior_finding_for_evaluation_lineage(floor, &evaluation_finding_lineage(envelope)?)?
+    {
+        findings.insert(
+            key,
+            ReplayedFinding {
+                finding_id: prior.finding_id,
+                event_revision: prior.event_revision,
+                condition_state: prior.condition_state,
+            },
+        );
+    }
+    Ok(())
 }
 
 /// Position of a lineage's newest evaluation.
@@ -12927,23 +13036,33 @@ sys.stdout.write("\n")
             .expire_ordinary_before(&timestamp(cutoff))
             .expect("native first expiry");
         assert!(first.deleted_rows > 0);
-        assert_eq!(first.boundary.evaluation_floor, 2);
-        assert_eq!(first.boundary.report_floor, 2);
+        // Declared holes: the floor passes the lineage's newest evaluation,
+        // which survives below it as a protected island.
+        assert_eq!(first.boundary.evaluation_floor, 3);
+        assert_eq!(first.boundary.report_floor, 3);
         validate_semantic_history(&store).expect("surviving native source remains verifiable");
         validate_evaluation_refusal_history(&store).expect("retained evaluation replay");
         assert!(matches!(
             evaluation_history_bounded(&store, 10, None, None),
-            Err(EngineError::Store(
-                nq_store::StoreError::HistoryExpired { .. }
-            ))
+            Err(EngineError::Store(nq_store::StoreError::HistoryExpired {
+                through_evaluation_sequence: 3,
+                retained_below_floor: 1,
+            }))
         ));
-        let page = evaluation_history_bounded(&store, 10, Some(2), Some(3))
-            .expect("retained declared interval");
-        assert_eq!(page.records.len(), 1);
+        let page = evaluation_history_bounded(&store, 10, Some(3), Some(3))
+            .expect("contiguous history above the floor");
+        assert!(page.records.is_empty());
         assert!(page.complete);
-        assert_eq!(
-            page.records[0].result.result.state,
-            DetectorState::ExplicitlyAbsent
+        let island = store
+            .evaluation_refusal_history_bounded(1, Some(2), 3)
+            .expect("island row")
+            .pop()
+            .expect("the newest evaluation is retained");
+        let status = serde_json::to_string(&status_snapshot_v3(&store).expect("status"))
+            .expect("status JSON");
+        assert!(
+            status.contains(&island.evaluation_id),
+            "the lineage keeps reporting its newest evaluation below the floor"
         );
         for suffix in ["retention-native-d", "retention-native-e"] {
             commit_real_host_detector_report(
@@ -12961,8 +13080,8 @@ sys.stdout.write("\n")
             .expire_ordinary_before(&timestamp(Utc::now() - Duration::seconds(1)))
             .expect("native second expiry");
         assert!(second.deleted_rows > 0);
-        assert_eq!(second.boundary.evaluation_floor, 4);
-        assert_eq!(second.boundary.report_floor, 4);
+        assert_eq!(second.boundary.evaluation_floor, 5);
+        assert_eq!(second.boundary.report_floor, 5);
         store.validate().expect("retained store validation");
         validate_evaluation_refusal_history(&store).expect("native replay after second cycle");
         assert_eq!(store.latest_evaluation_sequence().unwrap(), 5);
@@ -13179,7 +13298,7 @@ sys.stdout.write("\n")
             .expire_ordinary_before(&cutoff)
             .expect("ordinary maintenance must work at configured write refusal");
         assert!(result.deleted_rows > 0);
-        assert_eq!(result.boundary.report_floor, 2);
+        assert_eq!(result.boundary.report_floor, 3);
         let suffix = "maintenance-native-after-expiry";
         commit_real_host_detector_report(
             &mut store,
@@ -13364,14 +13483,14 @@ sys.stdout.write("\n")
         (count, first_sequence, events)
     }
 
-    /// DEFECT SPECIMEN (NQ #27 audit, DEFECT 1): a finding that opened and then
-    /// RESOLVED still pins the global expiry prefix. Expiry never retires
-    /// `finding_events`, every evaluation they cite is protected, and only a
-    /// contiguous prefix can retire, so the evaluation floor stays below the
-    /// finding's opening evaluation forever and later cycles reclaim nothing.
-    /// This test passes while the defect is present; a repair should flip it.
+    /// NQ #27 D1 (repaired; the failing specimen is preserved on
+    /// audit/nq-27-specimens-20261010): a finding that opened and then
+    /// resolved, with no notification custody, no longer pins expiry. Its
+    /// finding rows stay; the evaluations and reports they name survive only
+    /// as compact source-expired records below the floor, and later cycles
+    /// keep reclaiming.
     #[test]
-    fn audit_specimen_resolved_finding_still_pins_global_expiry_prefix() {
+    fn resolved_finding_does_not_pin_global_expiry() {
         let config = NqConfig::from_toml(&host_example_text()).expect("host config");
         let watcher = &config.watchers[0];
         let directory = tempfile::tempdir().expect("fixture directory");
@@ -13457,14 +13576,271 @@ sys.stdout.write("\n")
             third.deleted_rows,
             audit_finding_states(&store)
         );
-        // Defect present: the floor cannot pass the resolved finding's opening
-        // evaluation, so every later, fully aged collection is retained.
-        assert!(first.boundary.evaluation_floor < finding_sequence);
-        assert_eq!(second.deleted_rows, 0);
-        assert_eq!(third.deleted_rows, 0);
-        assert_eq!(second.boundary, first.boundary);
-        assert_eq!(third.boundary, first.boundary);
-        assert!(store.latest_evaluation_sequence().unwrap() > finding_sequence + 5);
+        // Repaired: the floor passes the resolved finding; later cycles keep
+        // reclaiming; the finding's own history is intact.
+        assert!(first.boundary.evaluation_floor > finding_sequence);
+        assert!(first.deleted_rows > 0);
+        assert!(second.deleted_rows > 0);
+        assert!(second.boundary.evaluation_floor > first.boundary.evaluation_floor);
+        assert!(second.boundary.generation > first.boundary.generation);
+        assert!(third.boundary.generation >= second.boundary.generation);
+        let (after_count, _, after_events) = audit_finding_probe(&path);
+        assert_eq!(after_count, finding_count, "finding events are never retired");
+        assert_eq!(after_events, events, "finding lineage unchanged");
+        let connection = rusqlite::Connection::open(&path).expect("probe");
+        let (compact_evaluations, full_finding_evaluations): (i64, i64) = connection
+            .query_row(
+                "SELECT COALESCE(SUM(e.source_expired),0), COALESCE(SUM(1-e.source_expired),0) FROM finding_events f JOIN evaluation_runs e ON e.evaluation_id=f.evaluation_id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("finding evaluation dispositions");
+        assert_eq!(compact_evaluations, finding_count);
+        assert_eq!(full_finding_evaluations, 0);
+        let compact_reports: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM finding_evidence v JOIN admitted_reports a ON a.report_id=v.report_id WHERE a.source_expired=1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("compact evidence reports");
+        let evidence: i64 = connection
+            .query_row("SELECT COUNT(*) FROM finding_evidence", [], |r| r.get(0))
+            .expect("evidence count");
+        assert_eq!(compact_reports, evidence);
+        drop(connection);
+        store.validate().expect("holes validate");
+        validate_semantic_history(&store).expect("surviving typed history validates");
+        assert!(
+            audit_finding_states(&store)
+                .iter()
+                .all(|(condition, _)| condition == "explicitly_absent"),
+            "the resolved finding is still reported"
+        );
+        status_snapshot_v3(&store).expect("status after holes");
+        let report_id = after_events_report(&path);
+        assert!(matches!(
+            store.verify_admitted_snapshot(&report_id),
+            Err(nq_store::SnapshotVerificationError::ReportExpired(_))
+        ));
+    }
+
+    fn holes_fixture(path: &Path, loads: &[f64], prefix: &str) -> (Store, NqConfig) {
+        let config = NqConfig::from_toml(&host_example_text()).expect("host config");
+        let mut store =
+            Store::initialize_with_capacity(path, 604_800, Some(64 * 1024 * 1024), Some(0), Some(0))
+                .expect("bounded store");
+        let observed = Utc::now() - Duration::seconds(30);
+        for (index, load) in loads.iter().enumerate() {
+            let suffix = format!("{prefix}-{index}");
+            commit_real_host_detector_report(
+                &mut store,
+                &config.watchers[0],
+                &format!("report-{suffix}"),
+                &suffix,
+                observed + Duration::milliseconds(i64::try_from(index).unwrap() * 10),
+                *load,
+                None,
+            );
+        }
+        (store, config)
+    }
+
+    fn holes_collect(store: &mut Store, config: &NqConfig, suffix: &str, load: f64) {
+        commit_real_host_detector_report(
+            store,
+            &config.watchers[0],
+            &format!("report-{suffix}"),
+            suffix,
+            Utc::now() - Duration::seconds(1),
+            load,
+            None,
+        );
+    }
+
+    /// Expire everything committed before now (all of it is aged).
+    fn holes_expire(store: &mut Store) -> nq_store::RetentionResult {
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let result = expire_ordinary_history(store, &timestamp(Utc::now()))
+            .expect("typed expiry with declared holes");
+        store.validate().expect("store laws hold after expiry");
+        validate_semantic_history(store).expect("surviving typed history validates");
+        status_snapshot_v3(store).expect("status after expiry");
+        result
+    }
+
+    /// (event_revision, event_kind, evaluation source_expired, event_id) in revision order.
+    fn finding_dispositions(path: &Path) -> Vec<(i64, String, i64, String)> {
+        let connection = rusqlite::Connection::open(path).expect("probe");
+        let mut statement = connection
+            .prepare("SELECT f.event_revision, f.event_kind, e.source_expired, f.event_id FROM finding_events f JOIN evaluation_runs e ON e.evaluation_id=f.evaluation_id ORDER BY f.event_revision")
+            .expect("disposition query");
+        statement
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .expect("dispositions")
+            .collect::<Result<_, _>>()
+            .expect("disposition rows")
+    }
+
+    /// Owner boundary 2: an unresolved finding keeps the complete closure of
+    /// its opening and latest events; intermediate updates become compact
+    /// records. Once a newer event arrives, the previously latest closure is
+    /// an ordinary candidate at the next expiry.
+    #[test]
+    fn open_finding_keeps_opening_and_latest_closures_and_compacts_updates() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("open-finding.db");
+        let (mut store, config) = holes_fixture(&path, &[1.0, 8.0, 8.0, 8.0, 8.0], "open");
+        let first = holes_expire(&mut store);
+        assert!(first.boundary.evaluation_floor >= 5);
+        let events = finding_dispositions(&path);
+        assert_eq!(
+            events.iter().map(|(revision, _, expired, _)| (*revision, *expired)).collect::<Vec<_>>(),
+            vec![(1, 0), (2, 1), (3, 1), (4, 0)],
+            "opening and latest full, intermediates compact: {events:?}"
+        );
+        holes_collect(&mut store, &config, "open-update", 8.0);
+        let second = holes_expire(&mut store);
+        assert!(second.boundary.generation > first.boundary.generation);
+        let events = finding_dispositions(&path);
+        assert_eq!(
+            events.iter().map(|(revision, _, expired, _)| (*revision, *expired)).collect::<Vec<_>>(),
+            vec![(1, 0), (2, 1), (3, 1), (4, 1), (5, 0)],
+            "the superseded latest event becomes compact: {events:?}"
+        );
+        holes_collect(&mut store, &config, "open-resolve", 1.0);
+        holes_collect(&mut store, &config, "open-after", 1.0);
+        holes_expire(&mut store);
+        let events = finding_dispositions(&path);
+        assert!(
+            events.iter().all(|(_, _, expired, _)| *expired == 1),
+            "a resolved finding without custody keeps only compact records: {events:?}"
+        );
+    }
+
+    /// Owner boundary 4: notification custody holds a finding event's closure
+    /// until delivery is terminal; `unknown` keeps the hold. Doctor counts it.
+    #[test]
+    fn notification_custody_holds_until_terminal_and_unknown_keeps_hold() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("custody.db");
+        let (mut store, config) = holes_fixture(&path, &[1.0, 8.0, 1.0, 1.0], "custody");
+        let events = finding_dispositions(&path);
+        let (opened, resolved) = (events[0].3.clone(), events[1].3.clone());
+        let notification = |id: &str, event: &str| nq_store::NotificationInput {
+            notification_id: id.to_owned(),
+            idempotency_key: format!("key-{id}"),
+            finding_event_id: Some(event.to_owned()),
+            destination_kind: "fixture".into(),
+            payload: canonical(&json!({"fixture": id})).expect("payload"),
+            available_at: timestamp(Utc::now()),
+            max_attempts: 3,
+            created_at: timestamp(Utc::now()),
+        };
+        store
+            .enqueue_notification(&notification("legacy-opened", &opened))
+            .expect("legacy outbox");
+        store
+            .retain_notification_delivery(
+                &notification("intent-resolved", &resolved),
+                &nq_store::NotificationDeliveryIntentInput {
+                    notification_id: "intent-resolved".into(),
+                    stable_event_id: resolved.clone(),
+                    attention_kind: "operator_assertion".into(),
+                    attention_receipt_digest: None,
+                    attention_policy_id: "fixture-policy".into(),
+                    attention_policy_digest: nq_protocol::sha256_bytes(b"policy").as_str().to_owned(),
+                    transition_id: "fixture-transition".into(),
+                    route_reference: "fixture-route".into(),
+                    destination_identity: "fixture-destination".into(),
+                    content_digest: nq_protocol::sha256_bytes(b"content").as_str().to_owned(),
+                    intent: canonical(&json!({"fixture": "intent"})).expect("intent"),
+                    created_at: timestamp(Utc::now()),
+                },
+            )
+            .expect("delivery intent");
+        for (number, outcome) in [(1, "claimed"), (2, "unknown")] {
+            store
+                .append_notification_delivery_event(&nq_store::NotificationDeliveryEventInput {
+                    notification_id: "intent-resolved".into(),
+                    event_number: number,
+                    occurred_at: timestamp(Utc::now()),
+                    outcome: outcome.into(),
+                    detail: canonical(&json!({})).expect("detail"),
+                })
+                .expect("delivery event");
+        }
+        holes_expire(&mut store);
+        let events = finding_dispositions(&path);
+        assert_eq!(
+            events.iter().map(|(_, _, expired, _)| *expired).collect::<Vec<_>>(),
+            vec![0, 0],
+            "pending and unknown custody keep full closures: {events:?}"
+        );
+        let report = store.retention_report().expect("retention report");
+        assert_eq!(report.custody_pending_events, 2);
+        assert_eq!(report.custody_unknown_events, 1);
+        assert_eq!(report.islands_by_root.get("notification_custody"), Some(&2));
+        store
+            .append_notification_attempt(&nq_store::NotificationAttemptInput {
+                notification_id: "legacy-opened".into(),
+                attempt_number: 1,
+                attempted_at: timestamp(Utc::now()),
+                outcome: "delivered".into(),
+                delivery_identity: None,
+                detail: canonical(&json!({})).expect("detail"),
+            })
+            .expect("terminal legacy attempt");
+        holes_collect(&mut store, &config, "custody-after", 1.0);
+        holes_expire(&mut store);
+        let events = finding_dispositions(&path);
+        assert_eq!(
+            events.iter().map(|(_, _, expired, _)| *expired).collect::<Vec<_>>(),
+            vec![1, 0],
+            "terminal custody releases; unknown custody keeps holding: {events:?}"
+        );
+    }
+
+    /// Released islands are reclaimed even when no new row has aged.
+    #[test]
+    fn released_island_is_reclaimed_without_new_aged_history() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("released.db");
+        let (mut store, config) = holes_fixture(&path, &[1.0, 8.0, 8.0], "released");
+        holes_expire(&mut store);
+        assert!(finding_dispositions(&path).iter().any(|(_, _, expired, _)| *expired == 0));
+        // Resolve after the cutoff: no new row is old enough, yet the
+        // released islands are reclaimable.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let cutoff = timestamp(Utc::now());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        holes_collect(&mut store, &config, "released-resolve", 1.0);
+        holes_collect(&mut store, &config, "released-after", 1.0);
+        let report = store.retention_report().expect("retention report");
+        assert_eq!(report.islands_by_root.get("released_pending"), Some(&2));
+        let before = store.retention_boundary().expect("boundary");
+        let result = expire_ordinary_history(&mut store, &cutoff).expect("reclaim released islands");
+        assert!(result.deleted_rows > 0);
+        assert!(result.boundary.generation > before.generation);
+        assert_eq!(result.boundary.evaluation_floor, before.evaluation_floor);
+        store.validate().expect("store laws hold");
+        validate_semantic_history(&store).expect("surviving typed history validates");
+        let events = finding_dispositions(&path);
+        assert_eq!(
+            events.iter().map(|(revision, _, expired, _)| (*revision, *expired)).collect::<Vec<_>>(),
+            vec![(1, 1), (2, 1), (3, 0)],
+            "released events below the floor compact; the fresh resolving event stays: {events:?}"
+        );
+        let report = store.retention_report().expect("retention report");
+        assert_eq!(report.islands_by_root.get("released_pending"), Some(&0));
+    }
+
+    /// One report a finding cites (for the source-expired reader check).
+    fn after_events_report(path: &Path) -> String {
+        rusqlite::Connection::open(path)
+            .expect("probe")
+            .query_row("SELECT report_id FROM finding_evidence LIMIT 1", [], |r| r.get(0))
+            .expect("cited report")
     }
 
     /// COST SPECIMEN (NQ #27 audit, DEFECT 4): with the prefix pinned by a
