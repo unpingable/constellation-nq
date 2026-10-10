@@ -144,8 +144,9 @@ pub async fn run(options: Nqd) -> Result<()> {
 
     info!(instances = config.watchers.len(), "nqd started");
     // systemd stops the service with SIGTERM: stop as for SIGINT, so every
-    // engine and store connection closes (SQLite checkpoints and removes the
-    // WAL on the last close) and the stopped status is recorded.
+    // engine and store connection closes and the stopped status is recorded.
+    // Closing never checkpoints (that would be an unbudgeted main-file
+    // write); the stop runs one bounded checkpoint after the stopped record.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("cannot listen for SIGTERM")?;
     tokio::select! {
@@ -177,6 +178,16 @@ pub async fn run(options: Nqd) -> Result<()> {
         "stopped",
         &serde_json::json!({"pid": std::process::id()}),
     )?;
+    // Fold the WAL so the main file alone holds every commit, through the
+    // same guarded, envelope-checked TRUNCATE checkpoint as every write. A
+    // refusal leaves the WAL (nq.db + nq.db-wal remain one consistent store).
+    match stopped_store.checkpoint_wal() {
+        Ok(()) => info!("write-ahead log checkpointed at stop"),
+        Err(error) => warn!(
+            %error,
+            "bounded stop checkpoint refused; the write-ahead log keeps committed frames"
+        ),
+    }
     Ok(())
 }
 

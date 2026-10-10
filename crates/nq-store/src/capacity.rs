@@ -864,6 +864,52 @@ mod tests {
     }
 
     #[test]
+    fn explicit_wal_checkpoint_folds_the_last_commit_or_refuses_and_keeps_it() {
+        let (_root, path, mut store) = tiny_store();
+        store.record_status(&status(0, 1024)).unwrap();
+        let wal = sidecar(&path, "-wal");
+        let resident = std::fs::metadata(&wal).unwrap().len();
+        assert!(resident > 0);
+        let main_only = |label: &str| -> i64 {
+            let copy_root = tempfile::tempdir().unwrap();
+            let copy = copy_root.path().join("nq.db");
+            std::fs::copy(&path, &copy).unwrap();
+            Connection::open(&copy)
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM status_events", [], |row| row.get(0))
+                .unwrap_or_else(|error| panic!("{label}: {error}"))
+        };
+        assert_eq!(main_only("before"), 0, "the commit is WAL-resident");
+
+        let reader =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM status_events", [], |row| row.get(0))
+            .unwrap();
+        let error = store.checkpoint_wal().unwrap_err();
+        assert!(
+            matches!(error, StoreError::Invariant(ref text) if text.contains("prevents bounded WAL checkpoint")),
+            "{error:?}"
+        );
+        // A reader's snapshot blocks the reset, not the backfill already
+        // admitted by the preflight: the WAL itself is kept.
+        assert!(std::fs::metadata(&wal).unwrap().len() >= resident);
+        reader.execute_batch("ROLLBACK").unwrap();
+        drop(reader);
+
+        store.checkpoint_wal().unwrap();
+        assert_eq!(std::fs::metadata(&wal).unwrap().len(), 0);
+        assert_eq!(main_only("checkpointed"), 1);
+        drop(store);
+        assert_eq!(std::fs::metadata(&wal).unwrap().len(), 0);
+        assert_eq!(
+            stored_status_ids(&crate::Store::open(&path).unwrap()).len(),
+            1
+        );
+    }
+
+    #[test]
     fn leftover_cold_rollback_journal_is_charged_without_removal() {
         let (_root, path, mut store) = tiny_store();
         store.record_status(&status(0, 1024)).unwrap();
