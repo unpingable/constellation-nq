@@ -113,7 +113,13 @@ archive reads do not consult WAL or create sidecars.
 
 ## Expiry, declared protected holes, and refusal
 
-Ordinary collection performs dependency-aware expiry before collecting again.
+Ordinary collection performs dependency-aware expiry before collecting, at
+most once per expiry quantum per collection engine: one 168th of the horizon,
+clamped to 60 s..3600 s (one hour at the seven-day default). Daemon startup
+always attempts expiry, and a capacity refusal by the admission preflight
+allows one immediate attempt between quanta. `nq doctor` prints the quantum
+and the earliest next attempt derived from the last committed expiry
+(`expiry_schedule`).
 Eligibility uses local arrival/admission and completed-run times. Provider
 sample time is not permission to discard a freshly received report.
 
@@ -164,6 +170,55 @@ island or compact record; any other row is an undeclared retained row and
 fails closed, as does a live root whose closure was compacted. A stale advisory
 watermark is not authority to delete. Reclaimed pages can be reused without
 reducing the main file's physical size.
+
+### What an expiry validates, and what it relies on
+
+Before retiring anything, an expiry validates, by type and by stored digest,
+every row it relies on or changes:
+
+- the history that the expiring handle's own certification does not cover
+  (all of it when the handle has none), in a read snapshot;
+- exactly the candidate closures the deletion plan selected (every
+  evaluation at or below the new floor, whether deleted, compacted or kept as
+  an island, and every aged run with its reports, provider intakes and
+  status events), inside the guarded transaction before any row changes;
+- the store-level laws and stored digests of rows beyond the handle's
+  validated frontier, and the declared form of every candidate after the
+  change.
+
+The certification relied on is a validation watermark that the handle
+verified when it opened or recorded itself, under the current retention
+boundary. Deletion selection never reads it. Covered rows that are not
+candidates are not re-proven by each expiry; `nq admin validate --full` and
+every reader that reopens them re-prove them. Without such a certification
+(a handle that opened in full and recorded nothing), the expiry validates the
+complete surviving history as before.
+
+The validation watermark (`nq.validation_watermark.v4`) records, per history
+table, an additive content accumulator: the sum modulo 2^256 of one digest
+per covered row, each binding the table, the rowid and every column. It is
+bound to the retention boundary (generation, floors, retired lineage floors)
+and applies only while that boundary is current. The expiry that changes the
+boundary carries the watermark forward in the same handle: it subtracts the
+digests of the covered rows it deletes, replaces those of the rows it
+compacts, re-anchors a bound whose row it deleted, keeps each lineage's
+newest evaluation (always a protected island), and records the new boundary.
+The next open is therefore incremental. A process that stops between the
+expiry commit and that write leaves the old watermark, which no longer
+applies: exactly one full validation follows, then opens are incremental
+again. Another long-lived handle adopts the carried watermark only after
+proving it (same store, rules and boundary, intact commitment, bounding rows
+present). Any inconsistency withdraws the shortcut, never trusts it: a
+watermark whose commitment does not match refuses the open, one certified
+under another boundary or inapplicable rules leads to full validation, and a
+covered row changed since certification fails `nq admin validate --full`,
+which recomputes every accumulator. The accumulator is advisory: it detects
+accidental change and substitution of covered rows against a watermark that
+was not itself rewritten, not deliberate forgery of both.
+
+`nq admin validate --full` always validates every row. It compares the
+previous certification only when it holds under the same retention boundary
+and otherwise reports `"prior_certification": "superseded_by_generation"`.
 
 Expiry is maintenance. A refused expiry (capacity, checkpoint contention, or
 history changed by a concurrent writer during validation) is logged with its

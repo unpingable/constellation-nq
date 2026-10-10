@@ -1751,6 +1751,21 @@ pub struct CollectionEngine {
     replay: Option<ReplayCursor>,
     /// Outcome of the expiry attempted before the most recent collection.
     retention_attempt: Option<RetentionAttempt>,
+    /// When this engine last attempted expiry (the collection path attempts
+    /// at most once per [`expiry_quantum`]).
+    last_expiry_attempt: Option<std::time::Instant>,
+    /// Whether the one immediate attempt allowed by a capacity refusal was
+    /// used since the last scheduled attempt.
+    capacity_bypass_spent: bool,
+}
+
+/// How often the collection path attempts expiry: one 168th of the horizon
+/// (one hour at the seven-day default), clamped to 60 s..3600 s. Daemon
+/// startup always attempts; a capacity refusal by the admission preflight
+/// allows one immediate attempt in between.
+#[must_use]
+pub fn expiry_quantum(horizon_seconds: u64) -> std::time::Duration {
+    std::time::Duration::from_secs((horizon_seconds / 168).clamp(60, 3600))
 }
 
 /// What the retention expiry attempted before a collection did. Expiry is
@@ -1762,6 +1777,12 @@ pub struct CollectionEngine {
 pub enum RetentionAttempt {
     /// Expiry ran; `deleted_rows` may be zero when nothing was eligible.
     Completed(nq_store::RetentionResult),
+    /// Not attempted: the previous attempt is younger than the expiry
+    /// quantum and the capacity preflight admits the next write.
+    Deferred {
+        /// Seconds until the next scheduled attempt.
+        next_attempt_in_seconds: u64,
+    },
     /// Expiry was refused without effect.
     Refused {
         /// `capacity`, `contention`, `history_changed`, or `disk_full`.
@@ -2308,7 +2329,20 @@ impl CollectionEngine {
             evaluator_identity: crate::evaluator_identity::resolved(),
             replay,
             retention_attempt: None,
+            last_expiry_attempt: None,
+            capacity_bypass_spent: false,
         })
+    }
+
+    /// Whether the admission's capacity preflight would refuse the next write.
+    fn capacity_preflight_refuses(&self) -> bool {
+        #[cfg(test)]
+        if let Some(forced) = CAPACITY_PREFLIGHT_REFUSES_FOR_TEST.with(std::cell::Cell::get) {
+            return forced;
+        }
+        self.store
+            .capacity_preflight()
+            .is_err_and(|error| error.is_refusal())
     }
 
     /// Revoke one exact configured binding without evaluating current profile
@@ -2363,6 +2397,8 @@ impl CollectionEngine {
             ),
             replay,
             retention_attempt: None,
+            last_expiry_attempt: None,
+            capacity_bypass_spent: false,
         };
         engine.revoke_binding(watcher)
     }
@@ -2393,6 +2429,8 @@ impl CollectionEngine {
             evaluator_identity,
             replay,
             retention_attempt: None,
+            last_expiry_attempt: None,
+            capacity_bypass_spent: false,
         })
     }
 
@@ -2851,12 +2889,37 @@ impl CollectionEngine {
         })?;
         // Expiry is maintenance and never costs the collection: a refusal is
         // recorded and admission proceeds under its own capacity preflight.
-        let attempt = classify_retention_attempt(expire_ordinary_history(
-            &mut self.store,
-            &cutoff.to_rfc3339(),
-        ))?;
-        if matches!(&attempt, RetentionAttempt::Completed(expired) if expired.deleted_rows > 0) {
-            self.replay = validate_engine_open_history(&self.store)?;
+        // It runs at most once per quantum, plus one immediate attempt when
+        // the capacity preflight would refuse the admission.
+        let quantum = expiry_quantum(self.config.retention.horizon_seconds);
+        let elapsed = self.last_expiry_attempt.map(|at| at.elapsed());
+        let due = elapsed.is_none_or(|elapsed| elapsed >= quantum);
+        let capacity_bypass =
+            !due && !self.capacity_bypass_spent && self.capacity_preflight_refuses();
+        let attempt = if due || capacity_bypass {
+            self.capacity_bypass_spent = capacity_bypass;
+            self.last_expiry_attempt = Some(std::time::Instant::now());
+            classify_retention_attempt(expire_ordinary_history(
+                &mut self.store,
+                &cutoff.to_rfc3339(),
+            ))?
+        } else {
+            RetentionAttempt::Deferred {
+                next_attempt_in_seconds: quantum
+                    .saturating_sub(elapsed.unwrap_or_default())
+                    .as_secs(),
+            }
+        };
+        if let RetentionAttempt::Completed(expired) = &attempt
+            && expired.deleted_rows > 0
+        {
+            if engine_semantic_state(&self.store).is_some() {
+                // The expiry carried this handle's certification forward; the
+                // replay cursor follows it without re-reading history.
+                prune_replay_cursor(&self.store, &mut self.replay, &expired.boundary)?;
+            } else {
+                self.replay = validate_engine_open_history(&self.store)?;
+            }
         }
         self.retention_attempt = Some(attempt);
         self.reconcile_pending_binding(watcher)?;
@@ -8409,28 +8472,33 @@ pub fn engine_validation_rules() -> &'static str {
     RULES.as_str()
 }
 
-/// The applied watermark when it was certified under this engine's rules.
-fn engine_watermark(store: &Store) -> Option<&nq_store::ValidationWatermark> {
+/// The watermark this handle verified at open or recorded itself (carried
+/// forward across its own expiries), when it was certified under this
+/// engine's rules. It is bound to the store's current retention boundary:
+/// an expiry by another handle leaves it inapplicable until this handle
+/// reopens.
+fn engine_watermark(store: &Store) -> Option<nq_store::ValidationWatermark> {
     store
-        .applied_watermark()
+        .certified_watermark()
         .filter(|watermark| watermark.engine_rules == engine_validation_rules())
+        .filter(|watermark| {
+            store
+                .retention_witness()
+                .is_ok_and(|current| current == watermark.retention)
+        })
 }
 
-fn engine_core_frontier(store: &Store) -> Option<&nq_store::HistoryFrontier> {
-    engine_watermark(store).map(|watermark| &watermark.frontier)
+fn engine_core_frontier(store: &Store) -> Option<nq_store::HistoryFrontier> {
+    engine_watermark(store).map(|watermark| watermark.frontier)
 }
 
 fn engine_semantic_state(
     store: &Store,
-) -> Option<(&nq_store::HistoryFrontier, &nq_store::SemanticState)> {
-    if store.retention_generation().ok()? > 0 {
-        return None;
-    }
+) -> Option<(nq_store::HistoryFrontier, nq_store::SemanticState)> {
     engine_watermark(store).and_then(|watermark| {
         watermark
             .semantic
-            .as_ref()
-            .map(|state| (&watermark.frontier, state))
+            .map(|state| (watermark.frontier, state))
     })
 }
 
@@ -8454,7 +8522,7 @@ fn validate_engine_open_history(store: &Store) -> Result<Option<ReplayCursor>, E
     let mut evaluation = None;
     let semantic = match engine_semantic_state(store) {
         Some((frontier, state)) => {
-            validate_semantic_planes_since_with(store, frontier, state, &mut evaluation)
+            validate_semantic_planes_since_with(store, &frontier, &state, &mut evaluation)
         }
         // No watermark, or one whose semantic certification was withdrawn
         // by an earlier failure: attempt the full certification again
@@ -8509,8 +8577,8 @@ fn validate_engine_open_history(store: &Store) -> Result<Option<ReplayCursor>, E
 /// [`validate_diagnostic_artifact_history`] for the uncovered rows.
 pub fn validate_core_history_since_open(store: &Store) -> Result<(), EngineError> {
     if let Some(frontier) = engine_core_frontier(store) {
-        validate_provider_intake_history_since(store, frontier)?;
-        validate_diagnostic_artifact_history_since(store, frontier)?;
+        validate_provider_intake_history_since(store, &frontier)?;
+        validate_diagnostic_artifact_history_since(store, &frontier)?;
     } else {
         validate_provider_intake_history(store)?;
         validate_diagnostic_artifact_history(store)?;
@@ -8530,7 +8598,7 @@ pub fn validate_core_history_since_open(store: &Store) -> Result<(), EngineError
 pub fn validate_semantic_history_since_open(store: &Store) -> Result<(), EngineError> {
     validate_core_history_since_open(store)?;
     if let Some((frontier, state)) = engine_semantic_state(store) {
-        validate_semantic_planes_since(store, frontier, state)?;
+        validate_semantic_planes_since(store, &frontier, &state)?;
     } else {
         validate_semantic_planes_in_full(store)?;
     }
@@ -8571,7 +8639,6 @@ fn validate_semantic_planes_in_full_with(
     // The evaluation history is replayed once, first; status and rejected
     // custody then read their runs' evaluations without replaying it again.
     let (_, heads) = replay_evaluation_history_in_full(store)?;
-    visit_island_evaluations(store, |_, _, _| Ok(()))?;
     *evaluation = Some(heads.clone());
     validate_admitted_report_history(store)?;
     validate_watcher_run_history(store)?;
@@ -8766,33 +8833,80 @@ fn replay_heads(state: &nq_store::SemanticState) -> Result<HistoryHeads, EngineE
     Ok(heads)
 }
 
-/// Exhaustively reopen the complete persisted semantic chain.
-///
-/// This is the shared fail-closed boundary for operations that may disclose or
-/// preserve locally produced diagnostic artifacts. It proves admitted and
-/// rejected custody, run/status/evaluation correspondence, the provider's raw
-/// interpretation through its durable acknowledgment and canonical result, and
-/// finally every diagnostic artifact derived from that history.
-///
-/// Imported diagnostic artifacts deliberately remain custody-only and callers
-/// must not use this function to imply producer authentication for them.
-///
-/// # Errors
-///
-/// Returns when any persisted history plane is incomplete, corrupt, or does
-/// not correspond exactly to the plane from which it was derived.
-/// Retire ordinary history only after complete typed semantic validation.
-/// Both daemon startup and collection use this boundary; a no-op prefix probe
-/// avoids replay, and snapshot changes before deletion are explicitly refused.
+/// Retire ordinary history only after typed semantic validation of every
+/// row the expiry relies on or retires: the history this handle's own
+/// certification does not cover (all of it when it has none) is validated in
+/// a read snapshot, and every candidate closure the deletion plan selects
+/// (deleted, compacted, or kept as an island) is fully typed- and
+/// digest-validated inside the guarded transaction before any row changes.
+/// The certification relied on is one this handle verified at open or
+/// recorded itself; deletion selection never reads it. Covered rows that are
+/// not candidates are re-proven by `nq admin validate --full` and by every
+/// reader that reopens them, not by each expiry. Both daemon startup and
+/// collection use this boundary; a no-op prefix probe avoids replay, and
+/// snapshot changes before deletion are explicitly refused.
 pub fn expire_ordinary_history(
     store: &mut Store,
     cutoff: &str,
 ) -> Result<nq_store::RetentionResult, EngineError> {
-    store.expire_ordinary_before_validated(cutoff, |snapshot| {
-        #[cfg(test)]
-        concurrent_writer_for_test(snapshot);
-        validate_semantic_history(snapshot).map(|_| ())
-    })
+    store.expire_ordinary_before_certified(
+        cutoff,
+        |snapshot| {
+            #[cfg(test)]
+            concurrent_writer_for_test(snapshot);
+            validate_semantic_history_since_open(snapshot)
+        },
+        Some(validate_expiry_candidates),
+    )
+}
+
+/// Full typed validation of exactly the candidate closures of one expiry.
+fn validate_expiry_candidates(
+    store: &Store,
+    candidates: &nq_store::ExpiryCandidates,
+) -> Result<(), EngineError> {
+    for sequence in &candidates.evaluation_sequences {
+        validate_single_evaluation(store, *sequence)?;
+    }
+    for report_id in &candidates.report_ids {
+        validate_admitted_report_record(store, report_id)?;
+    }
+    for intake_id in &candidates.intake_ids {
+        let row = store.provider_intake(intake_id)?.ok_or_else(|| {
+            EngineError::Invariant(format!("expiry candidate intake {intake_id} does not reopen"))
+        })?;
+        validate_provider_intake_record(store, &row)?;
+    }
+    for run_id in &candidates.run_ids {
+        let run = store.watcher_run_outcome(run_id)?.ok_or_else(|| {
+            EngineError::Invariant(format!("expiry candidate run {run_id} does not reopen"))
+        })?;
+        reopen_run_resource_outcome(&run)?;
+        validate_run_profile_identity(&run)?;
+    }
+    for sequence in &candidates.status_sequences {
+        let mut page = store.status_history_bounded(1, Some(sequence - 1))?;
+        let (Some(row), None) = (page.pop(), page.pop()) else {
+            return Err(EngineError::Invariant(format!(
+                "expiry candidate status event {sequence} does not reopen"
+            )));
+        };
+        if row.status_sequence != *sequence {
+            return Err(EngineError::Invariant(format!(
+                "expiry candidate status event {sequence} reopened as {}",
+                row.status_sequence
+            )));
+        }
+        validate_status_event_record(store, row, EvaluationHistory::AlreadyValidated)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Forces the collection path's capacity preflight probe (tests only).
+    static CAPACITY_PREFLIGHT_REFUSES_FOR_TEST: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -8827,6 +8941,21 @@ fn concurrent_writer_for_test(snapshot: &Store) {
     }
 }
 
+/// Exhaustively reopen the complete persisted semantic chain.
+///
+/// This is the shared fail-closed boundary for operations that may disclose or
+/// preserve locally produced diagnostic artifacts. It proves admitted and
+/// rejected custody, run/status/evaluation correspondence, the provider's raw
+/// interpretation through its durable acknowledgment and canonical result, and
+/// finally every diagnostic artifact derived from that history.
+///
+/// Imported diagnostic artifacts deliberately remain custody-only and callers
+/// must not use this function to imply producer authentication for them.
+///
+/// # Errors
+///
+/// Returns when any persisted history plane is incomplete, corrupt, or does
+/// not correspond exactly to the plane from which it was derived.
 pub fn validate_semantic_history(
     store: &Store,
 ) -> Result<DiagnosticArtifactHistoryVerification, EngineError> {
@@ -9413,7 +9542,7 @@ type LatestEvaluations = BTreeMap<Vec<u8>, (i64, i64, EvaluationEnvelopeV2)>;
 pub fn status_snapshot_v3(store: &Store) -> Result<StatusSnapshotV3, EngineError> {
     match engine_semantic_state(store) {
         Some((frontier, state)) => status_snapshot_v3_with(store, |status_through, through| {
-            latest_evaluations_since(store, frontier, state, status_through, through)
+            latest_evaluations_since(store, &frontier, &state, status_through, through)
         }),
         None => status_snapshot_v3_from_complete_history(store),
     }
@@ -9914,41 +10043,51 @@ fn validate_evaluation_refusal_history_with_page_size(
 /// validation of the row, then its finding transition from the lineage's
 /// latest finding event before it. Islands are not contiguous history and
 /// never seed or extend a replay walk.
+/// Reopen one evaluation on its own: typed validation of the row, then its
+/// finding transition from the lineage's latest finding event before it.
+fn validate_single_evaluation(
+    store: &Store,
+    sequence: i64,
+) -> Result<(nq_store::EvaluationRefusalHistoryRow, EvaluationEnvelopeV2, Vec<u8>), EngineError> {
+    let mut rows = store.evaluation_refusal_history_bounded(1, Some(sequence - 1), sequence)?;
+    let (Some(row), None) = (rows.pop(), rows.pop()) else {
+        return Err(EngineError::Invariant(format!(
+            "retained evaluation at sequence {sequence} does not reopen"
+        )));
+    };
+    if row.evaluation_sequence != sequence {
+        return Err(EngineError::Invariant(format!(
+            "retained evaluation at sequence {sequence} reopened as {}",
+            row.evaluation_sequence
+        )));
+    }
+    let envelope = validate_evaluation_refusal_row(store, &row, true)?;
+    let lineage = evaluation_lineage_key(&envelope)?;
+    let mut findings = BTreeMap::new();
+    if let Some(prior) = store.prior_finding_for_evaluation_lineage(
+        sequence - 1,
+        &evaluation_finding_lineage(&envelope)?,
+    )? {
+        findings.insert(
+            lineage.clone(),
+            ReplayedFinding {
+                finding_id: prior.finding_id,
+                event_revision: prior.event_revision,
+                condition_state: prior.condition_state,
+            },
+        );
+    }
+    validate_evaluation_finding_replay_step(&row, &envelope, &mut findings)?;
+    Ok((row, envelope, lineage))
+}
+
 fn visit_island_evaluations<F>(store: &Store, mut visit: F) -> Result<usize, EngineError>
 where
     F: FnMut(nq_store::EvaluationRefusalHistoryRow, EvaluationEnvelopeV2, &[u8]) -> Result<(), EngineError>,
 {
     let mut reopened = 0usize;
     for sequence in store.island_evaluation_sequences()? {
-        let mut rows = store.evaluation_refusal_history_bounded(1, Some(sequence - 1), sequence)?;
-        let (Some(row), None) = (rows.pop(), rows.pop()) else {
-            return Err(EngineError::Invariant(format!(
-                "retained evaluation at sequence {sequence} does not reopen"
-            )));
-        };
-        if row.evaluation_sequence != sequence {
-            return Err(EngineError::Invariant(format!(
-                "retained evaluation at sequence {sequence} reopened as {}",
-                row.evaluation_sequence
-            )));
-        }
-        let envelope = validate_evaluation_refusal_row(store, &row, true)?;
-        let lineage = evaluation_lineage_key(&envelope)?;
-        let mut findings = BTreeMap::new();
-        if let Some(prior) = store.prior_finding_for_evaluation_lineage(
-            sequence - 1,
-            &evaluation_finding_lineage(&envelope)?,
-        )? {
-            findings.insert(
-                lineage.clone(),
-                ReplayedFinding {
-                    finding_id: prior.finding_id,
-                    event_revision: prior.event_revision,
-                    condition_state: prior.condition_state,
-                },
-            );
-        }
-        validate_evaluation_finding_replay_step(&row, &envelope, &mut findings)?;
+        let (row, envelope, lineage) = validate_single_evaluation(store, sequence)?;
         visit(row, envelope, &lineage)?;
         reopened = reopened
             .checked_add(1)
@@ -10005,6 +10144,13 @@ fn replay_evaluation_history_in_full(store: &Store) -> Result<(usize, HistoryHea
                 .map(|state| (watermark.frontier.evaluation_sequence, state))
         })
         .filter(|(through, _)| *through <= bound);
+    // Declared islands below the evaluation floor are reopened one by one;
+    // a lineage whose newest evaluation is an island keeps it as its head.
+    let mut islands = Vec::new();
+    visit_island_evaluations(store, |row, _, lineage| {
+        islands.push((lineage.to_vec(), row.evaluation_revision, row.evaluation_sequence));
+        Ok(())
+    })?;
     let mut reopened = 0usize;
     let mut heads = HistoryHeads::default();
     let mut after = None;
@@ -10017,7 +10163,9 @@ fn replay_evaluation_history_in_full(store: &Store) -> Result<(usize, HistoryHea
             prior_through,
             |_, _, _, _| Ok(()),
         )?;
-        if semantic_state(&at_prior) != *prior_state {
+        let mut certified = at_prior.clone();
+        fold_island_heads(&mut certified, &islands, prior_through);
+        if semantic_state(&certified) != *prior_state {
             return Err(EngineError::Invariant(format!(
                 "the validation watermark's certified semantic state (finding-lineage or \
                  evaluation heads) disagrees with the complete replay of the evaluation history \
@@ -10040,7 +10188,32 @@ fn replay_evaluation_history_in_full(store: &Store) -> Result<(usize, HistoryHea
     let reopened = reopened
         .checked_add(count)
         .ok_or_else(|| EngineError::Invariant("evaluation history count overflowed".into()))?;
+    let mut heads = heads;
+    fold_island_heads(&mut heads, &islands, bound);
     Ok((reopened, heads))
+}
+
+/// Fold declared island evaluations at or below `through` into the
+/// evaluation-lineage heads: the newest revision of a lineage wins, so an
+/// island is the head exactly when no newer evaluation of its lineage
+/// survives. Finding-lineage heads are untouched (islands never seed them).
+fn fold_island_heads(heads: &mut HistoryHeads, islands: &[(Vec<u8>, i64, i64)], through: i64) {
+    for (lineage, revision, sequence) in islands {
+        if *sequence > through {
+            continue;
+        }
+        let candidate = EvaluationHeadPosition {
+            revision: *revision,
+            sequence: *sequence,
+        };
+        match heads.evaluations.get_mut(lineage) {
+            None => {
+                heads.evaluations.insert(lineage.clone(), candidate);
+            }
+            Some(head) if candidate.revision > head.revision => *head = candidate,
+            Some(_) => {}
+        }
+    }
 }
 
 /// The last evaluation a certification may fold into its lineage heads: the
@@ -10061,8 +10234,8 @@ fn validate_evaluation_history_before_evaluating(store: &Store) -> Result<(), En
     match engine_semantic_state(store) {
         Some((frontier, state)) => validate_evaluation_refusal_history_since(
             store,
-            frontier,
-            state,
+            &frontier,
+            &state,
             store.latest_evaluation_sequence()?,
         )
         .map(|_| ()),
@@ -10094,7 +10267,7 @@ fn establish_replay_cursor(
     bounds: &nq_store::HistoryFrontier,
 ) -> Result<ReplayCursor, EngineError> {
     store.validate_evaluation_history_invariants()?;
-    let (_, heads) = visit_evaluation_history_beyond(
+    let (_, mut heads) = visit_evaluation_history_beyond(
         store,
         nq_store::MAX_PUBLIC_QUERY_ROWS,
         None,
@@ -10103,6 +10276,12 @@ fn establish_replay_cursor(
         None,
         |_, _, _, _| Ok(()),
     )?;
+    let mut islands = Vec::new();
+    visit_island_evaluations(store, |row, _, lineage| {
+        islands.push((lineage.to_vec(), row.evaluation_revision, row.evaluation_sequence));
+        Ok(())
+    })?;
+    fold_island_heads(&mut heads, &islands, bounds.evaluation_sequence);
     Ok(ReplayCursor {
         retention_generation: store.retention_generation()?,
         through: bounds.evaluation_sequence,
@@ -10160,16 +10339,62 @@ fn advance_replay_cursor(
     })
 }
 
+/// Follow an expiry this engine committed (and whose certification it carried
+/// forward) without replaying history: drop evaluation heads whose full row
+/// no longer exists, drop finding-lineage heads of lineages with no
+/// evaluation above the new floor (a later walk seeds them from their finding
+/// events at the floor), and adopt the new generation. A cursor behind the
+/// floor is discarded and re-established on demand.
+fn prune_replay_cursor(
+    store: &Store,
+    replay: &mut Option<ReplayCursor>,
+    boundary: &nq_store::RetentionBoundary,
+) -> Result<(), EngineError> {
+    let Some(cursor) = replay.as_mut() else {
+        return Ok(());
+    };
+    if cursor.through < boundary.evaluation_floor {
+        *replay = None;
+        return Ok(());
+    }
+    let islands: std::collections::BTreeSet<i64> =
+        store.island_evaluation_sequences()?.into_iter().collect();
+    cursor.heads.evaluations.retain(|_, head| {
+        head.sequence > boundary.evaluation_floor || islands.contains(&head.sequence)
+    });
+    let above: std::collections::BTreeSet<Vec<u8>> = cursor
+        .heads
+        .evaluations
+        .iter()
+        .filter(|(_, head)| head.sequence > boundary.evaluation_floor)
+        .map(|(lineage, _)| lineage.clone())
+        .collect();
+    cursor.heads.findings.retain(|lineage, _| above.contains(lineage));
+    cursor.retention_generation = boundary.generation;
+    // The reference bounds were captured before rows at or below them were
+    // deleted: re-anchor them so a reused rowid is never treated as covered.
+    if let Some(reference) = cursor.reference.as_ref() {
+        cursor.reference = Some(store.reanchor_frontier(reference)?);
+    }
+    Ok(())
+}
+
 /// The engine's replay cursor, established outside any write transaction
 /// when its open replayed none.
 fn ensure_replay_cursor(
     store: &Store,
     replay: &mut Option<ReplayCursor>,
 ) -> Result<(), EngineError> {
+    let boundary = store.retention_boundary()?;
     if replay
         .as_ref()
-        .is_none_or(|cursor| store.retention_generation().ok() != Some(cursor.retention_generation))
+        .is_some_and(|cursor| cursor.retention_generation != boundary.generation)
     {
+        // Another handle expired history since: follow its boundary without
+        // replaying (a cursor behind the floor is dropped).
+        prune_replay_cursor(store, replay, &boundary)?;
+    }
+    if replay.is_none() {
         *replay = Some(store.with_read_snapshot(establish_replay_cursor)?);
     }
     Ok(())
@@ -12466,7 +12691,35 @@ sys.stdout.write("\n")
         }
     }
 
+    thread_local! {
+        /// Measurement fixtures that model one long-lived binding reuse one
+        /// admission for every collection (as a configured watcher does)
+        /// instead of admitting per collection: `Some(None)` enables reuse
+        /// and `Some(Some(id))` holds the admission to reuse.
+        static REUSED_ADMISSION_FOR_TEST: std::cell::RefCell<Option<Option<(String, String)>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
     fn seed_compiled_admission(
+        store: &mut Store,
+        profile: &'static dyn ProfileModule,
+        instance_id: &str,
+        suffix: &str,
+    ) -> String {
+        if let Some(Some((reused, _))) = REUSED_ADMISSION_FOR_TEST.with(|cell| cell.borrow().clone()) {
+            return reused;
+        }
+        let admission_id = seed_compiled_admission_once(store, profile, instance_id, suffix);
+        REUSED_ADMISSION_FOR_TEST.with(|cell| {
+            let mut cell = cell.borrow_mut();
+            if cell.is_some() {
+                *cell = Some(Some((admission_id.clone(), suffix.to_owned())));
+            }
+        });
+        admission_id
+    }
+
+    fn seed_compiled_admission_once(
         store: &mut Store,
         profile: &'static dyn ProfileModule,
         instance_id: &str,
@@ -13365,6 +13618,8 @@ sys.stdout.write("\n")
         ));
         std::thread::sleep(std::time::Duration::from_secs(2));
         engine.config.retention.horizon_seconds = 1;
+        // Not testing the quantum here: the next collection is due.
+        engine.last_expiry_attempt = None;
         let before = engine.store.retention_boundary().expect("boundary");
         EXPIRY_CONCURRENT_WRITER_FOR_TEST.with(|armed| armed.set(true));
         let outcome = engine
@@ -13397,6 +13652,54 @@ sys.stdout.write("\n")
             Some(RetentionAttempt::Completed(result))
                 if result.deleted_rows > 0 && result.boundary.generation > before.generation
         ));
+    }
+
+    /// The collection path attempts expiry at most once per quantum; a
+    /// capacity refusal by the admission preflight allows exactly one
+    /// immediate attempt in between.
+    #[test]
+    fn expiry_quantum_defers_attempts_and_capacity_refusal_bypasses_once() {
+        assert_eq!(expiry_quantum(604_800), std::time::Duration::from_secs(3600));
+        assert_eq!(expiry_quantum(1), std::time::Duration::from_secs(60));
+        assert_eq!(expiry_quantum(86_400), std::time::Duration::from_secs(514));
+        let root = tempfile::tempdir().expect("fixture directory");
+        let Some((mut engine, watcher, _)) =
+            admitted_host_diagnostic_fixture(root.path(), "expiry-quantum", b"quantum")
+        else {
+            return;
+        };
+        assert!(engine.collect(&watcher).expect("first collect").is_success());
+        assert!(matches!(engine.last_retention_attempt(), Some(RetentionAttempt::Completed(_))));
+        assert!(engine.collect(&watcher).expect("second collect").is_success());
+        assert!(
+            matches!(
+                engine.last_retention_attempt(),
+                Some(RetentionAttempt::Deferred { next_attempt_in_seconds }) if *next_attempt_in_seconds <= 3600
+            ),
+            "{:?}",
+            engine.last_retention_attempt()
+        );
+        CAPACITY_PREFLIGHT_REFUSES_FOR_TEST.with(|forced| forced.set(Some(true)));
+        assert!(engine.collect(&watcher).is_ok());
+        assert!(
+            matches!(engine.last_retention_attempt(), Some(RetentionAttempt::Completed(_))),
+            "a capacity refusal bypasses the quantum once: {:?}",
+            engine.last_retention_attempt()
+        );
+        assert!(engine.collect(&watcher).is_ok());
+        assert!(
+            matches!(engine.last_retention_attempt(), Some(RetentionAttempt::Deferred { .. })),
+            "only once per quantum: {:?}",
+            engine.last_retention_attempt()
+        );
+        CAPACITY_PREFLIGHT_REFUSES_FOR_TEST.with(|forced| forced.set(None));
+        engine.last_expiry_attempt = Some(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(3601))
+                .expect("monotonic clock"),
+        );
+        assert!(engine.collect(&watcher).expect("due collect").is_success());
+        assert!(matches!(engine.last_retention_attempt(), Some(RetentionAttempt::Completed(_))));
     }
 
     #[test]
@@ -13808,6 +14111,72 @@ sys.stdout.write("\n")
         );
     }
 
+    fn holes_engine_config(path: &Path) -> NqConfig {
+        let mut config = NqConfig::from_toml(&host_example_text()).expect("host config");
+        config.database_path = path.to_path_buf();
+        config.retention = crate::config::RetentionConfig {
+            horizon_seconds: 604_800,
+            byte_ceiling: Some(64 * 1024 * 1024),
+            reserve_bytes: Some(0),
+            auxiliary_bytes: Some(0),
+        };
+        config
+    }
+
+    /// NQ #27 D4: a generation transition committed by an engine carries its
+    /// certification forward (no full pass), with declared protected holes
+    /// present (an open finding, unknown custody). The next open is
+    /// incremental; the incremental status snapshot equals the one replayed
+    /// from the surviving history; explicit full validation recomputes every
+    /// accumulator and the semantic heads and agrees with the carried state.
+    #[test]
+    fn generation_transition_carries_certification_without_a_full_pass() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("carry.db");
+        let (mut store, config) = holes_fixture(&path, &[8.0, 1.0, 8.0, 8.0, 8.0, 1.0, 1.0], "carry");
+        store
+            .append_genesis(&nq_store::GenesisInput {
+                genesis_id: "genesis-carry".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: timestamp(Utc::now()),
+                detail: canonical(&json!({"source": "test"})).expect("detail"),
+            })
+            .expect("sole genesis");
+        drop(store);
+        let engine_config = holes_engine_config(&path);
+        let mut engine = CollectionEngine::open(&engine_config).expect("engine records");
+        assert!(engine_semantic_state(&engine.store).is_some());
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let cutoff = timestamp(Utc::now());
+        let result = expire_ordinary_history(engine.store_mut_for_test(), &cutoff).expect("expiry");
+        assert!(result.deleted_rows > 0 && result.boundary.generation == 1, "{result:?}");
+        assert!(
+            engine_semantic_state(&engine.store).is_some(),
+            "the expiring engine carried its certification forward"
+        );
+        holes_collect(engine.store_mut_for_test(), &config, "carry-after", 8.0);
+        drop(engine);
+        let store = Store::open(&path).expect("reopen");
+        assert!(
+            matches!(store.open_validation(), nq_store::OpenValidation::SinceWatermark(_)),
+            "no full open after a generation transition"
+        );
+        let incremental = status_snapshot_v3(&store).expect("incremental status");
+        let complete = status_snapshot_v3_from_complete_history(&store).expect("complete status");
+        let without_time = |snapshot: &StatusSnapshotV3| {
+            let mut value = serde_json::to_value(snapshot).unwrap();
+            value.as_object_mut().unwrap().remove("generated_at");
+            value
+        };
+        assert_eq!(without_time(&incremental), without_time(&complete));
+        drop(store);
+        let engine = CollectionEngine::open(&engine_config).expect("engine reopens incrementally");
+        drop(engine);
+        let full = Store::open_validating_fully(&path).expect("full open");
+        assert_eq!(full.prior_certification(), "compared");
+        validate_fully_and_record(&full).expect("full validation agrees with the carried certification");
+    }
+
     /// Released islands are reclaimed even when no new row has aged.
     #[test]
     fn released_island_is_reclaimed_without_new_aged_history() {
@@ -13854,12 +14223,23 @@ sys.stdout.write("\n")
     /// (kept open by every later collection) and one `unknown`-custody
     /// notification, all aged and expired (generation >= 1); then one aged
     /// candidate collection at the prefix and `target` collections in total,
-    /// none aged at the returned candidate cutoff. Returns (first cutoff,
-    /// candidate cutoff, growth milliseconds).
-    fn s4_fixture(path: &Path, watcher: &WatcherConfig, target: usize) -> (String, String, f64) {
+    /// none aged at the returned candidate cutoffs. Two candidates precede
+    /// the growth, each retired alone by its own cutoff. Returns (first
+    /// cutoff, first candidate cutoff, second candidate cutoff, growth
+    /// milliseconds).
+    fn s4_fixture(path: &Path, watcher: &WatcherConfig, target: usize) -> (String, String, String, f64) {
+        REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = Some(None));
         let mut store =
             Store::initialize_with_capacity(path, 604_800, Some(1024 * 1024 * 1024), Some(0), Some(0))
                 .expect("bounded store");
+        store
+            .append_genesis(&nq_store::GenesisInput {
+                genesis_id: "genesis-s4".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: timestamp(Utc::now()),
+                detail: canonical(&json!({"source": "s4"})).expect("detail"),
+            })
+            .expect("sole genesis");
         let mut committed = 0usize;
         let mut commit = |store: &mut Store, observed: DateTime<Utc>, load: f64| {
             let suffix = format!("s4-{committed}");
@@ -13927,17 +14307,23 @@ sys.stdout.write("\n")
         let first_cutoff = timestamp(Utc::now());
         let first = expire_ordinary_history(&mut store, &first_cutoff).expect("first expiry");
         assert!(first.boundary.generation >= 1, "{first:?}");
-        commit(&mut store, Utc::now() - Duration::seconds(1), 8.0);
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        let candidate_cutoff = timestamp(Utc::now());
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut candidate_cutoffs = Vec::new();
+        for _ in 0..2 {
+            commit(&mut store, Utc::now() - Duration::seconds(1), 8.0);
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            candidate_cutoffs.push(timestamp(Utc::now()));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         let grow = std::time::Instant::now();
         while commit(&mut store, Utc::now() - Duration::seconds(1), 8.0) < target {}
         let grow_ms = grow.elapsed().as_secs_f64() * 1000.0;
         // Reclaim the islands released while growing (each new open-finding
         // event supersedes the latest one), so (d) below has no candidate.
         expire_ordinary_history(&mut store, &first_cutoff).expect("settling expiry");
-        (first_cutoff, candidate_cutoff, grow_ms)
+        REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = None);
+        let second = candidate_cutoffs.pop().expect("second candidate");
+        let first_candidate = candidate_cutoffs.pop().expect("first candidate");
+        (first_cutoff, first_candidate, second, grow_ms)
     }
 
     /// NQ #27 S4 measurement (adapted from the audit cost specimen, which is
@@ -13946,8 +14332,12 @@ sys.stdout.write("\n")
     /// N (env `NQ_S4_TARGETS`, default 50,100,200,400,800) a fresh
     /// [`s4_fixture`] is built and, with all handles dropped, this times (a)
     /// `Store::open_with_capacity`, (b) `CollectionEngine::open`, (c) a second
-    /// (a)+(b), (d) an expiry with zero candidates and (e) an expiry with
-    /// exactly one candidate, each with the SQL work counter. A final
+    /// (a)+(b) (a plain restart), (d) an expiry with zero candidates, (e) an
+    /// expiry with exactly one candidate (a generation transition), (f) the
+    /// open right after that transition, (g) the open right after a second
+    /// one-candidate expiry whose process stopped between COMMIT and the
+    /// sidecar write (simulated by restoring the pre-expiry sidecar bytes),
+    /// and (h) the open after that, each with the SQL work counter. A final
     /// released-island cycle must reduce the row count. Run with `--ignored
     /// --nocapture`; it prints the table and the acceptance verdicts.
     #[test]
@@ -13990,7 +14380,8 @@ sys.stdout.write("\n")
         for target in targets {
             let path = directory.path().join(format!("s4-{target}.db"));
             config.database_path = path.clone();
-            let (first_cutoff, candidate_cutoff, grow_ms) = s4_fixture(&path, &watcher, target);
+            let (first_cutoff, candidate_cutoff, crash_cutoff, grow_ms) =
+                s4_fixture(&path, &watcher, target);
             let open_pair = |config: &NqConfig| {
                 let mut opened = None;
                 let store_cost = measure(&mut || {
@@ -14029,13 +14420,30 @@ sys.stdout.write("\n")
             });
             let one = one.expect("one result");
             drop(engine);
+            let (f_store, f_engine, transition_mode) = open_pair(&config);
+            let f = (f_store.0 + f_engine.0, f_store.1 + f_engine.1);
+            // A second one-candidate expiry whose process stops after COMMIT
+            // and before the carried watermark is written.
+            let sidecar = nq_store::watermark_path(&path);
+            let before_crash = std::fs::read(&sidecar).expect("watermark before the crash");
+            let mut engine = CollectionEngine::open(&config).expect("engine for crash expiry");
+            let crashed = expire_ordinary_history(engine.store_mut_for_test(), &crash_cutoff)
+                .expect("crash-phase expiry");
+            drop(engine);
+            std::fs::write(&sidecar, &before_crash).expect("restore the pre-commit watermark");
+            let (g_store, g_engine, crash_mode) = open_pair(&config);
+            let g = (g_store.0 + g_engine.0, g_store.1 + g_engine.1);
+            let (h_store, h_engine, recovered_mode) = open_pair(&config);
+            let h = (h_store.0 + h_engine.0, h_store.1 + h_engine.1);
             let retained = rows(&path);
             println!(
                 "S4C N={target} rows={retained} grow_ms={grow_ms:.0} \
                  a_ms={:.1} a_ticks={} b_ms={:.1} b_ticks={} c_ms={:.1} c_ticks={} \
-                 d_ms={:.1} d_ticks={} d_deleted={} e_ms={:.1} e_ticks={} e_deleted={} gen={} open={first_mode}/{second_mode}",
+                 d_ms={:.1} d_ticks={} d_deleted={} e_ms={:.1} e_ticks={} e_deleted={} gen={} \
+                 f_ms={:.1} f_ticks={} g_ms={:.1} g_ticks={} h_ms={:.1} h_ticks={} crash_deleted={} \
+                 open=a:{first_mode}/c:{second_mode}/f:{transition_mode}/g:{crash_mode}/h:{recovered_mode}",
                 a.0, a.1, b.0, b.1, c.0, c.1, d.0, d.1, zero.deleted_rows, e.0, e.1, one.deleted_rows,
-                one.boundary.generation
+                one.boundary.generation, f.0, f.1, g.0, g.1, h.0, h.1, crashed.deleted_rows
             );
             table.push((target, c, e, one.deleted_rows, zero.deleted_rows));
             last_path = Some((path, candidate_cutoff));
@@ -14203,8 +14611,12 @@ sys.stdout.write("\n")
         .expect("materialize host report");
         let raw_bytes = nq_protocol::canonical_json_bytes(&report).expect("canonical host report");
         let run_id = run.run_id.clone();
+        let evaluator_suffix = REUSED_ADMISSION_FOR_TEST
+            .with(|cell| cell.borrow().clone())
+            .flatten()
+            .map_or_else(|| suffix.to_owned(), |(_, first)| first);
         let evaluator_artifact_digest =
-            nq_protocol::sha256_bytes(format!("evaluator-{suffix}").as_bytes()).into_string();
+            nq_protocol::sha256_bytes(format!("evaluator-{evaluator_suffix}").as_bytes()).into_string();
         let collection = test_collection(
             store,
             run,
@@ -20616,7 +21028,11 @@ sys.stdout.write("\n")
                 .collect();
             let opener = scope.spawn(|| {
                 let mut opens = 0usize;
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                // Bounded so a failed collector can never leave it spinning.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+                while !stop.load(std::sync::atomic::Ordering::Relaxed)
+                    && std::time::Instant::now() < deadline
+                {
                     let engine = reopen_with_test_identity(&config).expect("open");
                     assert!(
                         engine.replay.is_some(),
@@ -20631,11 +21047,17 @@ sys.stdout.write("\n")
                 }
                 opens
             });
-            for collector in collectors {
-                collector.join().expect("collector");
-            }
+            // Join every collector before stopping the opener, then report
+            // the first failure: a panicking collector fails the test instead
+            // of leaving the opener running.
+            let results: Vec<_> = collectors.into_iter().map(|collector| collector.join()).collect();
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
             let opens = opener.join().expect("opener");
+            for result in results {
+                if let Err(panic) = result {
+                    std::panic::resume_unwind(panic);
+                }
+            }
             eprintln!(
                 "{opens} engine opens during {} concurrent collections",
                 2 * ROUNDS

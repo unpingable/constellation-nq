@@ -26,11 +26,13 @@ use thiserror::Error;
 pub mod capacity;
 mod history_scope;
 mod retention;
-pub use retention::{CapacityReport, RetentionBoundary, RetentionReport, RetentionResult};
+pub use retention::{
+    CapacityReport, ExpiryCandidates, RetentionBoundary, RetentionReport, RetentionResult,
+};
 
 pub use history_scope::{
     EvaluationHead, FullValidationReason, HistoryFrontier, LineageHead, OpenValidation,
-    SQL_WORK_TICK, SemanticCertification, SemanticState, TableFrontier, VALIDATION_RULES,
+    RetentionWitness, SQL_WORK_TICK, SemanticCertification, SemanticState, TableFrontier, VALIDATION_RULES,
     VALIDATION_WATERMARK_SCHEMA, ValidationWatermark, sql_work_count, start_sql_work_count,
     stop_sql_work_count, watermark_path,
 };
@@ -1909,6 +1911,16 @@ struct ValidationState {
     /// An applicable watermark of this store that an explicit full
     /// validation must not contradict.
     prior: Option<Box<ValidationWatermark>>,
+    /// A full validation found a watermark of this store certified under an
+    /// earlier retention boundary: an expiry superseded that certification.
+    prior_superseded: bool,
+    /// The retention boundary this handle validated under (at open, or as
+    /// carried forward by its own expiry). A watermark is recorded only while
+    /// the store still has this boundary.
+    open_retention: Option<RetentionWitness>,
+    /// The watermark this handle verified at open or recorded itself: the
+    /// only certification its incremental paths and its expiry rely on.
+    certified: std::cell::RefCell<Option<Box<ValidationWatermark>>>,
     /// Lazily built index of covered evaluations by run.
     run_evaluations: std::cell::RefCell<Option<history_scope::RunEvaluations>>,
 }
@@ -1921,6 +1933,9 @@ impl Default for ValidationState {
             store_validated: None,
             may_record: false,
             prior: None,
+            prior_superseded: false,
+            open_retention: None,
+            certified: std::cell::RefCell::new(None),
             run_evaluations: std::cell::RefCell::new(None),
         }
     }
@@ -2354,6 +2369,7 @@ impl Store {
         self.validate_identity()?;
         let identity = self.store_identity()?;
         let mut prior = None;
+        let mut prior_superseded = false;
         let candidate = match sidecar {
             history_scope::SidecarState::Absent => Err(FullValidationReason::NoWatermark),
             history_scope::SidecarState::Unreadable => {
@@ -2372,6 +2388,9 @@ impl Store {
                         Ok(watermark)
                     }
                 } else {
+                    prior_superseded = identity.as_ref().is_some_and(|identity| {
+                        history_scope::applies_except_retention(&watermark, identity)
+                    });
                     Err(FullValidationReason::InapplicableWatermark)
                 }
             }
@@ -2399,15 +2418,88 @@ impl Store {
                 self.validate_history(Scope::after(&watermark.frontier))?;
             }
         }
+        let certified = match &opened {
+            OpenValidation::SinceWatermark(watermark) => Some(watermark.clone()),
+            OpenValidation::Full(_) => None,
+        };
         self.validation = ValidationState {
             opened,
             open_frontier: Some(frontier.clone()),
             store_validated: Some(frontier),
             may_record: false,
             prior,
+            prior_superseded,
+            open_retention: Some(match identity {
+                Some(identity) => identity.retention,
+                None => retention::witness(&self.connection)?,
+            }),
+            certified: std::cell::RefCell::new(certified),
             run_evaluations: std::cell::RefCell::new(None),
         };
         Ok(())
+    }
+
+    /// The watermark this handle verified at open or recorded itself, if
+    /// any: what incremental validation on this handle may rely on.
+    ///
+    /// When another handle's expiry changed the retention boundary since,
+    /// this handle adopts the watermark that expiry carried forward, but only
+    /// after proving it: it belongs to this store under the current schema,
+    /// rules and boundary, its commitment is intact, its bounding rows are
+    /// present, and its frontier lies within what this handle validated.
+    #[must_use]
+    pub fn certified_watermark(&self) -> Option<ValidationWatermark> {
+        let current = self.validation.certified.borrow().as_deref().cloned()?;
+        let witness = retention::witness(&self.connection).ok()?;
+        if current.retention == witness {
+            return Some(current);
+        }
+        let adopted = self.adopt_carried_watermark(&current, &witness)?;
+        *self.validation.certified.borrow_mut() = Some(Box::new(adopted.clone()));
+        Some(adopted)
+    }
+
+    /// `frontier` (append positions) re-anchored after an expiry: each bound
+    /// whose row was deleted moves to the highest surviving rowid below it,
+    /// so a reused rowid can never fall inside a range treated as validated.
+    pub fn reanchor_frontier(&self, frontier: &HistoryFrontier) -> Result<HistoryFrontier, StoreError> {
+        history_scope::reanchor_bounds(&self.connection, frontier)
+    }
+
+    fn adopt_carried_watermark(
+        &self,
+        previous: &ValidationWatermark,
+        witness: &RetentionWitness,
+    ) -> Option<ValidationWatermark> {
+        let path = self.path.as_deref()?;
+        let history_scope::SidecarState::Present(carried) = history_scope::read_sidecar(path) else {
+            return None;
+        };
+        let identity = self.store_identity().ok()??;
+        let validated = self.validation.store_validated.as_ref()?;
+        let within = carried.frontier.tables.iter().all(|(table, frontier)| {
+            frontier.max_rowid <= validated.max_rowid(table)
+        });
+        (history_scope::applies(&carried, &identity)
+            && &carried.retention == witness
+            && carried.engine_rules == previous.engine_rules
+            && within
+            && history_scope::verify_watermark(&self.connection, &carried).is_ok())
+        .then_some(*carried)
+    }
+
+    /// How a full validation related to an earlier certification of this
+    /// store: `compared` (it must not contradict it), `superseded_by_generation`
+    /// (an expiry changed the retention boundary since), or `none`.
+    #[must_use]
+    pub fn prior_certification(&self) -> &'static str {
+        if self.validation.prior.is_some() {
+            "compared"
+        } else if self.validation.prior_superseded {
+            "superseded_by_generation"
+        } else {
+            "none"
+        }
     }
 
     /// Rows this handle has not yet validated: those beyond the frontier its
@@ -2415,9 +2507,6 @@ impl Store {
     /// validated nothing incrementally. Read paths that guard against rows
     /// acquired since open use this scope.
     fn since_open(&self) -> Scope<'_> {
-        if self.retention_generation().unwrap_or(1) > 0 {
-            return Scope::FULL;
-        }
         self.validation
             .store_validated
             .as_ref()
@@ -2425,9 +2514,6 @@ impl Store {
     }
 
     fn store_identity(&self) -> Result<Option<StoreIdentity>, StoreError> {
-        if self.retention_generation()? > 0 {
-            return Ok(None);
-        }
         let genesis: Vec<String> = self
             .connection
             .prepare("SELECT genesis_id FROM genesis_records ORDER BY genesis_id LIMIT 2")?
@@ -2440,6 +2526,7 @@ impl Store {
             genesis_id: genesis_id.clone(),
             schema_version: SCHEMA_VERSION,
             schema_artifact_digest: schema_artifact_digest(),
+            retention: retention::witness(&self.connection)?,
         }))
     }
 
@@ -2473,6 +2560,13 @@ impl Store {
         let Some(identity) = self.store_identity()? else {
             return Ok(None);
         };
+        // An expiry by another handle since this one validated changed what
+        // its open certified; that handle carried the watermark forward, and
+        // this one must not overwrite it with a certification of an older
+        // boundary.
+        if self.validation.open_retention.as_ref() != Some(&identity.retention) {
+            return Ok(None);
+        }
         if let history_scope::SidecarState::Present(current) = history_scope::read_sidecar(path) {
             history_scope::refuse_foreign(path, &current, Some(&identity))?;
         }
@@ -2487,15 +2581,16 @@ impl Store {
                 self.validation.prior.as_deref(),
             )?,
         };
-        history_scope::write_watermark(
+        let written = history_scope::write_watermark(
             path,
             &identity,
             engine_rules,
             certified,
             semantic,
             now_utc(),
-        )
-        .map(Some)
+        )?;
+        *self.validation.certified.borrow_mut() = Some(Box::new(written.clone()));
+        Ok(Some(written))
     }
 
     fn validate_scoped(&self, scope: Scope<'_>) -> Result<(), StoreError> {
@@ -11851,10 +11946,8 @@ fn validate_evaluation_revision_shape(
             "evaluation/finding {identity} has impossible durable revision {revision}"
         )));
     }
-    if retention::boundary(connection)?.generation == 0 {
-        if let Some(frontier) = scope.frontier() {
-            return validate_evaluation_revision_shape_since(connection, frontier);
-        }
+    if let Some(frontier) = scope.frontier() {
+        return validate_evaluation_revision_shape_since(connection, frontier);
     }
     // Rows at or below the floor are declared islands or compact records,
     // proven by retention validation; the append sequence above it is exact.
@@ -11960,12 +12053,16 @@ fn validate_evaluation_revision_shape_since(
             params![detector_id, detector_version, minimum],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
+        // After expiry the predecessor revision may have been retired; the
+        // persisted lineage floor then names it exactly.
+        let retired = retention::lineage_floor(connection, &detector_id, &detector_version)?;
         let continues = maximum - minimum + 1 == count
             && from_minimum == count
             && if minimum == 1 {
                 predecessor.is_none()
             } else {
                 predecessor.is_some_and(|rowid| rowid <= bound)
+                    || (predecessor.is_none() && retired == minimum - 1)
             };
         if !continues {
             return Err(StoreError::Integrity(format!(
@@ -15005,6 +15102,189 @@ mod tests {
                 "SELECT delete_enabled FROM retention_state WHERE singleton=1", [], |r| r.get(0)).unwrap();
             assert_eq!(enabled, 0);
         }
+    }
+
+    /// A crash fixture whose writer handle recorded a validation watermark.
+    fn certified_crash_fixture(path: &Path) -> RetentionBoundary {
+        let mut store = Store::initialize_with_capacity(path, 604800,
+            Some(16 * 1024 * 1024), Some(1024 * 1024), Some(1024 * 1024)).expect("small admitted file store");
+        store
+            .append_genesis(&GenesisInput {
+                genesis_id: "genesis-carry".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: TIME.to_owned(),
+                detail: document(json!({"source": "test"})),
+            })
+            .expect("sole genesis");
+        let profile = append_fixture_descriptor(&mut store);
+        for suffix in ["crash-a", "crash-b", "crash-c"] {
+            commit_ordinary_evaluated_for_crash(&mut store, &profile, suffix);
+        }
+        let boundary = store.retention_boundary().unwrap();
+        drop(store);
+        let store = Store::open(path).expect("writer open");
+        store
+            .record_validation_watermark(SemanticCertification::NotEstablished, "fixture-engine-rules")
+            .expect("record")
+            .expect("writable sole-genesis handle records");
+        boundary
+    }
+
+    fn sidecar(path: &Path) -> ValidationWatermark {
+        serde_json::from_slice(&std::fs::read(history_scope::watermark_path(path)).unwrap()).unwrap()
+    }
+
+    /// An expiry by a handle that verified the watermark at open carries it
+    /// forward to the new boundary: the next open is incremental, and a full
+    /// recomputation of every accumulator agrees with the carried one.
+    #[test]
+    fn expiry_carries_the_watermark_forward_without_a_full_open() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("carry.db");
+        let old = certified_crash_fixture(&path);
+        let mut store = Store::open(&path).unwrap();
+        assert!(matches!(store.open_validation(), OpenValidation::SinceWatermark(_)));
+        let result = store.expire_ordinary_before("2100-01-01T00:00:00Z").unwrap();
+        assert!(result.boundary.generation > old.generation);
+        assert!(result.deleted_rows > 0);
+        let carried = sidecar(&path);
+        assert_eq!(carried.retention, store.retention_witness().unwrap());
+        assert!(matches!(store.open_validation(), OpenValidation::SinceWatermark(_)));
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(
+            matches!(reopened.open_validation(), OpenValidation::SinceWatermark(_)),
+            "a generation transition costs no full open"
+        );
+        drop(reopened);
+        let full = Store::open_validating_fully(&path).unwrap();
+        assert_eq!(full.prior_certification(), "compared");
+        let recomputed = full
+            .record_validation_watermark(SemanticCertification::NotEstablished, "fixture-engine-rules")
+            .unwrap()
+            .unwrap();
+        for (table, frontier) in &carried.frontier.tables {
+            let fresh = &recomputed.frontier.tables[table];
+            assert_eq!(fresh.max_rowid.max(frontier.max_rowid), fresh.max_rowid, "{table}");
+            if fresh.max_rowid == frontier.max_rowid {
+                assert_eq!(fresh, frontier, "{table}: carried accumulator equals the full recomputation");
+            }
+        }
+    }
+
+    /// A process exit between the expiry COMMIT and the carried watermark
+    /// leaves the old certification, which no longer applies: exactly one
+    /// full open follows, then opens are incremental again. An exit before
+    /// COMMIT leaves the old boundary and the old watermark still applies.
+    #[test]
+    fn expiry_crash_after_commit_costs_exactly_one_full_open() {
+        for (phase, code, committed) in [("inside_transaction", 72, false), ("after_commit", 73, true)] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("crash.db");
+            let old = certified_crash_fixture(&path);
+            let before = sidecar(&path);
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::retention_crash_child", "--ignored", "--nocapture"])
+                .env("NQ_RETENTION_CRASH_DATABASE", &path)
+                .env("NQ_RETENTION_CRASH_PHASE", phase)
+                .output()
+                .expect("run abrupt-exit child");
+            assert_eq!(output.status.code(), Some(code), "{phase}: {}", String::from_utf8_lossy(&output.stderr));
+            assert_eq!(sidecar(&path), before, "{phase}: the sidecar was not rewritten");
+            let first = Store::open(&path).unwrap();
+            if committed {
+                assert!(first.retention_boundary().unwrap().generation > old.generation);
+                assert_eq!(
+                    first.open_validation(),
+                    &OpenValidation::Full(FullValidationReason::InapplicableWatermark),
+                    "{phase}: the stale-retention watermark refuses the shortcut"
+                );
+                first
+                    .record_validation_watermark(SemanticCertification::NotEstablished, "fixture-engine-rules")
+                    .unwrap()
+                    .unwrap();
+            } else {
+                assert_eq!(first.retention_boundary().unwrap(), old);
+                assert!(matches!(first.open_validation(), OpenValidation::SinceWatermark(_)));
+            }
+            drop(first);
+            let second = Store::open(&path).unwrap();
+            assert!(
+                matches!(second.open_validation(), OpenValidation::SinceWatermark(_)),
+                "{phase}: exactly one full open"
+            );
+        }
+    }
+
+    /// A resealed watermark whose accumulator disagrees with its covered rows
+    /// passes the bounded open (only bounding rows are read) but explicit
+    /// full validation recomputes every accumulator and refuses.
+    #[test]
+    fn full_validation_detects_a_tampered_covered_row_and_an_inconsistent_accumulator() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("tamper.db");
+        certified_crash_fixture(&path);
+        let mut forged = sidecar(&path);
+        let table = forged.frontier.tables.get_mut("watcher_runs").unwrap();
+        table.accumulator = "0".repeat(64);
+        forged.commitment_digest = forged.computed_commitment();
+        std::fs::write(history_scope::watermark_path(&path), serde_json::to_vec(&forged).unwrap()).unwrap();
+        assert!(matches!(Store::open(&path).unwrap().open_validation(), OpenValidation::SinceWatermark(_)));
+        let full = Store::open_validating_fully(&path).unwrap();
+        let error = full
+            .record_validation_watermark(SemanticCertification::NotEstablished, "fixture-engine-rules")
+            .expect_err("accumulator mismatch refuses");
+        assert!(error.to_string().contains("changed at or below the frontier"), "{error}");
+        drop(full);
+        // A covered (non-bounding) row rewritten under a consistent watermark,
+        // with the append-only trigger restored byte-for-byte afterwards.
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("tamper-row.db");
+        certified_crash_fixture(&path);
+        let connection = Connection::open(&path).unwrap();
+        let trigger: String = connection
+            .query_row("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='immutable_status_events_update'", [], |r| r.get(0))
+            .unwrap();
+        connection.execute_batch("DROP TRIGGER immutable_status_events_update").unwrap();
+        let changed = connection
+            .execute("UPDATE status_events SET code=code||'-tampered' WHERE rowid=(SELECT MIN(rowid) FROM status_events)", [])
+            .unwrap();
+        assert_eq!(changed, 1);
+        connection.execute_batch(&trigger).unwrap();
+        drop(connection);
+        let bounded = Store::open(&path).expect("the bounded open reads only bounding rows");
+        assert!(matches!(bounded.open_validation(), OpenValidation::SinceWatermark(_)));
+        drop(bounded);
+        let detected = Store::open_validating_fully(&path).and_then(|full| {
+            full.record_validation_watermark(SemanticCertification::NotEstablished, "fixture-engine-rules")
+                .map(|_| ())
+        });
+        let error = detected.expect_err("full validation detects the rewritten covered row");
+        assert!(
+            error.to_string().contains("history table status_events changed at or below the frontier"),
+            "{error}"
+        );
+    }
+
+    /// A watermark certified under another retention boundary (resealed with
+    /// a consistent commitment) refuses the shortcut and the open validates
+    /// in full.
+    #[test]
+    fn stale_retention_in_a_watermark_falls_back_to_full_validation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("stale.db");
+        certified_crash_fixture(&path);
+        let mut stale = sidecar(&path);
+        stale.retention.generation += 1;
+        stale.commitment_digest = stale.computed_commitment();
+        std::fs::write(history_scope::watermark_path(&path), serde_json::to_vec(&stale).unwrap()).unwrap();
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.open_validation(),
+            &OpenValidation::Full(FullValidationReason::InapplicableWatermark)
+        );
+        drop(store);
+        assert_eq!(Store::open_validating_fully(&path).unwrap().prior_certification(), "superseded_by_generation");
     }
 
     #[test]
@@ -20719,9 +20999,34 @@ mod tests {
             .query_row("SELECT capacity_json FROM retention_state WHERE singleton=1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(after, envelope, "persisted envelope unchanged");
-        let reopened = Store::open(&source).expect("current store opens");
+        let mut reopened = Store::open(&source).expect("current store opens");
         reopened.validate().expect("reopened v15 validates");
         assert_eq!(reopened.retention_generation().unwrap(), 0);
+        reopened
+            .append_genesis(&GenesisInput {
+                genesis_id: "genesis-migrated".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: TIME.to_owned(),
+                detail: document(json!({"source": "test"})),
+            })
+            .expect("identify the migrated fixture");
+        // The migration changed the schema: the first open validates in
+        // full and records; later opens are incremental.
+        assert!(matches!(reopened.open_validation(), OpenValidation::Full(_)));
+        reopened
+            .record_validation_watermark(SemanticCertification::NotEstablished, "fixture-engine-rules")
+            .expect("record after migration")
+            .expect("migrated store with a sole genesis records");
+        drop(reopened);
+        // Rows appended after the recording open are validated by the next
+        // open beyond the watermark.
+        let reopened = Store::open(&source).unwrap();
+        assert!(matches!(reopened.open_validation(), OpenValidation::SinceWatermark(_)));
+        drop(reopened);
+        assert!(matches!(
+            Store::open(&source).unwrap().open_validation(),
+            OpenValidation::SinceWatermark(_)
+        ));
     }
 
     #[test]

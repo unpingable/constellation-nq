@@ -71,7 +71,7 @@ pub async fn run(options: Nqd) -> Result<()> {
                 "ordinary completed history expired"
             );
         }
-        nq_core::RetentionAttempt::Completed(_) => {}
+        nq_core::RetentionAttempt::Completed(_) | nq_core::RetentionAttempt::Deferred { .. } => {}
         nq_core::RetentionAttempt::Refused { class, detail } => {
             warn!(class, %detail, "retention expiry refused at startup; continuing");
         }

@@ -2248,6 +2248,25 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
     // refuse its next write is not reported healthy.
     let retention = store.retention_report()?;
     let capacity = store.capacity_report()?;
+    // The daemon's per-engine attempt time is not persisted; the schedule is
+    // derived from the last committed expiry (its cutoff plus the horizon).
+    let quantum = nq_core::engine::expiry_quantum(config.retention.horizon_seconds);
+    let last_committed = retention
+        .cutoff
+        .as_deref()
+        .and_then(|cutoff| chrono::DateTime::parse_from_rfc3339(cutoff).ok())
+        .and_then(|cutoff| {
+            Some(cutoff + chrono::TimeDelta::try_seconds(i64::try_from(config.retention.horizon_seconds).ok()?)?)
+        });
+    let expiry_schedule = json!({
+        "quantum_seconds": quantum.as_secs(),
+        "last_committed_at": last_committed.map(|at| at.to_rfc3339()),
+        "next_attempt_not_before": last_committed
+            .and_then(|at| Some(at + chrono::TimeDelta::from_std(quantum).ok()?))
+            .map(|at| at.to_rfc3339()),
+        "startup": "always attempts",
+        "capacity_bypass": "one immediate attempt when the capacity preflight refuses",
+    });
     let database = if capacity.preflight == "admit" {
         "healthy"
     } else {
@@ -2259,6 +2278,7 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
             "healthy": healthy,
             "database": database,
             "retention": retention,
+            "expiry_schedule": expiry_schedule,
             "capacity": capacity,
             "diagnostic_artifacts": {
                 "state": artifact_state,
@@ -2718,9 +2738,12 @@ fn record_full_validation(
 ) -> Result<(
     nq_core::DiagnosticArtifactHistoryVerification,
     Option<nq_store::ValidationWatermark>,
+    &'static str,
 )> {
     let store = Store::open_validating_fully(database_path)?;
-    Ok(nq_core::engine::validate_fully_and_record(&store)?)
+    let prior = store.prior_certification();
+    let (verification, watermark) = nq_core::engine::validate_fully_and_record(&store)?;
+    Ok((verification, watermark, prior))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2732,7 +2755,8 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
             }
             let config = NqConfig::load(config_path)?;
             let started = std::time::Instant::now();
-            let (verification, watermark) = record_full_validation(&config.database_path)?;
+            let (verification, watermark, prior_certification) =
+                record_full_validation(&config.database_path)?;
             let retention = Store::open_read_only(&config.database_path)?.retention_report()?;
             print_value(
                 &json!({
@@ -2752,6 +2776,10 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         .map(|watermark| watermark.commitment_digest.clone()),
                     "validation_rules": nq_store::VALIDATION_RULES,
                     "engine_rules": nq_core::engine::engine_validation_rules(),
+                    // Every content accumulator was recomputed over all
+                    // covered rows; an earlier certification is compared only
+                    // when it holds under the same retention boundary.
+                    "prior_certification": prior_certification,
                     "diagnostic_artifacts": verification.commitments,
                     "elapsed_ms": started.elapsed().as_millis(),
                 }),

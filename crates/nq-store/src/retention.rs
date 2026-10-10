@@ -1,6 +1,7 @@
 //! Conservative prefix reclamation inside the existing store. Dependencies
 //! stop the prefix; capacity refusal is preferable to guessing their release.
-use crate::{CanonicalDocument, HistoryFrontier, Store, StoreError, ValidationState};
+use crate::history_scope::{ExpiryDelta, OpenValidation, RetentionWitness};
+use crate::{CanonicalDocument, HistoryFrontier, Scope, Store, StoreError, ValidationState};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +47,29 @@ pub(crate) fn boundary(connection: &Connection) -> Result<RetentionBoundary, Sto
     }
     connection.query_row("SELECT generation,evaluation_floor,report_floor,intake_floor,status_floor FROM retention_state WHERE singleton=1", [], |r| Ok(RetentionBoundary {generation:r.get(0)?,evaluation_floor:r.get(1)?,report_floor:r.get(2)?,intake_floor:r.get(3)?,status_floor:r.get(4)?})).map_err(StoreError::from)
 }
+/// The retention witness a validation watermark is bound to: the boundary
+/// plus the digest of the exact persisted retired lineage floors.
+pub(crate) fn witness(connection: &Connection) -> Result<RetentionWitness, StoreError> {
+    let b = boundary(connection)?;
+    let floors: Vec<u8> = if present(connection)? {
+        connection.query_row(
+            "SELECT lineage_floors_json FROM retention_state WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )?
+    } else {
+        Vec::new()
+    };
+    Ok(RetentionWitness {
+        generation: b.generation,
+        evaluation_floor: b.evaluation_floor,
+        report_floor: b.report_floor,
+        intake_floor: b.intake_floor,
+        status_floor: b.status_floor,
+        lineage_floors_digest: crate::sha256_digest(&floors),
+    })
+}
+
 fn validate_boundary_header(connection: &Connection) -> Result<RetentionBoundary, StoreError> {
     let b = boundary(connection)?;
     let enabled: i64 = connection.query_row(
@@ -82,6 +106,9 @@ pub(crate) fn validate_boundary_scoped(
     // old rows. Check only newly appended intake rows for an impossible retired
     // representation. Full validation and every post-expiry path still prove
     // complete retained coverage and retired identity commitments below.
+    if b.generation > 0 && !scope.is_full() {
+        return validate_boundary_since(connection, &b, scope);
+    }
     if b.generation == 0 && !scope.is_full() {
         let new_rows = scope.new_rows("provider_intake_attempts", "p");
         let invalid: bool = connection.query_row(&format!(
@@ -97,9 +124,84 @@ pub(crate) fn validate_boundary_scoped(
     validate_boundary(connection)
 }
 
+/// After expiry, an incremental scope relies on a watermark certified under
+/// this exact boundary (identity binds it), so the retained-below-floor
+/// declaration and every retired commitment were proven when it was
+/// certified or carried forward. Rows appended since must lie above every
+/// floor, be full (never compact or retired), and continue each sequence
+/// contiguously. O(new rows).
+fn validate_boundary_since(
+    connection: &Connection,
+    b: &RetentionBoundary,
+    scope: Scope<'_>,
+) -> Result<(), StoreError> {
+    let holes = holes_schema(connection)?;
+    for (table, column, floor, compact) in [
+        ("evaluation_runs", "evaluation_sequence", b.evaluation_floor, holes.then_some("source_expired<>0")),
+        ("admitted_reports", "report_sequence", b.report_floor, holes.then_some("source_expired<>0")),
+        (
+            "provider_intake_attempts",
+            "intake_sequence",
+            b.intake_floor,
+            Some("history_expired<>0 OR retired_identity_digest IS NOT NULL OR retired_run_id IS NOT NULL OR retired_submission_id IS NOT NULL OR retired_report_id IS NOT NULL OR retired_report_semantic_digest IS NOT NULL"),
+        ),
+        ("status_events", "status_sequence", b.status_floor, None),
+    ] {
+        let new_rows = scope.new_rows(table, "t");
+        let (count, minimum, maximum, invalid): (i64, Option<i64>, Option<i64>, bool) = connection.query_row(
+            &format!(
+                "SELECT COUNT(*),MIN({column}),MAX({column}),COALESCE(MAX({column}<=?1 OR ({})),0) FROM {table} AS t WHERE {new_rows}",
+                compact.unwrap_or("0")
+            ),
+            [floor],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        if invalid {
+            return Err(StoreError::Integrity(format!(
+                "{table} revives an expired prefix: a row appended since validation is at or below floor {floor} or not full"
+            )));
+        }
+        if count == 0 {
+            continue;
+        }
+        let previous: Option<i64> = match scope.frontier().and_then(|frontier| frontier.max_rowid(table)) {
+            Some(bound) => connection
+                .query_row(&format!("SELECT {column} FROM {table} WHERE rowid=?1"), [bound], |r| r.get(0))
+                .optional()?,
+            None => None,
+        };
+        let start = previous.unwrap_or(0).max(floor) + 1;
+        if minimum != Some(start) || maximum != Some(start + count - 1) {
+            return Err(StoreError::Integrity(format!(
+                "{table} has an undeclared retained coverage gap"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_boundary(connection: &Connection) -> Result<(), StoreError> {
+    validate_boundary_with(connection, None)
+}
+
+/// [`validate_boundary`]; with `retired_now`, the retired provider identity
+/// commitments are recomputed only for those intakes (the ones this expiry
+/// transaction retired; earlier ones were proven when the certification the
+/// caller relies on was established) instead of for every retired intake.
+fn validate_boundary_with(
+    connection: &Connection,
+    retired_now: Option<&[String]>,
+) -> Result<(), StoreError> {
     let b = validate_boundary_header(connection)?;
-    validate_retained_below_floors(connection, &b)?;
+    if retired_now.is_some() {
+        // Inside an expiry that relies on a certification under the previous
+        // boundary: rows above the new floors were contiguous above the old
+        // ones and the expiry changed none of them, so only the candidate
+        // closures it selected need their new declared form proven.
+        validate_retained_below_floors_filtered(connection, &b, true)?;
+    } else {
+        validate_retained_below_floors(connection, &b)?;
+    }
     for (table, column, floor) in [
         ("admitted_reports", "report_sequence", b.report_floor),
         (
@@ -109,6 +211,9 @@ pub(crate) fn validate_boundary(connection: &Connection) -> Result<(), StoreErro
         ),
         ("status_events", "status_sequence", b.status_floor),
     ] {
+        if retired_now.is_some() {
+            break;
+        }
         let (count, minimum, maximum): (i64, Option<i64>, Option<i64>) = connection.query_row(
             &format!("SELECT COUNT(*),MIN({column}),MAX({column}) FROM {table} WHERE {column}>?1"),
             [floor],
@@ -120,13 +225,27 @@ pub(crate) fn validate_boundary(connection: &Connection) -> Result<(), StoreErro
             )));
         }
     }
-    let invalid:i64=connection.query_row("SELECT COUNT(*) FROM provider_intake_attempts WHERE (history_expired=1 AND (intake_sequence>?1 OR retired_identity_digest IS NULL OR retired_run_id IS NULL OR length(raw_bytes)!=0 OR context_json!=CAST('{}' AS BLOB) OR interpretation_json!=CAST('{}' AS BLOB) OR native_outcome_json!=CAST('{}' AS BLOB))) OR (history_expired=0 AND (retired_identity_digest IS NOT NULL OR retired_run_id IS NOT NULL OR retired_submission_id IS NOT NULL OR retired_report_id IS NOT NULL OR retired_report_semantic_digest IS NOT NULL))",[b.intake_floor],|r|r.get(0))?;
+    let intake_scope = if retired_now.is_some() {
+        "intake_id IN (SELECT intake_id FROM expiry_links UNION SELECT l.intake_id FROM local_watcher_provider_intakes l WHERE l.run_id IN (SELECT run_id FROM expiry_runs)) AND "
+    } else {
+        ""
+    };
+    let invalid:i64=connection.query_row(&(format!("SELECT COUNT(*) FROM provider_intake_attempts WHERE {intake_scope}(") + "(history_expired=1 AND (intake_sequence>?1 OR retired_identity_digest IS NULL OR retired_run_id IS NULL OR length(raw_bytes)!=0 OR context_json!=CAST('{}' AS BLOB) OR interpretation_json!=CAST('{}' AS BLOB) OR native_outcome_json!=CAST('{}' AS BLOB))) OR (history_expired=0 AND (retired_identity_digest IS NOT NULL OR retired_run_id IS NOT NULL OR retired_submission_id IS NOT NULL OR retired_report_id IS NOT NULL OR retired_report_semantic_digest IS NOT NULL)))"),[b.intake_floor],|r|r.get(0))?;
     if invalid != 0 {
         return Err(StoreError::Integrity(
             "invalid expired provider identity commitment".into(),
         ));
     }
-    let expired:Vec<(String,String)>=connection.prepare("SELECT intake_id,retired_identity_digest FROM provider_intake_attempts WHERE history_expired=1")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<Result<_,_>>()?;
+    let expired: Vec<(String, String)> = match retired_now {
+        None => connection.prepare("SELECT intake_id,retired_identity_digest FROM provider_intake_attempts WHERE history_expired=1")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<Result<_,_>>()?,
+        Some(ids) => {
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                out.push((id.clone(), connection.query_row("SELECT retired_identity_digest FROM provider_intake_attempts WHERE intake_id=?1 AND history_expired=1", [id], |r| r.get(0))?));
+            }
+            out
+        }
+    };
     for (id, expected) in expired {
         if retired_identity_commitment(connection, &id)? != expected {
             return Err(StoreError::Integrity(format!(
@@ -172,11 +291,24 @@ fn justified_run_sql(x: &str) -> String {
 /// compact source record a retained consequential row names. Anything else is
 /// an undeclared retained row and fails closed. A live root whose closure was
 /// compacted fails closed too (under-retention).
-#[allow(clippy::too_many_lines)]
 fn validate_retained_below_floors(
     connection: &Connection,
     b: &RetentionBoundary,
 ) -> Result<(), StoreError> {
+    validate_retained_below_floors_filtered(connection, b, false)
+}
+
+/// [`validate_retained_below_floors`]; with `candidates`, only the rows of
+/// the current expiry plan's candidate closures (its `expiry_evaluations`,
+/// `expiry_runs` and `expiry_compact_reports`) are checked.
+#[allow(clippy::too_many_lines)]
+fn validate_retained_below_floors_filtered(
+    connection: &Connection,
+    b: &RetentionBoundary,
+    candidates: bool,
+) -> Result<(), StoreError> {
+    let only = |filter: &str| if candidates { format!(" AND {filter}") } else { String::new() };
+    let evaluation_filter = only("e.evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations)");
     let floors = [
         b.evaluation_floor,
         b.report_floor,
@@ -197,22 +329,22 @@ fn validate_retained_below_floors(
         (
             "evaluation_runs",
             b.evaluation_floor,
-            format!("SELECT e.evaluation_id FROM evaluation_runs e WHERE e.evaluation_sequence<=?1 AND e.source_expired=0 AND NOT ({evaluation_root} OR (e.trigger_run_id IS NOT NULL AND {})) ORDER BY e.evaluation_sequence LIMIT 1", justified("e.trigger_run_id")),
+            format!("SELECT e.evaluation_id FROM evaluation_runs e WHERE e.evaluation_sequence<=?1 AND e.source_expired=0{evaluation_filter} AND NOT ({evaluation_root} OR (e.trigger_run_id IS NOT NULL AND {})) ORDER BY e.evaluation_sequence LIMIT 1", justified("e.trigger_run_id")),
         ),
         (
             "admitted_reports",
             b.report_floor,
-            format!("SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE a.report_sequence<=?2 AND a.source_expired=0 AND NOT {} ORDER BY a.report_sequence LIMIT 1", justified("r.run_id")),
+            format!("SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE a.report_sequence<=?2 AND a.source_expired=0{} AND NOT {} ORDER BY a.report_sequence LIMIT 1", only("r.run_id IN (SELECT run_id FROM expiry_runs)"), justified("r.run_id")),
         ),
         (
             "provider_intake_attempts",
             b.intake_floor,
-            format!("SELECT p.intake_id FROM provider_intake_attempts p LEFT JOIN local_watcher_provider_intakes l ON l.intake_id=p.intake_id WHERE p.intake_sequence<=?3 AND p.history_expired=0 AND (l.run_id IS NULL OR NOT {}) ORDER BY p.intake_sequence LIMIT 1", justified("l.run_id")),
+            format!("SELECT p.intake_id FROM provider_intake_attempts p LEFT JOIN local_watcher_provider_intakes l ON l.intake_id=p.intake_id WHERE p.intake_sequence<=?3 AND p.history_expired=0{} AND (l.run_id IS NULL OR NOT {}) ORDER BY p.intake_sequence LIMIT 1", only("p.intake_id IN (SELECT intake_id FROM expiry_links UNION SELECT x.intake_id FROM local_watcher_provider_intakes x WHERE x.run_id IN (SELECT run_id FROM expiry_runs))"), justified("l.run_id")),
         ),
         (
             "status_events",
             b.status_floor,
-            format!("SELECT s.status_event_id FROM status_events s WHERE s.status_sequence<=?4 AND s.run_id IS NOT NULL AND NOT {} ORDER BY s.status_sequence LIMIT 1", justified("s.run_id")),
+            format!("SELECT s.status_event_id FROM status_events s WHERE s.status_sequence<=?4 AND s.run_id IS NOT NULL{} AND NOT {} ORDER BY s.status_sequence LIMIT 1", only("s.run_id IN (SELECT run_id FROM expiry_runs)"), justified("s.run_id")),
         ),
     ] {
         if let Some(key) = first(&sql)? {
@@ -221,33 +353,38 @@ fn validate_retained_below_floors(
             )));
         }
     }
-    if let Some(id) = first("SELECT e.evaluation_id FROM evaluation_runs e WHERE e.source_expired=1 AND (e.evaluation_sequence>?1 OR e.detail_json<>CAST('{}' AS BLOB) OR NOT (EXISTS(SELECT 1 FROM finding_events f WHERE f.evaluation_id=e.evaluation_id) OR EXISTS(SELECT 1 FROM saved_check_events c WHERE c.evaluation_id=e.evaluation_id)) OR EXISTS(SELECT 1 FROM evaluation_watermarks w WHERE w.evaluation_id=e.evaluation_id) OR EXISTS(SELECT 1 FROM refusals x WHERE x.evaluation_id=e.evaluation_id) OR (e.trigger_run_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM raw_submissions s WHERE s.run_id=e.trigger_run_id AND s.source_expired=1))) LIMIT 1")? {
+    if let Some(id) = first(&(format!("SELECT e.evaluation_id FROM evaluation_runs e WHERE e.source_expired=1{evaluation_filter} AND (") + "e.evaluation_sequence>?1 OR e.detail_json<>CAST('{}' AS BLOB) OR NOT (EXISTS(SELECT 1 FROM finding_events f WHERE f.evaluation_id=e.evaluation_id) OR EXISTS(SELECT 1 FROM saved_check_events c WHERE c.evaluation_id=e.evaluation_id)) OR EXISTS(SELECT 1 FROM evaluation_watermarks w WHERE w.evaluation_id=e.evaluation_id) OR EXISTS(SELECT 1 FROM refusals x WHERE x.evaluation_id=e.evaluation_id) OR (e.trigger_run_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM raw_submissions s WHERE s.run_id=e.trigger_run_id AND s.source_expired=1))) LIMIT 1"))? {
         return Err(StoreError::Integrity(format!(
             "source-expired evaluation {id} is not a declared decision record"
         )));
     }
-    if let Some(id) = first("SELECT a.report_id FROM admitted_reports a WHERE a.source_expired=1 AND (a.report_sequence>?2 OR a.canonical_json<>CAST('{}' AS BLOB) OR a.validated_report_json<>CAST('{}' AS BLOB) OR a.next_checkpoint_json IS NOT NULL OR NOT (a.report_id IN (SELECT report_id FROM finding_evidence) OR EXISTS(SELECT 1 FROM raw_submissions r JOIN evaluation_runs e ON e.trigger_run_id=r.run_id WHERE r.submission_id=a.submission_id AND e.source_expired=1)) OR EXISTS(SELECT 1 FROM observations o WHERE o.report_id=a.report_id) OR EXISTS(SELECT 1 FROM report_coverage c WHERE c.report_id=a.report_id) OR EXISTS(SELECT 1 FROM report_errors x WHERE x.report_id=a.report_id) OR NOT EXISTS(SELECT 1 FROM raw_submissions r WHERE r.submission_id=a.submission_id AND r.source_expired=1)) LIMIT 1")? {
+    if let Some(id) = first(&(format!("SELECT a.report_id FROM admitted_reports a WHERE a.source_expired=1{} AND (", only("a.submission_id IN (SELECT submission_id FROM raw_submissions WHERE run_id IN (SELECT run_id FROM expiry_runs))")) + "a.report_sequence>?2 OR a.canonical_json<>CAST('{}' AS BLOB) OR a.validated_report_json<>CAST('{}' AS BLOB) OR a.next_checkpoint_json IS NOT NULL OR NOT (a.report_id IN (SELECT report_id FROM finding_evidence) OR EXISTS(SELECT 1 FROM raw_submissions r JOIN evaluation_runs e ON e.trigger_run_id=r.run_id WHERE r.submission_id=a.submission_id AND e.source_expired=1)) OR EXISTS(SELECT 1 FROM observations o WHERE o.report_id=a.report_id) OR EXISTS(SELECT 1 FROM report_coverage c WHERE c.report_id=a.report_id) OR EXISTS(SELECT 1 FROM report_errors x WHERE x.report_id=a.report_id) OR NOT EXISTS(SELECT 1 FROM raw_submissions r WHERE r.submission_id=a.submission_id AND r.source_expired=1)) LIMIT 1"))? {
         return Err(StoreError::Integrity(format!(
             "source-expired report {id} is not a declared evidence record"
         )));
     }
-    if let Some(id) = first("SELECT r.submission_id FROM raw_submissions r WHERE r.source_expired=1 AND (length(r.raw_bytes)<>0 OR r.admission_outcome<>'admitted' OR NOT EXISTS(SELECT 1 FROM admitted_reports a WHERE a.submission_id=r.submission_id AND a.source_expired=1) OR EXISTS(SELECT 1 FROM status_events s WHERE s.run_id=r.run_id) OR EXISTS(SELECT 1 FROM local_watcher_provider_intakes l WHERE l.run_id=r.run_id)) LIMIT 1")? {
+    if let Some(id) = first(&(format!("SELECT r.submission_id FROM raw_submissions r WHERE r.source_expired=1{} AND (", only("r.run_id IN (SELECT run_id FROM expiry_runs)")) + "length(r.raw_bytes)<>0 OR r.admission_outcome<>'admitted' OR NOT EXISTS(SELECT 1 FROM admitted_reports a WHERE a.submission_id=r.submission_id AND a.source_expired=1) OR EXISTS(SELECT 1 FROM status_events s WHERE s.run_id=r.run_id) OR EXISTS(SELECT 1 FROM local_watcher_provider_intakes l WHERE l.run_id=r.run_id)) LIMIT 1"))? {
         return Err(StoreError::Integrity(format!(
             "source-expired submission {id} is not a declared anchor"
         )));
     }
-    if let Some(id) = first("SELECT e.evaluation_id FROM evaluation_runs e JOIN raw_submissions s ON s.run_id=e.trigger_run_id WHERE e.source_expired=0 AND s.source_expired=1 LIMIT 1")? {
+    if let Some(id) = first(&format!("SELECT e.evaluation_id FROM evaluation_runs e JOIN raw_submissions s ON s.run_id=e.trigger_run_id WHERE e.source_expired=0 AND s.source_expired=1{} LIMIT 1", only("s.run_id IN (SELECT run_id FROM expiry_runs)")))? {
         return Err(StoreError::Integrity(format!(
             "evaluation {id} keeps full history for a source-expired run"
         )));
     }
     let live = live_finding_event_sql("f");
-    if let Some(id) = first(&format!("SELECT f.event_id FROM finding_events f WHERE {live} AND (EXISTS(SELECT 1 FROM evaluation_runs e WHERE e.evaluation_id=f.evaluation_id AND e.source_expired=1) OR EXISTS(SELECT 1 FROM finding_evidence v JOIN admitted_reports a ON a.report_id=v.report_id WHERE v.event_id=f.event_id AND a.source_expired=1)) LIMIT 1"))? {
+    let live_events = if candidates {
+        "(SELECT f.* FROM finding_events f WHERE f.evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations) UNION SELECT f.* FROM expiry_compact_reports c JOIN finding_evidence v ON v.report_id=c.report_id JOIN finding_events f ON f.event_id=v.event_id)"
+    } else {
+        "finding_events"
+    };
+    if let Some(id) = first(&format!("SELECT f.event_id FROM {live_events} f WHERE {live} AND (EXISTS(SELECT 1 FROM evaluation_runs e WHERE e.evaluation_id=f.evaluation_id AND e.source_expired=1) OR EXISTS(SELECT 1 FROM finding_evidence v JOIN admitted_reports a ON a.report_id=v.report_id WHERE v.event_id=f.event_id AND a.source_expired=1)) LIMIT 1"))? {
         return Err(StoreError::Integrity(format!(
             "live protected closure compacted: finding event {id}"
         )));
     }
-    if let Some(id) = first("SELECT c.evaluation_id FROM saved_check_events c JOIN evaluation_runs e ON e.evaluation_id=c.evaluation_id WHERE e.source_expired=1 AND c.outcome='claimed' AND NOT EXISTS(SELECT 1 FROM saved_check_events t WHERE t.evaluation_id=c.evaluation_id AND t.outcome IN ('refused','passed','failed')) LIMIT 1")? {
+    if let Some(id) = first(&(format!("SELECT c.evaluation_id FROM saved_check_events c JOIN evaluation_runs e ON e.evaluation_id=c.evaluation_id WHERE e.source_expired=1{evaluation_filter} AND c.outcome='claimed' ") + "AND NOT EXISTS(SELECT 1 FROM saved_check_events t WHERE t.evaluation_id=c.evaluation_id AND t.outcome IN ('refused','passed','failed')) LIMIT 1"))? {
         return Err(StoreError::Integrity(format!(
             "live protected closure compacted: saved-check claim {id}"
         )));
@@ -540,13 +677,15 @@ fn plan_expiry(
             UNION SELECT e.evaluation_id FROM evaluation_runs e WHERE e.evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations) AND {newest})"), [])?;
     // Run roots. Every root names a candidate run only through the
     // `expiry_runs` join, so non-candidate runs are untouched.
-    tx.execute(&format!("INSERT OR IGNORE INTO expiry_protected SELECT run_id FROM expiry_runs WHERE run_id IN (
-            SELECT run_id FROM local_successor_acquisition_intents
-            UNION SELECT run_id FROM local_diagnostic_artifact_origins
-            UNION SELECT run_id FROM status_events WHERE status_event_id IN (SELECT latest_status_event_id FROM status_current)
-            UNION SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE a.report_sequence IN (SELECT MAX(report_sequence) FROM admitted_reports GROUP BY instance_id)
-            UNION SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id JOIN watcher_runs w ON w.run_id=r.run_id JOIN local_watcher_provider_intakes l ON l.run_id=w.run_id JOIN provider_intake_acknowledgments ack ON ack.intake_id=l.intake_id AND ack.run_id=l.run_id WHERE a.next_checkpoint_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM admitted_reports newer JOIN raw_submissions ns ON ns.submission_id=newer.submission_id JOIN watcher_runs nw ON nw.run_id=ns.run_id JOIN local_watcher_provider_intakes nl ON nl.run_id=nw.run_id JOIN provider_intake_acknowledgments na ON na.intake_id=nl.intake_id AND na.run_id=nl.run_id WHERE newer.instance_id=a.instance_id AND nw.checkpoint_contract_digest=w.checkpoint_contract_digest AND newer.next_checkpoint_json IS NOT NULL AND newer.report_sequence>a.report_sequence)
-            UNION SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id JOIN finding_evidence f ON f.report_id=a.report_id JOIN finding_events e ON e.event_id=f.event_id WHERE {live})"), [])?;
+    // Each root is probed per candidate run through the run's own indexed
+    // rows, so the work is O(candidates), not O(retained history).
+    tx.execute(&format!("INSERT OR IGNORE INTO expiry_protected SELECT x.run_id FROM expiry_runs x WHERE
+               EXISTS(SELECT 1 FROM local_successor_acquisition_intents i WHERE i.run_id=x.run_id)
+            OR EXISTS(SELECT 1 FROM local_diagnostic_artifact_origins o WHERE o.run_id=x.run_id)
+            OR EXISTS(SELECT 1 FROM status_events s JOIN status_current c ON c.latest_status_event_id=s.status_event_id WHERE s.run_id=x.run_id)
+            OR EXISTS(SELECT 1 FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE r.run_id=x.run_id AND a.report_sequence=(SELECT MAX(m.report_sequence) FROM admitted_reports m WHERE m.instance_id=a.instance_id))
+            OR EXISTS(SELECT 1 FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id JOIN watcher_runs w ON w.run_id=r.run_id JOIN local_watcher_provider_intakes l ON l.run_id=w.run_id JOIN provider_intake_acknowledgments ack ON ack.intake_id=l.intake_id AND ack.run_id=l.run_id WHERE r.run_id=x.run_id AND a.next_checkpoint_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM admitted_reports newer JOIN raw_submissions ns ON ns.submission_id=newer.submission_id JOIN watcher_runs nw ON nw.run_id=ns.run_id JOIN local_watcher_provider_intakes nl ON nl.run_id=nw.run_id JOIN provider_intake_acknowledgments na ON na.intake_id=nl.intake_id AND na.run_id=nl.run_id WHERE newer.instance_id=a.instance_id AND nw.checkpoint_contract_digest=w.checkpoint_contract_digest AND newer.next_checkpoint_json IS NOT NULL AND newer.report_sequence>a.report_sequence))
+            OR EXISTS(SELECT 1 FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id JOIN finding_evidence f ON f.report_id=a.report_id JOIN finding_events e ON e.event_id=f.event_id WHERE r.run_id=x.run_id AND {live})"), [])?;
     // Closure: an island run keeps every evaluation it triggered, and every
     // surviving full evaluation keeps the reports it names (watermark report
     // and any report id its envelope carries).
@@ -746,6 +885,20 @@ impl Store {
         Ok(i64::try_from(self.island_evaluation_sequences()?.len()).unwrap_or(i64::MAX))
     }
 
+    /// The retention witness (boundary plus retired lineage floors digest)
+    /// a validation watermark must match to apply.
+    pub fn retention_witness(&self) -> Result<RetentionWitness, StoreError> {
+        witness(&self.connection)
+    }
+    /// The persisted envelope's preflight for the next ordinary write, as the
+    /// admission applies it. `Ok` for a store without a capacity envelope.
+    pub fn capacity_preflight(&self) -> Result<(), StoreError> {
+        match (&self.capacity, self.path()) {
+            (Some(envelope), Some(path)) => envelope.preflight(path),
+            _ => Ok(()),
+        }
+    }
+
     pub fn retention_generation(&self) -> Result<i64, StoreError> {
         Ok(self.retention_boundary()?.generation)
     }
@@ -781,6 +934,35 @@ impl Store {
         E: From<StoreError>,
         F: FnOnce(&Self) -> Result<(), E>,
     {
+        self.expire_ordinary_before_certified(
+            cutoff,
+            validate,
+            None::<fn(&Self, &ExpiryCandidates) -> Result<(), E>>,
+        )
+    }
+
+    /// [`Self::expire_ordinary_before_validated`] for a caller that also
+    /// validates exactly the expiry's candidate closures. `validate` runs over
+    /// a read snapshot (the caller validates the history its certification
+    /// does not cover); `validate_candidates` runs inside the guarded
+    /// transaction after the deletion plan is selected and before any row
+    /// changes, with every candidate the plan may delete, compact or keep as
+    /// an island. When this handle verified or recorded a watermark under the
+    /// current retention boundary, the in-lock store checks are then scoped to
+    /// the rows beyond the handle's validated frontier plus those candidates,
+    /// and the watermark is carried forward to the new boundary after commit.
+    /// Selection never reads the watermark.
+    pub fn expire_ordinary_before_certified<E, F, G>(
+        &mut self,
+        cutoff: &str,
+        validate: F,
+        validate_candidates: Option<G>,
+    ) -> Result<RetentionResult, E>
+    where
+        E: From<StoreError>,
+        F: FnOnce(&Self) -> Result<(), E>,
+        G: FnOnce(&Self, &ExpiryCandidates) -> Result<(), E>,
+    {
         chrono::DateTime::parse_from_rfc3339(cutoff)
             .map_err(|e| E::from(StoreError::Invariant(format!("invalid expiry cutoff: {e}"))))?;
         self.require_current_schema().map_err(E::from)?;
@@ -814,21 +996,59 @@ impl Store {
                 crate::Refusal::HistoryChanged("during"),
             )));
         }
-        self.expire_ordinary_before_checked(cutoff, Some(&proof))
-            .map_err(E::from)
+        let supplied = validate_candidates.is_some();
+        let mut failure: Option<E> = None;
+        let result = {
+            let mut pending = validate_candidates;
+            let mut wrapper = |store: &Self, candidates: &ExpiryCandidates| -> Result<(), StoreError> {
+                let Some(validate) = pending.take() else {
+                    return Ok(());
+                };
+                validate(store, candidates).map_err(|error| {
+                    failure = Some(error);
+                    StoreError::Invariant("expiry candidate validation failed".into())
+                })
+            };
+            if supplied {
+                self.expire_ordinary_before_checked(cutoff, Some(&proof), Some(&mut wrapper))
+            } else {
+                self.expire_ordinary_before_checked(cutoff, Some(&proof), None)
+            }
+        };
+        result.map_err(|error| failure.take().unwrap_or_else(|| E::from(error)))
     }
 
     /// Retire complete ordinary prefixes, stopping at any known dependency.
     /// The caller supplies its explicitly configured arrival-time cutoff.
     /// This Store-only entrypoint does not certify a consumer's typed semantics.
     pub fn expire_ordinary_before(&mut self, cutoff: &str) -> Result<RetentionResult, StoreError> {
-        self.expire_ordinary_before_checked(cutoff, None)
+        self.expire_ordinary_before_checked(cutoff, None, None)
     }
 
+    /// The watermark this handle may carry across an expiry: one it verified
+    /// at open or recorded, certified under the current boundary, for a
+    /// handle that records watermarks and has a validated frontier.
+    fn carriable_watermark(
+        &self,
+        current: &RetentionWitness,
+    ) -> Option<Box<crate::ValidationWatermark>> {
+        if !self.validation.may_record || self.validation.store_validated.is_none() {
+            return None;
+        }
+        self.validation
+            .certified
+            .borrow()
+            .as_ref()
+            .filter(|watermark| &watermark.retention == current)
+            .cloned()
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn expire_ordinary_before_checked(
         &mut self,
         cutoff: &str,
         proof: Option<&(HistoryFrontier, RetentionBoundary, i64)>,
+        validate_candidates: Option<CandidateValidator<'_>>,
     ) -> Result<RetentionResult, StoreError> {
         chrono::DateTime::parse_from_rfc3339(cutoff)
             .map_err(|e| StoreError::Invariant(format!("invalid expiry cutoff: {e}")))?;
@@ -844,7 +1064,8 @@ impl Store {
         // selected before the write transaction; NORMAL is insufficient for
         // treating physical reclamation as irreversible committed retirement.
         self.connection.pragma_update(None, "synchronous", "FULL")?;
-        let tx = self.immediate_transaction()?;
+        let store: &Self = self;
+        let tx = store.shared_immediate_transaction()?;
         let current = validate_boundary_header(&tx)?;
         if !prefix_may_advance(&tx, cutoff, &current)? {
             tx.rollback()?;
@@ -862,9 +1083,28 @@ impl Store {
                 return Err(StoreError::Refused(crate::Refusal::HistoryChanged("after")));
             }
         }
-        validate_boundary(&tx)?;
-        // Do not trust an advisory validation sidecar when selecting deletion.
-        crate::validate_stored_digests(&tx, crate::Scope::FULL)?;
+        let before_witness = witness(&tx)?;
+        let carry = store.carriable_watermark(&before_witness);
+        // Scoped in-lock validation requires both a certification this handle
+        // established and a caller that validates every candidate closure in
+        // full; otherwise every surviving row is re-proven here.
+        let validated_frontier = store.validation.store_validated.clone();
+        let scoped = match (&carry, &validated_frontier, validate_candidates.is_some()) {
+            (Some(_), Some(frontier), true) => Some(frontier.clone()),
+            _ => None,
+        };
+        match &scoped {
+            Some(frontier) => {
+                validate_boundary_scoped(&tx, Scope::after(frontier))?;
+                // Do not trust an advisory validation sidecar when selecting
+                // deletion: selection below reads only the database.
+                crate::validate_stored_digests(&tx, Scope::after(frontier))?;
+            }
+            None => {
+                validate_boundary(&tx)?;
+                crate::validate_stored_digests(&tx, Scope::FULL)?;
+            }
+        }
         let before = boundary(&tx)?;
         let plan = plan_expiry(&tx, cutoff, &before)?;
         let (ef, rf, inf, sf) = (plan.evaluation_floor, plan.report_floor, plan.intake_floor, plan.status_floor);
@@ -881,6 +1121,11 @@ impl Store {
                 boundary: before,
                 deleted_rows: 0,
             });
+        }
+        if let Some(validate_candidates) = validate_candidates {
+            let candidates = expiry_candidates(&tx)?;
+            validate_candidate_digests(&tx)?;
+            validate_candidates(store, &candidates)?;
         }
         let mut next = RetentionBoundary {
             generation: before.generation,
@@ -915,6 +1160,13 @@ impl Store {
         });
         let document = CanonicalDocument::from_serializable(&floors)?;
         tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS expiry_links(intake_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,submission_id TEXT,report_id TEXT,semantic_digest TEXT);DELETE FROM expiry_links;INSERT INTO expiry_links SELECT l.intake_id,l.run_id,r.submission_id,a.report_id,a.semantic_digest FROM local_watcher_provider_intakes l JOIN expiry_dead_runs e ON e.run_id=l.run_id LEFT JOIN raw_submissions r ON r.run_id=l.run_id LEFT JOIN admitted_reports a ON a.submission_id=r.submission_id;")?;
+        // Evaluations whose full row this expiry deletes or compacts: a
+        // certified evaluation head among them cannot be carried forward.
+        let affected_sequences: std::collections::BTreeSet<i64> = tx
+            .prepare("SELECT e.evaluation_sequence FROM evaluation_runs e JOIN expiry_evaluations x ON x.evaluation_id=e.evaluation_id WHERE x.disposition<>'island'")?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        let mut delta = carry.as_ref().map(|watermark| ExpiryDelta::new(&watermark.frontier));
         #[cfg(test)]
         crash_phase_for_test("before_mutations", 71);
         tx.execute(
@@ -924,34 +1176,31 @@ impl Store {
         let mut deleted = 0usize;
         // Evaluations at or below the floor that are neither islands nor
         // compact decision records retire with their watermarks and refusals.
-        for sql in [
-            "DELETE FROM refusals WHERE evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition<>'island') OR run_id IN (SELECT run_id FROM expiry_dead_runs) OR submission_id IN (SELECT submission_id FROM raw_submissions WHERE run_id IN (SELECT run_id FROM expiry_dead_runs))",
-            "DELETE FROM evaluation_watermarks WHERE evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition<>'island')",
-            "DELETE FROM evaluation_runs WHERE evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='delete')",
-            "UPDATE evaluation_runs SET source_expired=1, detail_json=CAST('{}' AS BLOB) WHERE evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='compact')",
+        // Each mutation records the covered rows it removes or rewrites.
+        for (table, mutation) in [
+            ("refusals", Mutation::Delete("evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition<>'island') OR run_id IN (SELECT run_id FROM expiry_dead_runs) OR submission_id IN (SELECT submission_id FROM raw_submissions WHERE run_id IN (SELECT run_id FROM expiry_dead_runs))")),
+            ("evaluation_watermarks", Mutation::Delete("evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition<>'island')")),
+            ("evaluation_runs", Mutation::Delete("evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='delete')")),
+            ("evaluation_runs", Mutation::Update("source_expired=1, detail_json=CAST('{}' AS BLOB)", "evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='compact')")),
+            ("observation_coverage", Mutation::Delete("report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))")),
+            ("observations", Mutation::Delete("report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))")),
+            ("report_coverage", Mutation::Delete("report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))")),
+            ("report_errors", Mutation::Delete("report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))")),
+            ("admitted_reports", Mutation::Delete("submission_id IN (SELECT submission_id FROM raw_submissions WHERE run_id IN (SELECT run_id FROM expiry_dead_runs)) AND report_id NOT IN (SELECT report_id FROM expiry_compact_reports)")),
+            ("admitted_reports", Mutation::Update("source_expired=1, canonical_json=CAST('{}' AS BLOB), validated_report_json=CAST('{}' AS BLOB), next_checkpoint_json=NULL", "report_id IN (SELECT report_id FROM expiry_compact_reports)")),
+            ("provider_intake_acknowledgments", Mutation::Delete("run_id IN (SELECT run_id FROM expiry_dead_runs)")),
+            ("local_watcher_provider_intakes", Mutation::Delete("run_id IN (SELECT run_id FROM expiry_dead_runs)")),
+            ("legacy_v3_watcher_run_intake_gaps", Mutation::Delete("run_id IN (SELECT run_id FROM expiry_dead_runs)")),
+            ("raw_submissions", Mutation::Delete("run_id IN (SELECT run_id FROM expiry_dead_runs) AND submission_id NOT IN (SELECT a.submission_id FROM admitted_reports a JOIN expiry_compact_reports c ON c.report_id=a.report_id)")),
+            ("raw_submissions", Mutation::Update("source_expired=1, raw_bytes=X''", "submission_id IN (SELECT a.submission_id FROM admitted_reports a JOIN expiry_compact_reports c ON c.report_id=a.report_id)")),
+            ("status_events", Mutation::Delete("run_id IN (SELECT run_id FROM expiry_dead_runs)")),
+            ("watcher_runs", Mutation::Delete("run_id IN (SELECT run_id FROM expiry_dead_runs WHERE anchor=0)")),
         ] {
-            deleted += tx.execute(sql, [])?;
-        }
-        for sql in [
-            "DELETE FROM observation_coverage WHERE report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))",
-            "DELETE FROM observations WHERE report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))",
-            "DELETE FROM report_coverage WHERE report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))",
-            "DELETE FROM report_errors WHERE report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))",
-            "DELETE FROM admitted_reports WHERE submission_id IN (SELECT submission_id FROM raw_submissions WHERE run_id IN (SELECT run_id FROM expiry_dead_runs)) AND report_id NOT IN (SELECT report_id FROM expiry_compact_reports)",
-            "UPDATE admitted_reports SET source_expired=1, canonical_json=CAST('{}' AS BLOB), validated_report_json=CAST('{}' AS BLOB), next_checkpoint_json=NULL WHERE report_id IN (SELECT report_id FROM expiry_compact_reports)",
-            "DELETE FROM provider_intake_acknowledgments WHERE run_id IN (SELECT run_id FROM expiry_dead_runs)",
-            "DELETE FROM local_watcher_provider_intakes WHERE run_id IN (SELECT run_id FROM expiry_dead_runs)",
-            "DELETE FROM legacy_v3_watcher_run_intake_gaps WHERE run_id IN (SELECT run_id FROM expiry_dead_runs)",
-            "DELETE FROM raw_submissions WHERE run_id IN (SELECT run_id FROM expiry_dead_runs) AND submission_id NOT IN (SELECT a.submission_id FROM admitted_reports a JOIN expiry_compact_reports c ON c.report_id=a.report_id)",
-            "UPDATE raw_submissions SET source_expired=1, raw_bytes=X'' WHERE submission_id IN (SELECT a.submission_id FROM admitted_reports a JOIN expiry_compact_reports c ON c.report_id=a.report_id)",
-            "DELETE FROM status_events WHERE run_id IN (SELECT run_id FROM expiry_dead_runs)",
-            "DELETE FROM watcher_runs WHERE run_id IN (SELECT run_id FROM expiry_dead_runs WHERE anchor=0)",
-        ] {
-            deleted += tx.execute(sql, [])?;
+            deleted += mutation.apply(&tx, table, delta.as_mut())?;
         }
         let retire_ids:Vec<String>=tx.prepare("SELECT intake_id FROM provider_intake_attempts WHERE history_expired=0 AND intake_sequence<=?1 AND intake_id IN (SELECT intake_id FROM expiry_links)")?.query_map([inf],|r|r.get(0))?.collect::<Result<_,_>>()?;
-        for id in retire_ids {
-            let (run,submission,report,digest):(String,Option<String>,Option<String>,Option<String>)=tx.query_row("SELECT run_id,submission_id,report_id,semantic_digest FROM expiry_links WHERE intake_id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+        for id in &retire_ids {
+            let (run,submission,report,digest):(String,Option<String>,Option<String>,Option<String>)=tx.query_row("SELECT run_id,submission_id,report_id,semantic_digest FROM expiry_links WHERE intake_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
             let mut links = serde_json::Map::new();
             links.insert("retired_run_id".into(), serde_json::json!(run));
             links.insert(
@@ -963,11 +1212,28 @@ impl Store {
                 "retired_report_semantic_digest".into(),
                 serde_json::json!(digest),
             );
-            let commitment = retired_identity_commitment_with_links(&tx, &id, Some(&links))?;
+            let commitment = retired_identity_commitment_with_links(&tx, id, Some(&links))?;
+            let predicate = format!("intake_id='{}'", id.replace('\'', "''"));
+            let old_rows = match &delta {
+                Some(delta) => delta.covered_rows(&tx, "provider_intake_attempts", &predicate)?,
+                None => Vec::new(),
+            };
             deleted+=tx.execute("UPDATE provider_intake_attempts SET history_expired=1,raw_bytes=X'',context_json=CAST('{}' AS BLOB),interpretation_json=CAST('{}' AS BLOB),native_outcome_json=CAST('{}' AS BLOB),retired_identity_digest=?1,retired_run_id=?3,retired_submission_id=?4,retired_report_id=?5,retired_report_semantic_digest=?6 WHERE intake_id=?2",params![commitment,id,run,submission,report,digest])?;
+            if let Some(delta) = delta.as_mut() {
+                let new_rows = delta.covered_rows(&tx, "provider_intake_attempts", &predicate)?;
+                delta.removed("provider_intake_attempts", &old_rows);
+                delta.added("provider_intake_attempts", &new_rows);
+            }
         }
         tx.execute("UPDATE retention_state SET generation=?1,evaluation_floor=?2,report_floor=?3,intake_floor=?4,status_floor=?5,cutoff=?6,lineage_floors_json=?7,delete_enabled=0 WHERE singleton=1",params![next.generation,ef,rf,inf,sf,cutoff,document.as_bytes()])?;
-        validate_boundary(&tx)?;
+        // The resulting boundary is validated in full except for retired
+        // commitments: with a scoped validation, only those retired by this
+        // transaction are recomputed (the rest were certified unchanged).
+        if scoped.is_some() {
+            validate_boundary_with(&tx, Some(&retire_ids))?;
+        } else {
+            validate_boundary(&tx)?;
+        }
         let violations: i64 =
             tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
                 r.get(0)
@@ -977,15 +1243,219 @@ impl Store {
                 "expiry closure has surviving foreign-key references".into(),
             ));
         }
+        // Carry the certification forward inside the transaction, where the
+        // surviving rows at or below each bound cannot change underneath.
+        let after_witness = witness(&tx)?;
+        let carried = match (&carry, &delta) {
+            // An inconsistent carry-forward withdraws the shortcut (the next
+            // open validates in full); it never fails the expiry.
+            (Some(watermark), Some(delta)) => delta
+                .carry(&tx, &watermark.frontier)
+                .ok()
+                .flatten()
+                .map(|frontier| (watermark, frontier, carry_semantic(watermark, &affected_sequences, ef))),
+            _ => None,
+        };
+        let reanchored = match (&store.validation.open_frontier, &store.validation.store_validated) {
+            (Some(open), Some(validated)) => Some((
+                crate::history_scope::reanchor_bounds(&tx, open)?,
+                crate::history_scope::reanchor_bounds(&tx, validated)?,
+            )),
+            _ => None,
+        };
         #[cfg(test)]
         crash_phase_for_test("inside_transaction", 72);
         tx.commit()?;
         #[cfg(test)]
         crash_phase_for_test("after_commit", 73);
-        self.validation = ValidationState::default();
+        let written = match (carried, self.path.clone(), self.store_identity()?) {
+            (Some((watermark, frontier, semantic)), Some(path), Some(identity))
+                if identity.retention == after_witness =>
+            {
+                crate::history_scope::write_watermark(
+                    &path,
+                    &identity,
+                    &watermark.engine_rules,
+                    frontier,
+                    semantic,
+                    watermark.validated_at.clone(),
+                )
+                .ok()
+            }
+            _ => None,
+        };
+        match (written, reanchored) {
+            (Some(watermark), Some((open, validated))) => {
+                let may_record = self.validation.may_record;
+                self.validation = ValidationState {
+                    opened: OpenValidation::SinceWatermark(Box::new(watermark.clone())),
+                    open_frontier: Some(open),
+                    store_validated: Some(validated),
+                    may_record,
+                    prior: None,
+                    prior_superseded: false,
+                    open_retention: Some(after_witness),
+                    certified: std::cell::RefCell::new(Some(Box::new(watermark))),
+                    run_evaluations: std::cell::RefCell::new(None),
+                };
+            }
+            _ => self.validation = ValidationState::default(),
+        }
         Ok(RetentionResult {
             boundary: next,
             deleted_rows: deleted,
         })
+    }
+}
+
+/// The in-lock validation of one expiry's candidate closures.
+type CandidateValidator<'a> =
+    &'a mut dyn FnMut(&Store, &ExpiryCandidates) -> Result<(), StoreError>;
+
+/// The candidates one expiry plan selected: every full evaluation at or below
+/// the new evaluation floor (deleted, compacted, or kept as an island) and
+/// every aged run with its reports, provider intakes and status events.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExpiryCandidates {
+    /// Evaluation sequences, ascending.
+    pub evaluation_sequences: Vec<i64>,
+    /// Watcher runs.
+    pub run_ids: Vec<String>,
+    /// Full admitted reports of those runs.
+    pub report_ids: Vec<String>,
+    /// Unretired provider intakes of those runs.
+    pub intake_ids: Vec<String>,
+    /// Status event sequences of those runs, ascending.
+    pub status_sequences: Vec<i64>,
+}
+
+fn expiry_candidates(tx: &Connection) -> Result<ExpiryCandidates, StoreError> {
+    let strings = |sql: &str| -> Result<Vec<String>, StoreError> {
+        Ok(tx.prepare(sql)?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?)
+    };
+    let numbers = |sql: &str| -> Result<Vec<i64>, StoreError> {
+        Ok(tx.prepare(sql)?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?)
+    };
+    Ok(ExpiryCandidates {
+        evaluation_sequences: numbers("SELECT e.evaluation_sequence FROM evaluation_runs e JOIN expiry_evaluations x ON x.evaluation_id=e.evaluation_id ORDER BY 1")?,
+        run_ids: strings("SELECT run_id FROM expiry_runs ORDER BY run_id")?,
+        report_ids: strings("SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_runs) AND a.source_expired=0 ORDER BY a.report_sequence")?,
+        intake_ids: strings("SELECT l.intake_id FROM local_watcher_provider_intakes l JOIN provider_intake_attempts p ON p.intake_id=l.intake_id WHERE l.run_id IN (SELECT run_id FROM expiry_runs) AND p.history_expired=0 ORDER BY p.intake_sequence")?,
+        status_sequences: numbers("SELECT status_sequence FROM status_events WHERE run_id IN (SELECT run_id FROM expiry_runs) ORDER BY 1")?,
+    })
+}
+
+/// Stored-digest validation of exactly the candidate runs' raw submissions,
+/// admitted reports and provider-intake bytes.
+fn validate_candidate_digests(tx: &Connection) -> Result<(), StoreError> {
+    let mut raw = tx.prepare("SELECT submission_id, raw_bytes, raw_sha256 FROM raw_submissions WHERE run_id IN (SELECT run_id FROM expiry_runs) AND source_expired=0")?;
+    let mut rows = raw.query([])?;
+    while let Some(row) = rows.next()? {
+        let (id, bytes, stored): (String, Vec<u8>, String) = (row.get(0)?, row.get(1)?, row.get(2)?);
+        let recomputed = crate::sha256_digest(&bytes);
+        if recomputed != stored {
+            return Err(StoreError::Integrity(format!(
+                "raw submission {id} bytes hash to {recomputed}, not stored {stored}"
+            )));
+        }
+    }
+    let mut reports = tx.prepare("SELECT a.report_id, a.canonical_json, a.semantic_digest FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_runs) AND a.source_expired=0")?;
+    let mut rows = reports.query([])?;
+    while let Some(row) = rows.next()? {
+        let (id, bytes, stored): (String, Vec<u8>, String) = (row.get(0)?, row.get(1)?, row.get(2)?);
+        let document = CanonicalDocument::from_canonical_bytes(bytes)
+            .map_err(|error| StoreError::Integrity(format!("admitted report {id}: {error}")))?;
+        if document.digest() != stored {
+            return Err(StoreError::Integrity(format!(
+                "admitted report {id} bytes hash to {}, not stored {stored}",
+                document.digest()
+            )));
+        }
+    }
+    let mut intakes = tx.prepare("SELECT p.intake_id, p.raw_bytes, p.raw_sha256 FROM provider_intake_attempts p JOIN local_watcher_provider_intakes l ON l.intake_id=p.intake_id WHERE l.run_id IN (SELECT run_id FROM expiry_runs) AND p.history_expired=0")?;
+    let mut rows = intakes.query([])?;
+    while let Some(row) = rows.next()? {
+        let (id, bytes, stored): (String, Vec<u8>, String) = (row.get(0)?, row.get(1)?, row.get(2)?);
+        let recomputed = crate::sha256_digest(&bytes);
+        if recomputed != stored {
+            return Err(StoreError::Integrity(format!(
+                "provider intake {id} bytes hash to {recomputed}, not stored {stored}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The semantic certification after an expiry: the evaluation heads are
+/// unchanged (each lineage's newest evaluation is a protected island and
+/// never deleted or compacted; if one were, the certification is withdrawn),
+/// and finding-lineage heads are kept only for lineages whose newest
+/// evaluation lies above the new evaluation floor, which is exactly the state
+/// a replay of the surviving history from the floor reaches (a lineage first
+/// met above the floor is seeded from its finding events, which are never
+/// deleted).
+fn carry_semantic(
+    watermark: &crate::ValidationWatermark,
+    affected: &std::collections::BTreeSet<i64>,
+    evaluation_floor: i64,
+) -> crate::SemanticCertification {
+    let Some(state) = &watermark.semantic else {
+        return crate::SemanticCertification::NotEstablished;
+    };
+    if state
+        .evaluation_heads
+        .iter()
+        .any(|head| affected.contains(&head.evaluation_sequence))
+    {
+        return crate::SemanticCertification::NotEstablished;
+    }
+    let above: std::collections::BTreeSet<&str> = state
+        .evaluation_heads
+        .iter()
+        .filter(|head| head.evaluation_sequence > evaluation_floor)
+        .map(|head| head.lineage.as_str())
+        .collect();
+    crate::SemanticCertification::Established(crate::SemanticState {
+        lineage_heads: state
+            .lineage_heads
+            .iter()
+            .filter(|head| above.contains(head.lineage.as_str()))
+            .cloned()
+            .collect(),
+        evaluation_heads: state.evaluation_heads.clone(),
+    })
+}
+
+/// One expiry mutation over a history table (alias-free predicate).
+enum Mutation {
+    Delete(&'static str),
+    Update(&'static str, &'static str),
+}
+
+impl Mutation {
+    fn apply(
+        &self,
+        tx: &Connection,
+        table: &str,
+        delta: Option<&mut ExpiryDelta>,
+    ) -> Result<usize, StoreError> {
+        match (self, delta) {
+            (Self::Delete(predicate), None) => Ok(tx.execute(&format!("DELETE FROM {table} WHERE {predicate}"), [])?),
+            (Self::Update(set, predicate), None) => Ok(tx.execute(&format!("UPDATE {table} SET {set} WHERE {predicate}"), [])?),
+            (Self::Delete(predicate), Some(delta)) => {
+                let removed = delta.covered_rows(tx, table, predicate)?;
+                let changed = tx.execute(&format!("DELETE FROM {table} WHERE {predicate}"), [])?;
+                delta.removed(table, &removed);
+                Ok(changed)
+            }
+            (Self::Update(set, predicate), Some(delta)) => {
+                let before = delta.covered_rows(tx, table, predicate)?;
+                let changed = tx.execute(&format!("UPDATE {table} SET {set} WHERE {predicate}"), [])?;
+                let after = delta.covered_rows(tx, table, predicate)?;
+                delta.removed(table, &before);
+                delta.added(table, &after);
+                Ok(changed)
+            }
+        }
     }
 }

@@ -1,16 +1,24 @@
 //! Bounded history validation: the append frontier, the scope a validator
 //! covers, and the store-specific validation watermark.
 //!
-//! Before the first explicit expiry every history table is append-only.
-//! After expiry the store disables this advisory accelerator and validates
-//! surviving bounded history in full; retired bytes are not re-certified.
-//! Ordinary update/delete triggers abort, and the
-//! schema fingerprint proves those triggers exist on every open. Rowids
+//! Ordinary update/delete triggers abort, and the schema fingerprint proves
+//! those triggers exist on every open; only the guarded retention expiry
+//! deletes or compacts rows, and only at or below its declared floors. Rowids
 //! therefore grow monotonically in append order. A completed validation
-//! records, per table, the highest validated rowid, the row count, and a hash
-//! chain over the complete encoding (rowid and every column value) of each
-//! covered row in rowid order. Chains are extended only over newly validated
-//! rows, so recording costs O(new rows).
+//! records, per table, the highest validated rowid, the row count, and an
+//! additive content accumulator: the 256-bit modular sum of one digest per
+//! covered row, each binding the table, the rowid and every column value.
+//! Recording adds only newly validated rows, so it costs O(new rows).
+//!
+//! A watermark is bound to the retention boundary (generation, the four
+//! floors and the retired lineage floors) it was certified under, and
+//! applies only while the store's boundary is the same. The expiry that
+//! changes the boundary carries the handle's watermark forward in O(changed
+//! rows): it subtracts the digest of every covered row it deletes, replaces
+//! the digest of every covered row it compacts, re-anchors a bound whose row
+//! it deleted, and records the new boundary. An expiry interrupted between
+//! its commit and that write leaves a watermark for the old boundary, which
+//! no longer applies: exactly one full validation follows.
 //!
 //! An ordinary open proves that the watermark belongs to this store, that the
 //! covered prefix still ends where it was recorded (each bounding row is
@@ -40,14 +48,14 @@ use sha2::{Digest, Sha256};
 use crate::{CanonicalDocument, StoreError};
 
 /// Watermark document schema.
-pub const VALIDATION_WATERMARK_SCHEMA: &str = "nq.validation_watermark.v3";
+pub const VALIDATION_WATERMARK_SCHEMA: &str = "nq.validation_watermark.v4";
 
 /// Identity of the store validation rules a watermark vouches for. Any change
 /// to what store validation checks must change this value so that existing
 /// watermarks stop applying and the next open validates in full. Semantic
 /// rules layered above the store are bound separately through the engine
 /// rules a watermark records.
-pub const VALIDATION_RULES: &str = concat!("nq-store/", env!("CARGO_PKG_VERSION"), "/rules.3");
+pub const VALIDATION_RULES: &str = concat!("nq-store/", env!("CARGO_PKG_VERSION"), "/rules.4");
 
 /// Every append-only history table. The frontier covers all of them.
 pub(crate) const HISTORY_TABLES: &[&str] = &[
@@ -147,9 +155,13 @@ pub struct TableFrontier {
     pub max_rowid: Option<i64>,
     /// Rows at or below `max_rowid`.
     pub rows: i64,
-    /// Hash chain over the full encoding of every row at or below
-    /// `max_rowid`, in rowid order.
-    pub chain: String,
+    /// Additive content accumulator: the sum modulo 2^256 (lowercase hex)
+    /// of the row element of every row at or below `max_rowid`. A row
+    /// element is a digest of the table name and the row's full encoding,
+    /// rowid included, so it is order-independent and supports removing one
+    /// row's contribution without re-reading the others. Advisory: it
+    /// detects accidental change, not deliberate forgery.
+    pub accumulator: String,
     /// Digest of the full encoding of the row at `max_rowid`.
     pub boundary: Option<String>,
 }
@@ -157,7 +169,7 @@ pub struct TableFrontier {
 /// Per-table append positions plus the evaluation sequence, which history
 /// paging uses instead of the rowid. A frontier from
 /// [`HistoryFrontier::capture_bounds`] carries positions only and scopes
-/// validation; a certified frontier also carries counts and chains.
+/// validation; a certified frontier also carries counts and accumulators.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryFrontier {
@@ -167,10 +179,58 @@ pub struct HistoryFrontier {
     pub evaluation_sequence: i64,
 }
 
-fn initial_chain(table: &str) -> String {
-    hex(&Sha256::digest(
-        format!("{VALIDATION_WATERMARK_SCHEMA}/chain/{table}").as_bytes(),
-    ))
+/// The accumulator of an empty table.
+const EMPTY_ACCUMULATOR: [u8; 32] = [0; 32];
+
+/// The accumulator element of one row: binds the table and the row digest.
+fn row_element(table: &str, row: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(VALIDATION_WATERMARK_SCHEMA.as_bytes());
+    hasher.update(b"/row\0");
+    hasher.update(table.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(row);
+    hasher.finalize().into()
+}
+
+/// `accumulator + element` modulo 2^256, big-endian.
+fn accumulate(accumulator: &mut [u8; 32], element: &[u8; 32]) {
+    let mut carry = 0u16;
+    for index in (0..32).rev() {
+        let sum = u16::from(accumulator[index]) + u16::from(element[index]) + carry;
+        accumulator[index] = (sum & 0xff) as u8;
+        carry = sum >> 8;
+    }
+}
+
+/// `accumulator - element` modulo 2^256, big-endian.
+fn deduct(accumulator: &mut [u8; 32], element: &[u8; 32]) {
+    let mut borrow = 0i16;
+    for index in (0..32).rev() {
+        let mut difference = i16::from(accumulator[index]) - i16::from(element[index]) - borrow;
+        borrow = 0;
+        if difference < 0 {
+            difference += 256;
+            borrow = 1;
+        }
+        accumulator[index] = u8::try_from(difference).unwrap_or(0);
+    }
+}
+
+fn parse_accumulator(table: &str, value: &str) -> Result<[u8; 32], StoreError> {
+    let invalid = || {
+        StoreError::Integrity(format!(
+            "validation watermark accumulator for history table {table} is not 64 hex digits"
+        ))
+    };
+    if value.len() != 64 {
+        return Err(invalid());
+    }
+    let mut out = [0u8; 32];
+    for (index, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).map_err(|_| invalid())?;
+    }
+    Ok(out)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -223,12 +283,6 @@ fn column_count(connection: &Connection, table: &str) -> Result<usize, StoreErro
     Ok(usize::try_from(columns).unwrap_or(0) + 1)
 }
 
-fn extend_chain(chain: &str, row: &[u8; 32]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(chain.as_bytes());
-    hasher.update(row);
-    hex(&hasher.finalize())
-}
 
 impl HistoryFrontier {
     /// Read the current append position of every history table (each an
@@ -283,11 +337,12 @@ impl HistoryFrontier {
             .and_then(|frontier| frontier.max_rowid)
     }
 
-    /// Certify the rows at or below `bounds`: extend `base`'s chains over the
-    /// rows beyond it (O(new rows)), or chain every row from scratch without a
-    /// base. With `prior`, every table's chain is also checkpointed at the
-    /// prior bound and must equal the prior chain, proving that no covered
-    /// row changed since `prior` was certified.
+    /// Certify the rows at or below `bounds`: add the rows beyond `base` to
+    /// its accumulators (O(new rows)), or accumulate every row from scratch
+    /// without a base. With `prior` (certified under the same retention
+    /// boundary), every table's accumulator is also checkpointed at the prior
+    /// bound and must equal the prior one, proving that no covered row
+    /// changed since `prior` was certified.
     pub(crate) fn certify(
         connection: &Connection,
         base: Option<&HistoryFrontier>,
@@ -300,14 +355,14 @@ impl HistoryFrontier {
             let from = base
                 .and_then(|base| base.tables.get(*table))
                 .filter(|from| from.max_rowid <= bound);
-            let (start, mut rows, mut chain, mut boundary) = match from {
+            let (start, mut rows, mut accumulator, mut boundary) = match from {
                 Some(from) => (
                     from.max_rowid,
                     from.rows,
-                    from.chain.clone(),
+                    parse_accumulator(table, &from.accumulator)?,
                     from.boundary.clone(),
                 ),
-                None => (None, 0, initial_chain(table), None),
+                None => (None, 0, EMPTY_ACCUMULATOR, None),
             };
             // A prior certification is compared only on a recomputation from
             // scratch, at the prior bound.
@@ -335,7 +390,7 @@ impl HistoryFrontier {
                 while let Some(row) = cursor.next()? {
                     let rowid: i64 = row.get(0)?;
                     let digest = row_digest(row, columns)?;
-                    chain = extend_chain(&chain, &digest);
+                    accumulate(&mut accumulator, &row_element(table, &digest));
                     rows += 1;
                     if rowid == bound {
                         boundary = Some(hex(&digest));
@@ -343,7 +398,7 @@ impl HistoryFrontier {
                     if Some(rowid) == checkpoint_bound
                         && let Some(checkpoint) = checkpoint
                     {
-                        verify_checkpoint(table, checkpoint, rows, &chain, prior)?;
+                        verify_checkpoint(table, checkpoint, rows, &hex(&accumulator), prior)?;
                         checkpoint_seen = true;
                     }
                 }
@@ -361,7 +416,7 @@ impl HistoryFrontier {
                 TableFrontier {
                     max_rowid: bound,
                     rows,
-                    chain,
+                    accumulator: hex(&accumulator),
                     boundary: bound.and(boundary),
                 },
             );
@@ -403,7 +458,7 @@ impl HistoryFrontier {
         Ok(())
     }
 
-    /// Feed every table's bound, count, chain and boundary, plus the
+    /// Feed every table's bound, count, accumulator and boundary, plus the
     /// evaluation sequence, into `hasher`.
     fn hash_into(&self, hasher: &mut Sha256) {
         for (table, frontier) in &self.tables {
@@ -411,7 +466,7 @@ impl HistoryFrontier {
             hasher.update(table.as_bytes());
             hasher.update(frontier.max_rowid.unwrap_or(0).to_be_bytes());
             hasher.update(frontier.rows.to_be_bytes());
-            hasher.update(frontier.chain.as_bytes());
+            hasher.update(frontier.accumulator.as_bytes());
             hasher.update(frontier.boundary.as_deref().unwrap_or("").as_bytes());
         }
         hasher.update(self.evaluation_sequence.to_be_bytes());
@@ -422,10 +477,10 @@ fn verify_checkpoint(
     table: &str,
     checkpoint: &TableFrontier,
     rows: i64,
-    chain: &str,
+    accumulator: &str,
     prior: Option<&ValidationWatermark>,
 ) -> Result<(), StoreError> {
-    if checkpoint.rows != rows || checkpoint.chain != chain {
+    if checkpoint.rows != rows || checkpoint.accumulator != accumulator {
         return Err(StoreError::Integrity(format!(
             "history table {table} changed at or below the frontier certified at {}: a covered row \
              was added, removed, or rewritten since it was validated",
@@ -625,6 +680,48 @@ pub struct SemanticState {
     pub evaluation_heads: Vec<EvaluationHead>,
 }
 
+/// The retention boundary a watermark was certified under: the expiry
+/// generation, the four expired-through floors, and the digest of the
+/// retired lineage floors. A watermark applies only to a store whose current
+/// boundary is identical.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetentionWitness {
+    /// Expiry generation.
+    pub generation: i64,
+    /// Evaluations expired through this sequence.
+    pub evaluation_floor: i64,
+    /// Admitted reports expired through this sequence.
+    pub report_floor: i64,
+    /// Provider intakes expired through this sequence.
+    pub intake_floor: i64,
+    /// Status events expired through this sequence.
+    pub status_floor: i64,
+    /// SHA-256 of the exact persisted retired lineage floors.
+    pub lineage_floors_digest: String,
+}
+
+impl RetentionWitness {
+    fn hash_into(&self, hasher: &mut Sha256) {
+        hasher.update(b"\nretention\0");
+        for value in [
+            self.generation,
+            self.evaluation_floor,
+            self.report_floor,
+            self.intake_floor,
+            self.status_floor,
+        ] {
+            hasher.update(value.to_be_bytes());
+        }
+        hasher.update(
+            u64::try_from(self.lineage_floors_digest.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        hasher.update(self.lineage_floors_digest.as_bytes());
+    }
+}
+
 /// A completed validation, bound to one store, schema, and rule set.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -642,6 +739,8 @@ pub struct ValidationWatermark {
     pub schema_version: i64,
     /// Schema artifact digest of the validated store.
     pub schema_artifact_digest: String,
+    /// Retention boundary the certification holds under.
+    pub retention: RetentionWitness,
     /// Frontier through which store validation and the provider-intake and
     /// diagnostic-artifact history were proven, with each table's content
     /// chain.
@@ -673,6 +772,7 @@ impl ValidationWatermark {
             hasher.update(field.as_bytes());
         }
         hasher.update(self.schema_version.to_be_bytes());
+        self.retention.hash_into(&mut hasher);
         self.frontier.hash_into(&mut hasher);
         match &self.semantic {
             None => hasher.update([0u8]),
@@ -754,6 +854,7 @@ pub(crate) struct StoreIdentity {
     pub genesis_id: String,
     pub schema_version: i64,
     pub schema_artifact_digest: String,
+    pub retention: RetentionWitness,
 }
 
 /// A sidecar as read from disk, before it is related to the database.
@@ -802,6 +903,16 @@ pub(crate) fn refuse_foreign(
 /// Whether a watermark of this store was written under the current schema
 /// and store rules, so its frontier and chains are meaningful here.
 pub(crate) fn applies(watermark: &ValidationWatermark, identity: &StoreIdentity) -> bool {
+    applies_except_retention(watermark, identity) && watermark.retention == identity.retention
+}
+
+/// Whether a watermark of this store was written under the current schema and
+/// store rules, whatever retention boundary it certified (an expiry since
+/// then supersedes it).
+pub(crate) fn applies_except_retention(
+    watermark: &ValidationWatermark,
+    identity: &StoreIdentity,
+) -> bool {
     watermark.schema == VALIDATION_WATERMARK_SCHEMA
         && watermark.validation_rules == VALIDATION_RULES
         && watermark.genesis_id == identity.genesis_id
@@ -842,6 +953,7 @@ pub(crate) fn write_watermark(
         genesis_id: identity.genesis_id.clone(),
         schema_version: identity.schema_version,
         schema_artifact_digest: identity.schema_artifact_digest.clone(),
+        retention: identity.retention.clone(),
         commitment_digest: String::new(),
         frontier,
         semantic: match semantic {
@@ -885,6 +997,177 @@ pub(crate) fn write_watermark(
     }
     remove_stale_temporaries(&path);
     Ok(watermark)
+}
+
+/// The covered rows one expiry transaction deleted or rewrote, recorded
+/// before and after each mutation so the transaction's watermark can be
+/// carried forward without re-reading surviving history.
+#[derive(Debug)]
+pub(crate) struct ExpiryDelta {
+    bounds: BTreeMap<String, Option<i64>>,
+    tables: BTreeMap<String, TableDelta>,
+}
+
+#[derive(Debug)]
+struct TableDelta {
+    removed: [u8; 32],
+    added: [u8; 32],
+    rows_removed: i64,
+    rows_added: i64,
+}
+
+impl ExpiryDelta {
+    /// Track changes to rows at or below `frontier`'s per-table bounds.
+    pub(crate) fn new(frontier: &HistoryFrontier) -> Self {
+        Self {
+            bounds: frontier
+                .tables
+                .iter()
+                .map(|(table, recorded)| (table.clone(), recorded.max_rowid))
+                .collect(),
+            tables: BTreeMap::new(),
+        }
+    }
+
+    /// Rows of `table` matching `predicate` (SQL over alias `t`), with their
+    /// rowids and digests, restricted to the covered range.
+    pub(crate) fn covered_rows(
+        &self,
+        connection: &Connection,
+        table: &str,
+        predicate: &str,
+    ) -> Result<Vec<(i64, [u8; 32])>, StoreError> {
+        let Some(Some(bound)) = self.bounds.get(table) else {
+            return Ok(Vec::new());
+        };
+        let columns = column_count(connection, table)?;
+        let mut statement = connection.prepare(&format!(
+            "SELECT t.rowid, t.* FROM {table} AS t WHERE t.rowid <= ?1 AND ({predicate})"
+        ))?;
+        let mut cursor = statement.query([bound])?;
+        let mut out = Vec::new();
+        while let Some(row) = cursor.next()? {
+            out.push((row.get(0)?, row_digest(row, columns)?));
+        }
+        Ok(out)
+    }
+
+    /// Remove `rows` (as read before the mutation) from `table`'s accumulator.
+    pub(crate) fn removed(&mut self, table: &str, rows: &[(i64, [u8; 32])]) {
+        let entry = self.entry(table);
+        for (_, digest) in rows {
+            accumulate(&mut entry.removed, &row_element(table, digest));
+            entry.rows_removed += 1;
+        }
+    }
+
+    /// Add `rows` (as read after the mutation) to `table`'s accumulator.
+    pub(crate) fn added(&mut self, table: &str, rows: &[(i64, [u8; 32])]) {
+        let entry = self.entry(table);
+        for (_, digest) in rows {
+            accumulate(&mut entry.added, &row_element(table, digest));
+            entry.rows_added += 1;
+        }
+    }
+
+    fn entry(&mut self, table: &str) -> &mut TableDelta {
+        self.tables
+            .entry(table.to_owned())
+            .or_insert(TableDelta {
+                removed: EMPTY_ACCUMULATOR,
+                added: EMPTY_ACCUMULATOR,
+                rows_removed: 0,
+                rows_added: 0,
+            })
+    }
+
+    /// The certified frontier after the expiry: `frontier` with each changed
+    /// table's accumulator and count adjusted, and its bound re-anchored to
+    /// the highest surviving rowid at or below it (with that row's digest).
+    /// `None` when the bounding evaluation row did not survive: the
+    /// evaluation sequence the semantic certification is bound to would move,
+    /// so the next open validates in full instead.
+    pub(crate) fn carry(
+        &self,
+        connection: &Connection,
+        frontier: &HistoryFrontier,
+    ) -> Result<Option<HistoryFrontier>, StoreError> {
+        let mut carried = frontier.clone();
+        for (table, delta) in &self.tables {
+            let recorded = carried.tables.get_mut(table).ok_or_else(|| {
+                StoreError::Integrity(format!(
+                    "validation watermark has no frontier for history table {table}"
+                ))
+            })?;
+            let mut accumulator = parse_accumulator(table, &recorded.accumulator)?;
+            deduct(&mut accumulator, &delta.removed);
+            accumulate(&mut accumulator, &delta.added);
+            recorded.accumulator = hex(&accumulator);
+            recorded.rows = recorded.rows - delta.rows_removed + delta.rows_added;
+            let Some(bound) = recorded.max_rowid else {
+                continue;
+            };
+            let surviving: Option<i64> = connection.query_row(
+                &format!("SELECT MAX(rowid) FROM {table} WHERE rowid <= ?1"),
+                [bound],
+                |row| row.get(0),
+            )?;
+            if table == "evaluation_runs" && surviving != Some(bound) {
+                return Ok(None);
+            }
+            recorded.max_rowid = surviving;
+            recorded.boundary = match surviving {
+                Some(rowid) => {
+                    let columns = column_count(connection, table)?;
+                    let mut statement = connection
+                        .prepare(&format!("SELECT rowid, * FROM {table} WHERE rowid = ?1"))?;
+                    let mut cursor = statement.query([rowid])?;
+                    let row = cursor.next()?.ok_or_else(|| {
+                        StoreError::Integrity(format!("history table {table} lost row {rowid}"))
+                    })?;
+                    Some(hex(&row_digest(row, columns)?))
+                }
+                None => None,
+            };
+            if recorded.rows < 0 || (surviving.is_none() && (recorded.rows != 0 || accumulator != EMPTY_ACCUMULATOR)) {
+                return Err(StoreError::Integrity(format!(
+                    "validation watermark carry-forward for history table {table} is inconsistent"
+                )));
+            }
+        }
+        Ok(Some(carried))
+    }
+}
+
+/// Re-anchor append positions captured by a handle (positions only) after an
+/// expiry deleted rows at or below them, so a reused rowid can never fall
+/// inside a range the handle treats as validated.
+pub(crate) fn reanchor_bounds(
+    connection: &Connection,
+    frontier: &HistoryFrontier,
+) -> Result<HistoryFrontier, StoreError> {
+    let mut out = frontier.clone();
+    for (table, recorded) in &mut out.tables {
+        if let Some(bound) = recorded.max_rowid {
+            recorded.max_rowid = connection.query_row(
+                &format!("SELECT MAX(rowid) FROM {table} WHERE rowid <= ?1"),
+                [bound],
+                |row| row.get(0),
+            )?;
+        }
+    }
+    let evaluation_bound = out.max_rowid("evaluation_runs");
+    if evaluation_bound != frontier.max_rowid("evaluation_runs") {
+        out.evaluation_sequence = match evaluation_bound {
+            Some(rowid) => connection.query_row(
+                "SELECT evaluation_sequence FROM evaluation_runs WHERE rowid = ?1",
+                [rowid],
+                |row| row.get(0),
+            )?,
+            None => 0,
+        };
+    }
+    Ok(out)
 }
 
 /// Remove temporary watermark files that a killed writer left behind. Only
