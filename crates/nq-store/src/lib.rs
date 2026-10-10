@@ -5631,6 +5631,10 @@ impl Store {
                 backup.run_to_completion(64, std::time::Duration::from_millis(10), None)?;
             }
             drop(target);
+            #[cfg(test)]
+            if BACKUP_VERIFY_FAULT_FOR_TEST.with(|armed| armed.replace(false)) {
+                return Err(StoreError::Integrity("injected backup verification fault".into()));
+            }
 
             // Opening through Store validates identity, schema, integrity, and public views.
             drop(Self::open_read_only(destination)?);
@@ -5643,12 +5647,7 @@ impl Store {
             })
         })();
         if result.is_err() {
-            let _ = std::fs::remove_file(destination);
-            for suffix in ["-wal", "-shm"] {
-                let mut sidecar = destination.as_os_str().to_os_string();
-                sidecar.push(suffix);
-                let _ = std::fs::remove_file(PathBuf::from(sidecar));
-            }
+            remove_database_artifact(destination);
         }
         result
     }
@@ -6725,12 +6724,7 @@ impl Store {
             })
         })();
         if result.is_err() {
-            let _ = std::fs::remove_file(destination);
-            for suffix in ["-wal", "-shm"] {
-                let mut sidecar = destination.as_os_str().to_os_string();
-                sidecar.push(suffix);
-                let _ = std::fs::remove_file(PathBuf::from(sidecar));
-            }
+            remove_database_artifact(destination);
         }
         result
     }
@@ -12165,6 +12159,11 @@ fn sha256_file(path: &Path) -> Result<String, StoreError> {
     Ok(format!("sha256:{:x}", digest.finalize()))
 }
 
+/// Remove a failed backup destination this process created, with its SQLite
+/// sidecars and its capacity lock. Every caller still holds the destination's
+/// own operation guard, so the lock is unlinked by its holder (a waiter on
+/// the unlinked inode re-locks the current name) and no zero-byte lock is left
+/// beside a destination that does not exist.
 fn remove_database_artifact(path: &Path) {
     let _ = std::fs::remove_file(path);
     for suffix in ["-wal", "-shm"] {
@@ -12172,6 +12171,17 @@ fn remove_database_artifact(path: &Path) {
         sidecar.push(suffix);
         let _ = std::fs::remove_file(PathBuf::from(sidecar));
     }
+    if let Ok(lock) = capacity::capacity_lock_path(path) {
+        let _ = std::fs::remove_file(lock);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// One-shot fault: the next `backup_verified` on this thread fails after
+    /// copying, before verification.
+    static BACKUP_VERIFY_FAULT_FOR_TEST: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 fn validate_digest(field: &str, digest: &str) -> Result<(), StoreError> {

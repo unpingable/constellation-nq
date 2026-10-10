@@ -1075,6 +1075,20 @@ the public evaluation history through one frozen upper bound, requiring its
 count to equal the exhaustive validator. Verification is read-only: repeated
 checks must leave every sealed byte and path unchanged.
 
+An archive of an expired store (retention generation above zero) seals the
+surviving history and declares the boundary it was cut at. `ARCHIVE.json`
+records `complete_history` (`false` after any expiry) and `retention`: the
+generation, the four expired-through floors, the last cutoff, the protected
+islands kept below the floors per root kind (`islands_by_root`), and the
+compact record counts. Evaluation paging starts above the evaluation floor,
+and the islands are reopened one by one, so the public count equals the typed
+validator's. Verification re-derives the declaration from `db/nq.db` and
+refuses any difference, an omitted declaration, or a `complete_history: true`
+claim that the sealed database cannot support. The archive never presents
+expired history as continuous. A writer holding the live store's lock makes
+`nq admin archive` refuse with that contention, never fall back to the
+incompatible-store path.
+
 An archive of an incompatible database is integrity custody only. It records
 `source_openable=false`, does not claim typed historical semantics, and cannot
 be downgraded from a valid current store merely by resealing metadata. Archive

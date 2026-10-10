@@ -181,7 +181,10 @@ record is reported as expired, never as verified. None of these results means
 a successful full-history verification. `nq admin validate --full` reports
 `history.coverage` as `bounded` after any expiry. Surviving-history
 verification and sealed pre-expiry archive inspection have their respective
-scopes.
+scopes. A cold archive of an expired store declares its retention boundary
+(`complete_history: false`, generation, floors, cutoff, islands by root kind,
+compact counts) and its verification re-derives that declaration; it never
+claims complete history.
 
 ## Backup and explicit restore
 

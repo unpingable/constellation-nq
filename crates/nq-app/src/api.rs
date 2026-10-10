@@ -1667,15 +1667,20 @@ mod tests {
         database
     }
 
-    /// DEFECT SPECIMEN (NQ #27 audit, DEFECT 2): `nq admin archive` (the
-    /// documented route for retiring an oversized store) fails on any store
-    /// after expiry, because archive validation pages evaluation history from
-    /// `after=None`. Passes while the defect is present.
+    /// NQ #27 D2 (repaired; the failing specimen is preserved on
+    /// audit/nq-27-specimens-20261010): `nq admin archive` after expiry
+    /// seals the surviving history and declares the retention boundary it
+    /// was cut at. The archive never claims complete history, and its
+    /// verification re-derives the same declaration from the sealed database.
     #[test]
-    fn audit_specimen_archive_fails_after_expiry() {
+    fn archive_after_expiry_declares_retention_boundary() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let root = directory.path();
         let database = audit_expired_evaluation_store(root);
+        let boundary = Store::open(&database)
+            .expect("reopen expired store")
+            .retention_boundary()
+            .expect("boundary");
         let config = root.join("nq.toml");
         std::fs::write(
             &config,
@@ -1690,12 +1695,31 @@ mod tests {
         )
         .expect("write config");
         let destination = root.join("archive");
-        let error = crate::archive::create_archive(&config, &destination)
-            .expect_err("archive after expiry");
-        let rendered = format!("{error:#}");
-        println!("S2 create_archive error: {rendered}");
-        assert!(rendered.contains("full history unavailable"), "{rendered}");
-        assert!(!destination.exists(), "no sealed archive");
+        let report = crate::archive::create_archive(&config, &destination)
+            .expect("archive after expiry seals the surviving history");
+        assert!(report.source_openable);
+        let verified = crate::archive::verify_archive(&destination).expect("archive verifies");
+        assert_eq!(verified.historical_complete_history, Some(false));
+        let retention = verified
+            .historical_retention
+            .as_ref()
+            .expect("declared retention boundary");
+        assert_eq!(retention.generation, boundary.generation);
+        assert_eq!(retention.floors.evaluation, boundary.evaluation_floor);
+        assert_eq!(retention.floors.report, boundary.report_floor);
+        assert_eq!(retention.floors.intake, boundary.intake_floor);
+        assert_eq!(retention.floors.status, boundary.status_floor);
+        assert!(retention.cutoff.is_some());
+        assert!(retention.islands_by_root.contains_key("lineage_latest"));
+        let metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(destination.join("ARCHIVE.json")).expect("metadata"),
+        )
+        .expect("metadata json");
+        assert_eq!(metadata["complete_history"], serde_json::json!(false));
+        assert_eq!(
+            metadata["retention"]["generation"].as_i64(),
+            Some(boundary.generation)
+        );
     }
 
     /// NQ #27 D3 (repaired; the failing specimen is preserved on

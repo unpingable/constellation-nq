@@ -830,6 +830,25 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_verified_backup_leaves_no_destination_lock() {
+        let (_root, path, mut store) = tiny_store();
+        store.record_status(&status(0, 1024)).unwrap();
+        let copy_root = tempfile::tempdir().unwrap();
+        let copy = copy_root.path().join("nq.db");
+        crate::BACKUP_VERIFY_FAULT_FOR_TEST.with(|armed| armed.set(true));
+        let error = store.backup_verified(&copy).expect_err("injected fault");
+        assert!(error.to_string().contains("injected backup verification fault"));
+        let left: Vec<_> = std::fs::read_dir(copy_root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "failed backup left {left:?}");
+        // The source's own lock is untouched and a later backup succeeds.
+        assert!(lock_path(&path).exists());
+        store.backup_verified(&copy).expect("backup after a failed attempt");
+    }
+
+    #[test]
     fn closed_private_copy_sidecars_are_retired_under_their_own_guard() {
         let (_root, path, mut store) = tiny_store();
         store.record_status(&status(0, 1024)).unwrap();
@@ -1187,7 +1206,7 @@ fn operation_guard_with_timeout(
     }
 }
 
-fn capacity_lock_path(path: &Path) -> Result<PathBuf, StoreError> {
+pub(crate) fn capacity_lock_path(path: &Path) -> Result<PathBuf, StoreError> {
     let parent = std::fs::canonicalize(
         path.parent()
             .ok_or_else(|| refusal("database has no parent"))?,

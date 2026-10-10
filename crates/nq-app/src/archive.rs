@@ -47,7 +47,116 @@ struct ArchiveMetadata {
     /// false, the database was preserved but its historical meaning cannot be
     /// verified by this format — that claim fails closed.
     source_openable: bool,
+    /// Whether the sealed database holds its complete original history.
+    /// `false` once retention expired any history (generation > 0); `None`
+    /// when the source was not openable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    complete_history: Option<bool>,
+    /// The retention boundary the sealed database was cut at, declared so the
+    /// archive never presents expired history as continuous. `None` when the
+    /// source was not openable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retention: Option<ArchiveRetention>,
     manifest_sha256: String,
+}
+
+/// Expired-through floors of the sealed database.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveRetentionFloors {
+    /// Evaluations expired through this sequence.
+    pub evaluation: i64,
+    /// Admitted reports expired through this sequence.
+    pub report: i64,
+    /// Provider intakes expired through this sequence.
+    pub intake: i64,
+    /// Status events expired through this sequence.
+    pub status: i64,
+}
+
+/// Records kept at or below the floors only as compact commitments.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveCompactCounts {
+    /// Source-expired evaluation decision records.
+    pub evaluations: i64,
+    /// Source-expired report evidence records.
+    pub reports: i64,
+    /// Retired provider-intake identity commitments.
+    pub intake_commitments: i64,
+}
+
+/// The retention boundary an archive declares: what was expired, which
+/// protected islands survive below the floors (by root kind), and which
+/// compact records remain. Derived from the sealed database and re-derived by
+/// verification; a mismatch refuses.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveRetention {
+    /// Expiry generation; 0 means nothing was ever expired.
+    pub generation: i64,
+    /// Expired-through floors.
+    pub floors: ArchiveRetentionFloors,
+    /// Arrival-time cutoff of the last expiry.
+    pub cutoff: Option<String>,
+    /// Declared islands below the floors, per root kind.
+    pub islands_by_root: std::collections::BTreeMap<String, i64>,
+    /// Compact records below the floors.
+    pub compact_counts: ArchiveCompactCounts,
+}
+
+fn retention_declaration(store: &Store) -> Result<ArchiveRetention> {
+    let report = store
+        .retention_report()
+        .context("read the retention boundary to declare")?;
+    Ok(ArchiveRetention {
+        generation: report.generation,
+        floors: ArchiveRetentionFloors {
+            evaluation: report.evaluation_floor,
+            report: report.report_floor,
+            intake: report.intake_floor,
+            status: report.status_floor,
+        },
+        cutoff: report.cutoff,
+        islands_by_root: report.islands_by_root,
+        compact_counts: ArchiveCompactCounts {
+            evaluations: report.compact_evaluations,
+            reports: report.compact_reports,
+            intake_commitments: report.retired_intake_commitments,
+        },
+    })
+}
+
+/// Re-derive the declaration from `store` and require the sealed one to be
+/// exact. A complete-history claim is checked against the store itself, so
+/// an expired database can never be sealed or verified as continuous.
+fn verify_retention_declaration(
+    store: &Store,
+    complete_history: Option<bool>,
+    declared: Option<&ArchiveRetention>,
+) -> Result<ArchiveRetention> {
+    let (Some(complete_history), Some(declared)) = (complete_history, declared) else {
+        bail!("archive does not declare the retention boundary of its database");
+    };
+    let actual = retention_declaration(store)?;
+    if &actual != declared {
+        bail!(
+            "archive retention declaration disagrees with its database: declared generation {} \
+             floors {:?}, database generation {} floors {:?}",
+            declared.generation,
+            declared.floors,
+            actual.generation,
+            actual.floors
+        );
+    }
+    if complete_history {
+        store
+            .require_complete_history()
+            .context("archive declares complete history")?;
+    } else if actual.generation == 0 {
+        bail!("archive declares incomplete history for a database that never expired any");
+    }
+    Ok(actual)
 }
 
 /// Outcome of a successful archive creation.
@@ -152,6 +261,13 @@ pub struct VerifyReport {
     pub historical_notification_delivery_intents_verified: Option<usize>,
     /// Number of delivery events checked; unfinished claims remain unknown.
     pub historical_notification_delivery_events_verified: Option<usize>,
+    /// Whether the sealed database holds its complete original history.
+    /// `Some(false)` after retention expired history: the surviving history
+    /// was verified, the expired part is declared in `historical_retention`.
+    pub historical_complete_history: Option<bool>,
+    /// The verified retention boundary declaration. `None` when history is
+    /// un-openable.
+    pub historical_retention: Option<ArchiveRetention>,
     /// Always false: verification confirms history, it grants nothing.
     pub grants_authority: bool,
 }
@@ -183,8 +299,25 @@ fn validate_historical_semantics(store: &Store) -> Result<HistoricalSemanticCoun
         .context("reopen typed evaluation/refusal semantics")?;
     nq_core::engine::status_snapshot_v3(store)
         .context("reopen public V3 status evaluation semantics")?;
+    // Contiguous evaluation history starts above the expired-through floor;
+    // islands kept below it were reopened one by one by the typed verifier.
+    let boundary = store
+        .retention_boundary()
+        .context("read the retention boundary")?;
     let mut after = None;
     let mut through = None;
+    if boundary.generation > 0 {
+        after = Some(
+            u64::try_from(boundary.evaluation_floor)
+                .context("evaluation floor is negative")?,
+        );
+        through = Some(
+            u64::try_from(store.latest_evaluation_sequence()?)
+                .context("latest evaluation sequence is negative")?,
+        );
+    }
+    let islands = usize::try_from(store.retained_evaluations_below_floor()?)
+        .context("island count is negative")?;
     let mut public_evaluations = 0usize;
     loop {
         let page = nq_core::engine::evaluation_history_bounded(
@@ -206,9 +339,13 @@ fn validate_historical_semantics(store: &Store) -> Result<HistoricalSemanticCoun
                 .context("incomplete evaluation page lacks its continuation cursor")?,
         );
     }
+    let public_evaluations = public_evaluations
+        .checked_add(islands)
+        .context("public evaluation history count overflowed")?;
     if public_evaluations != evaluations {
         bail!(
-            "public evaluation history reopened {public_evaluations} rows; typed verifier reopened {evaluations}"
+            "public evaluation history reopened {public_evaluations} rows (including {islands} \
+             declared below the expired floor); typed verifier reopened {evaluations}"
         );
     }
     let provider_history = nq_core::engine::validate_provider_intake_history(store)
@@ -700,9 +837,20 @@ fn build_staging(config: &NqConfig, config_path: &Path, staging: &Path) -> Resul
     // backed up verified; one that open() refuses is still preserved, but its
     // historical meaning is not verifiable under this format.
     let db = staging.join("db/nq.db");
-    let source_openable = if let Ok(store) = Store::open_validating_fully(&config.database_path) {
+    let opened = match Store::open_validating_fully(&config.database_path) {
+        // Contention (another writer holds the store) or a capacity refusal
+        // is transient: refuse the archive instead of preserving the store as
+        // if it were incompatible.
+        Err(error) if error.is_refusal() => {
+            return Err(error).context("open the live store for archiving");
+        }
+        opened => opened.ok(),
+    };
+    let mut retention = None;
+    let source_openable = if let Some(store) = opened {
         validate_historical_semantics(&store)
             .context("validate source database semantics before archiving")?;
+        retention = Some(retention_declaration(&store)?);
         store.backup_verified(&db)?;
         #[cfg(test)]
         inject_staging_fault(StagingFault::CorruptStagedDatabase, &db);
@@ -744,6 +892,8 @@ fn build_staging(config: &NqConfig, config_path: &Path, staging: &Path) -> Resul
         schema_version: nq_store::SCHEMA_VERSION,
         schema_artifact_digest: nq_store::schema_artifact_digest(),
         source_openable,
+        complete_history: retention.as_ref().map(|retention| retention.generation == 0),
+        retention,
         manifest_sha256,
     };
     let metadata_bytes = serde_json::to_vec_pretty(&metadata)?;
@@ -923,7 +1073,12 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
     ) {
         (true, Ok(store)) => {
             let counts = validate_historical_semantics(&store)?;
-            Some(counts)
+            let retention = verify_retention_declaration(
+                &store,
+                metadata.complete_history,
+                metadata.retention.as_ref(),
+            )?;
+            Some((counts, retention))
         }
         (true, Err(error)) => {
             return Err(error).context(
@@ -935,7 +1090,19 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
                 "archive records source_openable=false but its preserved database opens as a valid current store"
             );
         }
-        (false, Err(_)) => None,
+        (false, Err(_)) => {
+            if metadata.complete_history.is_some() || metadata.retention.is_some() {
+                bail!(
+                    "archive records source_openable=false but declares a retention boundary it \
+                     could not have derived"
+                );
+            }
+            None
+        }
+    };
+    let (historical_counts, historical_retention) = match historical_counts {
+        Some((counts, retention)) => (Some(counts), Some(retention)),
+        None => (None, None),
     };
 
     Ok(VerifyReport {
@@ -1011,6 +1178,10 @@ pub fn verify_archive(archive: &Path) -> Result<VerifyReport> {
         historical_notification_delivery_events_verified: historical_counts
             .as_ref()
             .map(|counts| counts.notification_delivery_events),
+        historical_complete_history: historical_retention
+            .as_ref()
+            .map(|retention| retention.generation == 0),
+        historical_retention,
         grants_authority: false,
     })
 }
@@ -3006,6 +3177,58 @@ mod tests {
     }
 
     #[test]
+    fn an_unexpired_archive_declares_complete_history_at_generation_zero() {
+        let dir = tempfile::tempdir().expect("dir");
+        let archive = valid_archive(dir.path());
+        let metadata = read_metadata(&archive);
+        assert_eq!(metadata.complete_history, Some(true));
+        assert_eq!(metadata.retention.as_ref().map(|r| r.generation), Some(0));
+        let verified = verify_archive(&archive).expect("verifies");
+        assert_eq!(verified.historical_complete_history, Some(true));
+    }
+
+    #[test]
+    fn a_resealed_retention_declaration_substitution_is_rejected() {
+        let dir = tempfile::tempdir().expect("dir");
+        let archive = valid_archive(dir.path());
+        let mut metadata = read_metadata(&archive);
+        metadata
+            .retention
+            .as_mut()
+            .expect("declared retention")
+            .floors
+            .evaluation = 7;
+        write_metadata_and_seal(&archive, &mut metadata);
+        let error = verify_archive(&archive).expect_err("substituted declaration refuses");
+        assert!(
+            format!("{error:#}").contains("retention declaration disagrees"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_resealed_incomplete_history_claim_without_expiry_is_rejected_and_an_omitted_one_too() {
+        let dir = tempfile::tempdir().expect("dir");
+        let archive = valid_archive(dir.path());
+        let mut metadata = read_metadata(&archive);
+        metadata.complete_history = Some(false);
+        write_metadata_and_seal(&archive, &mut metadata);
+        let error = verify_archive(&archive).expect_err("contradictory claim refuses");
+        assert!(
+            format!("{error:#}").contains("never expired any"),
+            "{error:#}"
+        );
+        metadata.complete_history = None;
+        metadata.retention = None;
+        write_metadata_and_seal(&archive, &mut metadata);
+        let error = verify_archive(&archive).expect_err("an undeclared boundary refuses");
+        assert!(
+            format!("{error:#}").contains("does not declare the retention boundary"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn a_mutated_manifest_is_detected() {
         let dir = tempfile::tempdir().expect("dir");
         let archive = valid_archive(dir.path());
@@ -3211,6 +3434,8 @@ mod tests {
             schema_version: 1,
             schema_artifact_digest: format!("sha256:{}", "0".repeat(64)),
             source_openable: true,
+            complete_history: None,
+            retention: None,
             manifest_sha256: format!("sha256:{}", "0".repeat(64)),
         };
         fs::write(
@@ -3416,6 +3641,12 @@ mod tests {
 
         assert!(
             format!("{error:#}").contains("concurrent writer owns operation guard"),
+            "{error:#}"
+        );
+        // The contention refusal is surfaced directly, not by way of the
+        // incompatible-store preservation path.
+        assert!(
+            format!("{error:#}").contains("open the live store for archiving"),
             "{error:#}"
         );
         assert!(!archive.exists());
