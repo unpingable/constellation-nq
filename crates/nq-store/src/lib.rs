@@ -4049,6 +4049,10 @@ impl Store {
         } else {
             "?1 IS NULL".to_owned()
         };
+        // Public metadata has no raw capture field. Keep the shared stored-row
+        // mapper's column positions with an empty literal, so SQLite never reads
+        // intake.raw_bytes and a page cannot own its captures simultaneously.
+        // Invariant validation still selects the actual raw column independently.
         let sql = format!(
             "SELECT intake.intake_id, intake.attempt_id, intake.idempotency_key,
                     intake.request_id, intake.provider_admission_id,
@@ -4061,7 +4065,7 @@ impl Store {
                     intake.context_digest, intake.interpretation_kind,
                     intake.interpretation_json, intake.interpretation_digest,
                     intake.native_outcome_kind, intake.native_outcome_json,
-                    intake.native_outcome_digest, intake.raw_bytes, intake.raw_sha256,
+                    intake.native_outcome_digest, X'', intake.raw_sha256,
                     intake.started_at, intake.finished_at, intake.received_at,
                     intake.replay_digest, intake.intake_digest,
                     intake.source_admission_id, intake.provider_sequence,
@@ -18276,6 +18280,89 @@ mod tests {
         store
             .validate()
             .expect("derived provider admission validates");
+    }
+
+    #[test]
+    fn provider_intake_metadata_pages_never_read_raw_capture_column() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        let (mut store, profile_digest) = configured_store();
+        for number in 0..3 {
+            let suffix = format!("metadata-raw-{number}");
+            let run = bound_fixture_run(&mut store, "fixture-a", &suffix, &profile_digest);
+            // Construct custody and all digests through the existing fixture path.
+            let submission = SubmissionInput {
+                submission_id: format!("submission-{suffix}"),
+                raw_bytes: vec![b' '; 128 * 1024],
+                received_at: TIME.to_owned(),
+                protocol_outcome: "rejected".to_owned(),
+                disposition: SubmissionDisposition::Rejected {
+                    refusal: RefusalInput {
+                        refusal_id: format!("refusal-{suffix}"),
+                        source_kind: "protocol".to_owned(),
+                        responsible_instance_id: "fixture-a".to_owned(),
+                        boundary: "response".to_owned(),
+                        code: "invalid_response".to_owned(),
+                        profile_semantic_id: None,
+                        detail: document(json!({"fixture": suffix})),
+                        created_at: TIME.to_owned(),
+                    },
+                },
+            };
+            let collection = fixture_collection(&mut store, run, Some(submission));
+            let status = non_success_status(&collection.run.run_id, "fixture-a", &suffix);
+            store
+                .commit_non_success_collection(&collection, &status)
+                .expect("bounded capture commits");
+        }
+        store.validate().expect("full raw custody validates");
+        let expected = store.provider_intakes_bounded(10, None).unwrap();
+        assert_eq!(expected.len(), 3);
+        for row in &expected {
+            assert_eq!(
+                store
+                    .provider_intake_raw_bytes(&row.intake_id)
+                    .unwrap()
+                    .unwrap()
+                    .len(),
+                128 * 1024
+            );
+        }
+        store
+            .connection
+            .authorizer(Some(|context: AuthContext<'_>| {
+                if matches!(
+                    context.action,
+                    AuthAction::Read {
+                        table_name: "provider_intake_attempts",
+                        column_name: "raw_bytes",
+                    }
+                ) {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }));
+        let first = store.provider_intakes_bounded(2, None).unwrap();
+        let second = store
+            .provider_intakes_bounded(2, Some(&first.last().unwrap().intake_id))
+            .unwrap();
+        assert_eq!([first, second].concat(), expected);
+        // Negative controls prove the guard detects actual raw reads, including
+        // the shared invariant reader whose custody semantics must be preserved.
+        assert!(
+            store
+                .provider_intake_raw_bytes(&expected[0].intake_id)
+                .is_err()
+        );
+        assert!(store.validate_provider_intake_history_invariants().is_err());
+        store
+            .connection
+            .authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        store
+            .validate()
+            .expect("raw invariant reader remains intact");
+        assert_eq!(store.provider_intakes_bounded(10, None).unwrap(), expected);
     }
 
     #[test]
