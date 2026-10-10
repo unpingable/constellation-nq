@@ -24,7 +24,7 @@ enrolled collector before package removal. Purge is not a state-recovery procedu
 
 ## Retention and capacity: component maintenance
 
-These instructions describe the schema-v14 component. They do not activate a
+These instructions describe the schema-v15 component. They do not activate a
 collector or qualify the composed product. Stop the selected collector before
 initialization, migration or restore; a separately enrolled `nqd-ops.service`
 is a different unit whose actual limits must be inspected. Do not initialize

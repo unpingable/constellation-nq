@@ -1,6 +1,6 @@
 # Retention and capacity admission
 
-This describes the schema-v14 implementation and operator controls. It does
+This describes the schema-v15 implementation and operator controls. It does
 not qualify a deployment, a filesystem, or seven days of a particular workload.
 The intended ordinary-history window is **604800 seconds (seven days)**.
 Capacity refusal never shortens that window automatically.
@@ -111,36 +111,77 @@ Rollback recovery is admitted against the journal's original main extent and
 rewrite headroom before SQLite performs its own replay. Immutable sealed
 archive reads do not consult WAL or create sidecars.
 
-## Expiry, custody holds, and refusal
+## Expiry, declared protected holes, and refusal
 
 Ordinary collection performs dependency-aware expiry before collecting again.
 Eligibility uses local arrival/admission and completed-run times. Provider
-sample time is not permission to discard a freshly received report. The
-implementation retires contiguous global prefixes; a protected occurrence can
-hold older ordinary rows behind it.
+sample time is not permission to discard a freshly received report.
 
-Finding evidence, saved-check and notification-related history, diagnostic
-origins, successor acquisition custody, current status/report anchors, and the
-latest usable checkpoint protect their dependency closures. No general
-operator command releases those holds. The store also keeps monotonic lineage
-anchors and compact provider-intake identity commitments after removing large
-ordinary capture/history bytes. Those commitments preserve retry/idempotency
-behavior and remain charged to the byte budget; they are not free metadata.
+Each history sequence (evaluations, admitted reports, provider intakes,
+run-bound status) has an *expired-through* floor. Above a floor, history is
+complete and contiguous. A floor advances over every aged collection, including
+protected ones. At or below a floor a row survives in only two declared forms:
 
-The durable expiry boundary and deletions commit together in a FULL transaction.
-Validation checks the surviving history; a stale advisory watermark is not
-authority to delete. Reclaimed pages can be reused without reducing the main
-file's physical size. Capacity pressure, custody holds, checkpoint contention,
-or insufficient maintenance working space can cause controlled refusal.
-Preserve the database and inspect the reported cause; do not shorten the
-horizon, delete sidecars, or remove identity rows to bypass it.
+- **Island**: a whole collection kept in full because a live root needs it.
+- **Compact source record**: the identity header of an evaluation, admitted
+  report, or raw submission that a retained finding, finding-evidence, or
+  saved-check row still names. Its bodies are cleared (`source_expired=1`). It
+  records that a decision was made from a source that has since expired. It is
+  never re-verified against that source and is never paged as history.
 
-An explicit **expired** result refers to a committed retirement boundary and
-means the original requested history is no longer available for full replay.
-An **unavailable** result or ordinary missing/error condition does not prove
-retirement. Neither result means a successful full-history verification.
-Surviving-history verification and sealed pre-expiry archive inspection have
-their respective scopes.
+Roots that keep an island, and when they release it:
+
+| Root | Holds while | After release |
+| --- | --- | --- |
+| Unresolved finding | the finding's latest event is not `explicitly_absent`; only the current episode's opening event and its latest event keep full closures | the events stay; their evaluations and cited reports become compact |
+| Notification custody | any delivery for the finding event is pending; a delivery intent is terminal at `accepted`, `refused` or `failed`; a legacy outbox at `delivered`, `failed`, or exhausted retries | as above |
+| Notification outcome `unknown` | always: no later outcome can be recorded, so the hold is permanent for that occurrence | — |
+| Saved-check claim | a claim without a terminal outcome | compact |
+| Diagnostic origin, successor acquisition | always (consumer lifetime unknown) | — |
+| Latest report per instance, latest acknowledged checkpoint per checkpoint contract, current status target, newest evaluation of each evaluation lineage | while it is the latest | an ordinary candidate |
+| Reports named by a surviving full evaluation | while that evaluation survives | an ordinary candidate |
+
+Finding, notification, saved-check, diagnostic and successor rows are never
+deleted. A resolved finding therefore keeps its own consequential history and
+no longer pins any other history. A lineage whose newest evaluation is old
+keeps reporting that evaluation in status rather than disappearing. Islands
+and compact records are charged to the byte budget. If protected dependencies
+exhaust it, admission refuses rather than discarding them. The store also
+keeps monotonic lineage anchors and compact provider-intake identity
+commitments after removing large capture bytes. Those commitments preserve
+retry/idempotency behavior and are not free metadata.
+
+`nq doctor` reports the generation, the floors, the last cutoff, the horizon,
+island counts by root kind (including islands released and pending
+reclamation), compact record counts, pending and `unknown` notification
+custody, and the persisted envelope against current occupancy. When the next
+ordinary write would be refused, the `database` field reads
+`capacity_refusing` instead of `healthy`.
+
+The durable expiry boundary and its deletions and compactions commit together
+in a FULL transaction. Validation proves every row below a floor is a declared
+island or compact record; any other row is an undeclared retained row and
+fails closed, as does a live root whose closure was compacted. A stale advisory
+watermark is not authority to delete. Reclaimed pages can be reused without
+reducing the main file's physical size.
+
+Expiry is maintenance. A refused expiry (capacity, checkpoint contention, or
+history changed by a concurrent writer during validation) is logged with its
+class, and the collection continues to admission. Admission applies its own
+capacity preflight and refuses explicitly. Preserve the database and inspect
+the reported cause; do not shorten the horizon, delete sidecars, or remove
+identity rows to bypass it.
+
+An explicit **expired** result refers to a committed retirement boundary. It
+means the requested range starts in an expired region. It names the floor and
+the protected evaluations retained below it, and the API answers `410` with
+the contiguous interval that can be paged instead. An **unavailable** result or
+ordinary missing/error condition does not prove retirement. A source-expired
+record is reported as expired, never as verified. None of these results means
+a successful full-history verification. `nq admin validate --full` reports
+`history.coverage` as `bounded` after any expiry. Surviving-history
+verification and sealed pre-expiry archive inspection have their respective
+scopes.
 
 ## Backup and explicit restore
 
