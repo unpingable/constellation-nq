@@ -392,10 +392,17 @@ async fn read_evaluations(
                 through_evaluation_sequence,
                 retained_below_floor,
             })) => {
+                // Resume within the consumer's own frozen bound when it lies
+                // above the floor; otherwise from the floor to the latest.
+                let latest = store.latest_evaluation_sequence()?;
+                let through = through_sequence
+                    .and_then(|value| i64::try_from(value).ok())
+                    .filter(|value| *value > through_evaluation_sequence)
+                    .unwrap_or(latest);
                 return Err(ExpiredEvaluationHistory {
                     expired_through: through_evaluation_sequence,
                     retained_below_floor,
-                    through: store.latest_evaluation_sequence()?,
+                    through,
                 }
                 .into());
             }

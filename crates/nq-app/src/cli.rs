@@ -3333,9 +3333,28 @@ fn evaluation_history_if_supported(
     after: Option<u64>,
     through: Option<u64>,
 ) -> Result<nq_core::public::EvaluationHistoryPageV1> {
-    Ok(nq_core::engine::evaluation_history_bounded(
-        store, limit, after, through,
-    )?)
+    match nq_core::engine::evaluation_history_bounded(store, limit, after, through) {
+        Ok(page) => Ok(page),
+        // Name the boundary and the contiguous interval to page instead; the
+        // surviving rows are never presented as complete history.
+        Err(nq_core::engine::EngineError::Store(nq_store::StoreError::HistoryExpired {
+            through_evaluation_sequence,
+            retained_below_floor,
+        })) => {
+            let latest = store.latest_evaluation_sequence()?;
+            let resume_through = through
+                .and_then(|value| i64::try_from(value).ok())
+                .filter(|value| *value > through_evaluation_sequence)
+                .unwrap_or(latest);
+            bail!(
+                "history_expired: evaluation history expired through sequence \
+                 {through_evaluation_sequence}; {retained_below_floor} protected evaluations \
+                 retained below it; resume with --after {through_evaluation_sequence} --through \
+                 {resume_through}"
+            )
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn rejected_custody_if_supported(

@@ -4523,6 +4523,18 @@ impl Store {
         )?)
     }
 
+    /// Whether `evaluation_id` survives only as a compact decision record.
+    pub fn evaluation_source_expired(&self, evaluation_id: &str) -> Result<bool, StoreError> {
+        if !retention::holes_schema(&self.connection)? {
+            return Ok(false);
+        }
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM evaluation_runs WHERE evaluation_id=?1 AND source_expired=1)",
+            [evaluation_id],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Whether `report_id` survives only as a compact evidence record.
     pub fn report_source_expired(&self, report_id: &str) -> Result<bool, StoreError> {
         if !retention::holes_schema(&self.connection)? {

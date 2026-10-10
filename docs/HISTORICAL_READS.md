@@ -154,3 +154,30 @@ recovery or investigation. Removing disposable inspection outputs does not remov
 the archive; deleting an archive destroys historical records and requires its own
 ownership and recovery decision. See [Operations](OPERATIONS.md#cold-archive-and-historical-reopen)
 and the [support and redaction guide](https://unpingable.com/constellation/troubleshooting.html).
+
+## Reading across a declared retention gap
+
+A store that has expired ordinary history (`nq doctor` reports `retention.generation`
+above zero) keeps complete, contiguous history only above each expired-through floor.
+Below the floors it keeps declared islands and compact source-expired records (see
+[Retention](retention.md#what-a-consumer-sees-across-a-declared-gap)). Every reader
+either handles that gap or refuses naming the boundary; none presents the surviving
+rows as complete history.
+
+| Surface | Across the gap |
+| --- | --- |
+| `nq status export`, `/v1`–`/v3/status`, console (Monitor, Workbench) | Current state. Replays from the floor and includes declared islands, so a lineage whose newest evaluation is old keeps reporting it with its `observed_at`. No gap is crossed. |
+| `nq findings export`, `/v2`–`/v3/findings`, console | Every finding is reported. When its evaluation or a cited report survives only as a compact record, the snapshot carries `"source_expired": true` (on the finding and on that evidence entry). It is the retained decision, not re-verified evidence. The field is omitted otherwise. |
+| `GET /v1/evaluations` | A page that starts or ends at or below the evaluation floor answers `410` with `history_expired`, the floor, `retained_below_floor` and a `resume` interval (`after_sequence` = floor, `through_sequence` = the requested bound when above the floor, else the latest). The resume interval is contiguous. |
+| `nq evaluations export` | The same refusal, exit 1, as `history_expired: … resume with --after F --through T`. |
+| `nq observations export` | A compact report refuses with `historical evidence expired: <report>`; its bytes and observations are gone. |
+| `nq refusals export`, `/v1/rejected-custody` | Lists surviving rejected custody only. Expired rejected runs are gone; `nq doctor` names the floors. It is not a complete-history surface. |
+| `nq admin archive` / `archive-verify` | The archive declares `complete_history` and the `retention` boundary (generation, floors, cutoff, islands by root kind, compact counts); verification re-derives the declaration and refuses a mismatch or a complete-history claim the database cannot support. |
+| `nq admin rollover-inspect` | Reads saved checks, maintenance, notifications and successor records, which retention never deletes. Evaluation identifiers it lists may name compact decision records. |
+| `nq admin validate --full` | Validates every surviving row and reports `history.coverage` (`complete` or `bounded`), the retention report, and `prior_certification`. |
+| Nightshift (`nq --json diagnostics qualify ARTIFACT_ID`) | Diagnostic origins are protected roots and never expire, so a qualifying closure is always complete. |
+| Detector evidence windows | Read only full admitted reports. The report floor never passes a report younger than the horizon, so windows within the horizon are complete. |
+
+A consumer that needs contiguous history pages from the floor named in the refusal, or
+reads a sealed archive created before the expiry. It must not treat a missing row
+below a floor as absence of the event.

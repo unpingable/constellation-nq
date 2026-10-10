@@ -9447,7 +9447,7 @@ pub fn list_findings(store: &Store) -> Result<Vec<FindingSnapshotV3>, EngineErro
     store
         .finding_snapshots()?
         .into_iter()
-        .map(finding_from_row)
+        .map(|row| finding_with_sources(store, row))
         .collect()
 }
 
@@ -9465,7 +9465,7 @@ pub fn list_findings_bounded(
     store
         .finding_snapshots_bounded(limit, after_finding_id)?
         .into_iter()
-        .map(finding_from_row)
+        .map(|row| finding_with_sources(store, row))
         .collect()
 }
 
@@ -9773,19 +9773,21 @@ pub fn evaluation_history_bounded(
                 .map_err(|_| EngineError::Invariant("evaluation history cursor overflowed".into()))
         })
         .transpose()?;
-    if requested_through > current_through || after.is_some_and(|value| value > requested_through) {
-        return Err(EngineError::Invariant(
-            "evaluation history cursor or frozen upper bound is not present".into(),
-        ));
-    }
-
+    // A range that starts at or reaches below the expired-through floor is
+    // refused naming the floor (and the islands kept below it) before any
+    // cursor check, so a consumer whose frozen bound expired learns why.
     let expired = store.retention_boundary()?.evaluation_floor;
-    if after.unwrap_or(0) < expired {
+    if after.unwrap_or(0) < expired || (expired > 0 && requested_through < expired) {
         return Err(nq_store::StoreError::HistoryExpired {
             through_evaluation_sequence: expired,
             retained_below_floor: store.retained_evaluations_below_floor()?,
         }
         .into());
+    }
+    if requested_through > current_through || after.is_some_and(|value| value > requested_through) {
+        return Err(EngineError::Invariant(
+            "evaluation history cursor or frozen upper bound is not present".into(),
+        ));
     }
     let page_rows = store.evaluation_refusal_history_bounded(limit, after, requested_through)?;
     let cursor = after.unwrap_or(0);
@@ -11556,7 +11558,7 @@ pub fn public_query(store: &Store, sql: &str, limit: u32) -> Result<Vec<Value>, 
             store
                 .finding_snapshots_bounded(limit, None)?
                 .into_iter()
-                .map(finding_from_row)
+                .map(|row| finding_with_sources(store, row))
                 .map(|result| {
                     result.and_then(|value| {
                         serde_json::to_value(value)
@@ -11584,6 +11586,26 @@ pub fn public_query(store: &Store, sql: &str, limit: u32) -> Result<Vec<Value>, 
                 .into(),
         )),
     }
+}
+
+/// Declare, on a finding read model, the sources that expired under it: the
+/// finding's evaluation and each cited report that survives only as a compact
+/// source-expired record. The finding records a decision made from those
+/// sources; the sources are not reopened or re-verified.
+fn finding_with_sources(
+    store: &Store,
+    row: nq_store::FindingSnapshotRow,
+) -> Result<FindingSnapshotV3, EngineError> {
+    let evaluation_id = row.evaluation_id.clone();
+    let mut finding = finding_from_row(row)?;
+    if store.retention_generation()? == 0 {
+        return Ok(finding);
+    }
+    finding.source_expired = store.evaluation_source_expired(&evaluation_id)?;
+    for evidence in &mut finding.evidence {
+        evidence.source_expired = store.report_source_expired(&evidence.report_id)?;
+    }
+    Ok(finding)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -11704,6 +11726,7 @@ fn finding_from_row(row: nq_store::FindingSnapshotRow) -> Result<FindingSnapshot
                 )));
             }
         },
+        source_expired: false,
         historical_references: serde_json::from_str(&row.historical_refs_json)
             .map_err(|error| EngineError::Invariant(error.to_string()))?,
     })
@@ -15625,6 +15648,7 @@ sys.stdout.write("\n")
                     observation_ordinal: None,
                     observed_at,
                     received_at: observed_at,
+                    source_expired: false,
                 }])
                 .expect("evidence JSON"),
             };
@@ -16432,6 +16456,7 @@ sys.stdout.write("\n")
             observation_ordinal: None,
             observed_at: fixture.observed_at,
             received_at: fixture.observed_at,
+            source_expired: false,
         }])
         .expect("current evidence JSON");
         let event = build_finding_event(

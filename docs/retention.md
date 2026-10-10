@@ -241,6 +241,25 @@ scopes. A cold archive of an expired store declares its retention boundary
 compact counts) and its verification re-derives that declaration; it never
 claims complete history.
 
+### What a consumer sees across a declared gap
+
+- Above every floor, history is complete and contiguous.
+- A paged history request (`/v1/evaluations`, `nq evaluations export`) whose range
+  starts or ends at or below the evaluation floor is refused as `history_expired`,
+  naming the floor, the islands retained below it and a contiguous resume interval.
+- Current-state reads (status, findings) never cross the gap: a lineage whose newest
+  evaluation is below the floor keeps reporting that island evaluation, and a finding
+  whose evaluation or cited report is compact is marked `"source_expired": true`.
+- Byte-level reads of a compact report or retired intake refuse with
+  `historical evidence expired`.
+- Lists of surviving records (rejected custody, rollover inspection) are not
+  complete-history surfaces; `nq doctor` names the floors they are bounded by.
+- Archives declare `complete_history` and the boundary; archive verification refuses
+  a declaration that the sealed database contradicts.
+
+[Historical reads](HISTORICAL_READS.md#reading-across-a-declared-retention-gap) lists
+each surface.
+
 ## Backup and explicit restore
 
 Backup destinations and supported migration writes require capacity admission

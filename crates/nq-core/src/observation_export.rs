@@ -114,6 +114,11 @@ pub fn export_admitted_observation(
     if evidence.report_id.len() > 256 || evidence.report_id.is_empty() {
         return Err(invalid("invalid report identity bound"));
     }
+    // A compact source-expired report keeps its identity but no bytes or
+    // observations: refuse naming the expiry, not as a bound mismatch.
+    if store.report_source_expired(&evidence.report_id)? {
+        return Err(nq_store::StoreError::HistoricalEvidenceExpired(evidence.report_id.clone()).into());
+    }
     let row = store
         .admitted_evidence_reference(&evidence.report_id, &evidence.report_digest, Some(ordinal))?
         .ok_or_else(|| invalid("exact admitted evidence reference unavailable"))?;

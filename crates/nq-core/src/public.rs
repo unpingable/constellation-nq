@@ -63,6 +63,12 @@ pub struct FindingSnapshotV3 {
     pub origin_mode: OriginMode,
     /// Optional immutable legacy references.
     pub historical_references: Vec<String>,
+    /// Present and `true` when the evaluation this finding records was made
+    /// from a source that retention has since expired: the evaluation row is
+    /// a compact decision record. The finding is the retained decision; its
+    /// source is not reopened, re-verified, or presented as available.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_expired: bool,
 }
 
 /// Compiled detector identity.
@@ -172,6 +178,10 @@ pub struct PublicEvidenceReference {
     pub observed_at: DateTime<Utc>,
     /// NQ receive time.
     pub received_at: DateTime<Utc>,
+    /// Present and `true` when the cited report survives only as a compact
+    /// source-expired identity record (its bytes and observations expired).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_expired: bool,
 }
 
 /// Origin classification; it never upgrades historical context into current
