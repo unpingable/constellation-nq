@@ -1749,6 +1749,48 @@ pub struct CollectionEngine {
     /// `None` until a replay is established (open certified no semantic
     /// history): the next evaluation then replays in full.
     replay: Option<ReplayCursor>,
+    /// Outcome of the expiry attempted before the most recent collection.
+    retention_attempt: Option<RetentionAttempt>,
+}
+
+/// What the retention expiry attempted before a collection did. Expiry is
+/// maintenance: a refusal (capacity, contention, or a concurrent history
+/// change) is recorded here and the collection proceeds to admission, which
+/// applies its own capacity preflight. Integrity and invariant failures still
+/// fail the collection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RetentionAttempt {
+    /// Expiry ran; `deleted_rows` may be zero when nothing was eligible.
+    Completed(nq_store::RetentionResult),
+    /// Expiry was refused without effect.
+    Refused {
+        /// `capacity`, `contention`, `history_changed`, or `disk_full`.
+        class: &'static str,
+        /// The refusal as displayed.
+        detail: String,
+    },
+}
+
+/// Classify an expiry error: `Ok(attempt)` for a refusal the collection may
+/// proceed past, `Err` for every other failure.
+pub fn classify_retention_attempt(
+    result: Result<nq_store::RetentionResult, EngineError>,
+) -> Result<RetentionAttempt, EngineError> {
+    match result {
+        Ok(result) => Ok(RetentionAttempt::Completed(result)),
+        Err(EngineError::Store(error)) if error.is_refusal() => Ok(RetentionAttempt::Refused {
+            class: match &error {
+                nq_store::StoreError::Refused(nq_store::Refusal::Capacity(_)) => "capacity",
+                nq_store::StoreError::Refused(nq_store::Refusal::Contention(_)) => "contention",
+                nq_store::StoreError::Refused(nq_store::Refusal::HistoryChanged(_)) => {
+                    "history_changed"
+                }
+                _ => "disk_full",
+            },
+            detail: error.to_string(),
+        }),
+        Err(error) => Err(error),
+    }
 }
 
 #[derive(Debug)]
@@ -2265,6 +2307,7 @@ impl CollectionEngine {
             unix_runners: BTreeMap::new(),
             evaluator_identity: crate::evaluator_identity::resolved(),
             replay,
+            retention_attempt: None,
         })
     }
 
@@ -2319,6 +2362,7 @@ impl CollectionEngine {
                 "evaluator identity is not consulted by revocation-only custody".to_owned(),
             ),
             replay,
+            retention_attempt: None,
         };
         engine.revoke_binding(watcher)
     }
@@ -2348,7 +2392,14 @@ impl CollectionEngine {
             unix_runners: BTreeMap::new(),
             evaluator_identity,
             replay,
+            retention_attempt: None,
         })
+    }
+
+    /// What the expiry before the most recent collection did, if one ran.
+    #[must_use]
+    pub fn last_retention_attempt(&self) -> Option<&RetentionAttempt> {
+        self.retention_attempt.as_ref()
     }
 
     /// The running evaluator identity, or a typed refusal carrying the exact
@@ -2791,10 +2842,16 @@ impl CollectionEngine {
         let cutoff = Utc::now().checked_sub_signed(horizon).ok_or_else(|| {
             EngineError::Invariant("retention cutoff exceeds timestamp range".into())
         })?;
-        let expired = expire_ordinary_history(&mut self.store, &cutoff.to_rfc3339())?;
-        if expired.deleted_rows > 0 {
+        // Expiry is maintenance and never costs the collection: a refusal is
+        // recorded and admission proceeds under its own capacity preflight.
+        let attempt = classify_retention_attempt(expire_ordinary_history(
+            &mut self.store,
+            &cutoff.to_rfc3339(),
+        ))?;
+        if matches!(&attempt, RetentionAttempt::Completed(expired) if expired.deleted_rows > 0) {
             self.replay = validate_engine_open_history(&self.store)?;
         }
+        self.retention_attempt = Some(attempt);
         self.reconcile_pending_binding(watcher)?;
         let profile = resolve(watcher)?;
         let diagnostic_node_id = emit_diagnostic
@@ -8724,8 +8781,42 @@ pub fn expire_ordinary_history(
     cutoff: &str,
 ) -> Result<nq_store::RetentionResult, EngineError> {
     store.expire_ordinary_before_validated(cutoff, |snapshot| {
+        #[cfg(test)]
+        concurrent_writer_for_test(snapshot);
         validate_semantic_history(snapshot).map(|_| ())
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// One-shot concurrent-writer fixture: the next typed expiry validation
+    /// on this thread commits a status event through a second store handle.
+    static EXPIRY_CONCURRENT_WRITER_FOR_TEST: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn concurrent_writer_for_test(snapshot: &Store) {
+    if EXPIRY_CONCURRENT_WRITER_FOR_TEST.with(|armed| armed.replace(false)) {
+        let path = snapshot.path().expect("file-backed fixture");
+        // The capacity guard would refuse this writer while the snapshot is
+        // held; the fixture commits at the SQLite level, as a racing writer
+        // between the snapshot and the guarded transaction would.
+        let connection = rusqlite::Connection::open(path).expect("concurrent writer");
+        let id = format!("concurrent-writer-{}", uuid::Uuid::new_v4());
+        connection
+            .execute(
+                "INSERT INTO status_events (status_event_id, component_kind, component_id, run_id, state, code, detail_json, observed_at) VALUES (?1, 'daemon', 'concurrent-writer', NULL, 'healthy', 'concurrent_writer', CAST('{}' AS BLOB), ?2)",
+                rusqlite::params![id, timestamp(Utc::now())],
+            )
+            .expect("concurrent status write");
+        connection
+            .execute(
+                "INSERT INTO status_current (component_kind, component_id, latest_status_event_id) VALUES ('daemon', 'concurrent-writer', ?1) ON CONFLICT(component_kind, component_id) DO UPDATE SET latest_status_event_id = excluded.latest_status_event_id",
+                [&id],
+            )
+            .expect("concurrent status projection");
+    }
 }
 
 pub fn validate_semantic_history(
@@ -13104,6 +13195,137 @@ sys.stdout.write("\n")
             .expect("new collection after full-store maintenance");
         validate_evaluation_refusal_history(&store)
             .expect("native retained replay after full-store maintenance");
+    }
+
+    #[test]
+    fn expiry_refusal_is_classified_and_other_failures_propagate() {
+        let refused = classify_retention_attempt(Err(EngineError::Store(
+            nq_store::StoreError::Refused(nq_store::Refusal::HistoryChanged("during")),
+        )))
+        .expect("refusal is an attempt outcome");
+        assert!(matches!(
+            refused,
+            RetentionAttempt::Refused { class: "history_changed", ref detail }
+                if detail.contains("history changed")
+        ));
+        let capacity = classify_retention_attempt(Err(EngineError::Store(
+            nq_store::StoreError::Refused(nq_store::Refusal::Capacity("reserve".into())),
+        )))
+        .expect("capacity refusal is an attempt outcome");
+        assert!(matches!(capacity, RetentionAttempt::Refused { class: "capacity", .. }));
+        assert!(
+            classify_retention_attempt(Err(EngineError::Store(nq_store::StoreError::Integrity(
+                "expiry closure has surviving foreign-key references".into()
+            ))))
+            .is_err()
+        );
+        assert!(
+            classify_retention_attempt(Err(EngineError::Invariant("x".into()))).is_err()
+        );
+    }
+
+    #[test]
+    fn expiry_refusal_does_not_fail_the_collection() {
+        let root = tempfile::tempdir().expect("fixture directory");
+        let Some((mut engine, watcher, _)) =
+            admitted_host_diagnostic_fixture(root.path(), "expiry-continuity", b"continuity")
+        else {
+            return;
+        };
+        assert!(engine.collect(&watcher).expect("first collect").is_success());
+        assert!(matches!(
+            engine.last_retention_attempt(),
+            Some(RetentionAttempt::Completed(result)) if result.deleted_rows == 0
+        ));
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        engine.config.retention.horizon_seconds = 1;
+        let before = engine.store.retention_boundary().expect("boundary");
+        EXPIRY_CONCURRENT_WRITER_FOR_TEST.with(|armed| armed.set(true));
+        let outcome = engine
+            .collect(&watcher)
+            .expect("an expiry refusal must not fail the collection");
+        assert!(outcome.is_success(), "collection admitted despite expiry refusal");
+        assert!(
+            matches!(
+                engine.last_retention_attempt(),
+                Some(RetentionAttempt::Refused { class: "history_changed", .. })
+            ),
+            "{:?}",
+            engine.last_retention_attempt()
+        );
+        assert_eq!(engine.store.retention_boundary().expect("boundary"), before);
+        let mut config = engine.config.clone();
+        config.retention.horizon_seconds = 604_800;
+        drop(engine);
+        // Restart after the refusal: the next collection expires normally.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let mut reopened = CollectionEngine::open_with_evaluator_identity(
+            &config,
+            Ok(EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(b"continuity"))),
+        )
+        .expect("reopen after refused expiry");
+        reopened.config.retention.horizon_seconds = 1;
+        assert!(reopened.collect(&watcher).expect("collect after restart").is_success());
+        assert!(matches!(
+            reopened.last_retention_attempt(),
+            Some(RetentionAttempt::Completed(result))
+                if result.deleted_rows > 0 && result.boundary.generation > before.generation
+        ));
+    }
+
+    #[test]
+    fn exhausted_capacity_refuses_writes_and_repeated_attempts_are_bounded() {
+        let config = NqConfig::from_toml(&host_example_text()).expect("host config");
+        let watcher = &config.watchers[0];
+        let root = tempfile::tempdir().expect("bounded fixture directory");
+        let path = root.path().join("exhausted.db");
+        let mut store =
+            Store::initialize_with_capacity(&path, 604_800, Some(8 * 1024 * 1024), Some(0), Some(0))
+                .expect("8 MiB store envelope");
+        let observed = Utc::now() - Duration::seconds(30);
+        commit_real_host_detector_report(
+            &mut store, watcher, "report-exhausted", "exhausted", observed, 1.0, None,
+        );
+        let pressure = |index: usize| nq_store::StatusEventInput {
+            status_event_id: format!("exhaustion-pressure-{index}"),
+            component_kind: "daemon".into(),
+            component_id: "exhaustion-pressure".into(),
+            state: "healthy".into(),
+            code: "exhaustion_pressure".into(),
+            detail: nq_store::CanonicalDocument::from_serializable(&json!({
+                "sample": "x".repeat(64 * 1024)
+            }))
+            .expect("pressure document"),
+            observed_at: timestamp(observed),
+        };
+        let mut index = 0;
+        let first = loop {
+            match store.record_status(&pressure(index)) {
+                Ok(()) => index += 1,
+                Err(error) => break error,
+            }
+            assert!(index < 256, "finite pressure must reach refusal");
+        };
+        assert!(first.is_refusal(), "capacity exhaustion is a typed refusal: {first}");
+        // Nothing is old enough to expire: expiry completes without effect,
+        // and the collection would proceed to the refused admission.
+        let attempt = classify_retention_attempt(expire_ordinary_history(
+            &mut store,
+            &timestamp(Utc::now() - Duration::seconds(604_800)),
+        ))
+        .expect("expiry at capacity is not a failure");
+        assert!(matches!(attempt, RetentionAttempt::Completed(ref r) if r.deleted_rows == 0));
+        let bytes = std::fs::metadata(&path).expect("main file").len();
+        let statuses = store.status_history_bounded(1000, None).expect("status").len();
+        for attempt in 0..20 {
+            let error = store
+                .record_status(&pressure(10_000 + attempt))
+                .expect_err("refused while exhausted");
+            assert!(error.is_refusal(), "{error}");
+        }
+        assert_eq!(std::fs::metadata(&path).expect("main file").len(), bytes);
+        assert_eq!(store.status_history_bounded(1000, None).expect("status").len(), statuses);
+        store.validate().expect("refusals preserve the store");
     }
 
     /// Current finding states as (condition_state, visibility_state).

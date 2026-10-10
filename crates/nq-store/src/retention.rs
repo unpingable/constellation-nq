@@ -341,8 +341,8 @@ impl Store {
             .map_err(StoreError::from)
             .map_err(E::from)?;
         if after != data_version {
-            return Err(E::from(StoreError::Invariant(
-                "expiry history changed during typed semantic validation; retry against current history".into(),
+            return Err(E::from(StoreError::Refused(
+                crate::Refusal::HistoryChanged("during"),
             )));
         }
         self.expire_ordinary_before_checked(cutoff, Some(&proof))
@@ -390,9 +390,7 @@ impl Store {
                 || &current != validated_boundary
                 || &HistoryFrontier::capture_bounds(&tx)? != validated
             {
-                return Err(StoreError::Invariant(
-                    "expiry history changed after typed semantic validation; retry against current history".into(),
-                ));
+                return Err(StoreError::Refused(crate::Refusal::HistoryChanged("after")));
             }
         }
         validate_boundary(&tx)?;

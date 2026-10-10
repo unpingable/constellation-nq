@@ -61,7 +61,20 @@ pub struct CapacityObservation {
     pub auxiliary_occupied_bytes: u64,
 }
 
+/// A resource refusal: the envelope, reserve, inodes or per-file limit do not
+/// admit the operation now. Callers may retry later; nothing was written.
 fn refusal(message: impl Into<String>) -> StoreError {
+    StoreError::Refused(crate::Refusal::Capacity(message.into()))
+}
+
+/// Another reader or writer prevents the bounded write path right now.
+fn contention(message: impl Into<String>) -> StoreError {
+    StoreError::Refused(crate::Refusal::Contention(message.into()))
+}
+
+/// A persisted envelope or store file that cannot be honoured at all: a
+/// configuration or integrity fault, not a transient refusal.
+fn envelope_fault(message: impl Into<String>) -> StoreError {
     StoreError::Invariant(format!("capacity refused: {}", message.into()))
 }
 
@@ -87,7 +100,7 @@ pub fn observe(path: &Path) -> Result<CapacityObservation, StoreError> {
         match std::fs::metadata(candidate) {
             Ok(metadata) => {
                 if !metadata.is_file() {
-                    return Err(refusal("store member is not a regular file"));
+                    return Err(envelope_fault("store member is not a regular file"));
                 }
                 occupied_bytes = add(
                     occupied_bytes,
@@ -298,13 +311,13 @@ impl OperatingEnvelope {
             0,
         )?;
         if &expected != self {
-            return Err(refusal(
+            return Err(envelope_fault(
                 "persisted envelope fields disagree with derivation",
             ));
         }
         let current = observe(path)?;
         if self.schema_version != 2 || current.device != self.observed.device {
-            return Err(refusal(
+            return Err(envelope_fault(
                 "unsupported envelope or changed filesystem identity",
             ));
         }
@@ -370,7 +383,7 @@ pub fn configure(connection: &Connection, envelope: &OperatingEnvelope) -> Resul
     connection.pragma_update(None, "wal_autocheckpoint", 0)?;
     let page_size: u64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
     if page_size != envelope.page_size {
-        return Err(refusal("page size differs from persisted envelope"));
+        return Err(envelope_fault("page size differs from persisted envelope"));
     }
     let actual: u64 = connection.query_row(
         &format!("PRAGMA max_page_count={}", envelope.max_pages),
@@ -378,7 +391,7 @@ pub fn configure(connection: &Connection, envelope: &OperatingEnvelope) -> Resul
         |row| row.get(0),
     )?;
     if actual != envelope.max_pages {
-        return Err(refusal("SQLite could not apply page ceiling"));
+        return Err(envelope_fault("SQLite could not apply page ceiling"));
     }
     Ok(())
 }
@@ -396,7 +409,7 @@ pub fn checkpoint_before_write(
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?;
     if busy != 0 {
-        return Err(refusal("reader or writer prevents bounded WAL checkpoint"));
+        return Err(contention("reader or writer prevents bounded WAL checkpoint"));
     }
     envelope.preflight(path)
 }
@@ -638,7 +651,11 @@ mod tests {
             StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) => {
                 code.code == rusqlite::ErrorCode::DiskFull
             }
-            StoreError::Invariant(message) => message.starts_with("capacity refused:"),
+            StoreError::Refused(crate::Refusal::Capacity(_) | crate::Refusal::Contention(_)) => {
+                assert!(error.is_refusal());
+                assert!(error.to_string().starts_with("capacity refused: "), "{error}");
+                true
+            }
             _ => false,
         }
     }
@@ -707,13 +724,37 @@ mod tests {
         let prior = stored_status_ids(&store);
         let error = store.record_status(&status(1, 1024)).unwrap_err();
         assert!(
-            matches!(error, StoreError::Invariant(ref text) if text.contains("prevents bounded WAL checkpoint"))
+            matches!(error, StoreError::Refused(crate::Refusal::Contention(ref text)) if text.contains("prevents bounded WAL checkpoint"))
+        );
+        assert!(error.is_refusal());
+        assert!(
+            error.to_string().starts_with("capacity refused: reader or writer prevents bounded WAL checkpoint")
         );
         assert_eq!(stored_status_ids(&store), prior);
         reader.execute_batch("ROLLBACK").unwrap();
         drop(reader);
         store.record_status(&status(1, 1024)).unwrap();
         assert_eq!(stored_status_ids(&store).len(), prior.len() + 1);
+    }
+
+    #[test]
+    fn capacity_refusals_are_typed_and_configuration_faults_are_not() {
+        assert!(refusal("insufficient free inodes").is_refusal());
+        assert!(matches!(
+            refusal("insufficient free inodes"),
+            StoreError::Refused(crate::Refusal::Capacity(_))
+        ));
+        assert!(contention("reader or writer prevents bounded WAL checkpoint").is_refusal());
+        let fault = envelope_fault("page size differs from persisted envelope");
+        assert!(!fault.is_refusal());
+        assert!(matches!(fault, StoreError::Invariant(ref text) if text.starts_with("capacity refused: ")));
+        let full = StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+            None,
+        ));
+        assert!(full.is_refusal());
+        assert!(!StoreError::Integrity("x".into()).is_refusal());
+        assert!(!StoreError::Invariant("x".into()).is_refusal());
     }
 
     #[test]
@@ -724,7 +765,7 @@ mod tests {
         let error =
             operation_guard_with_timeout(&path, std::time::Duration::from_millis(10)).unwrap_err();
         assert!(
-            matches!(error, StoreError::Invariant(ref text) if text.contains("concurrent writer owns operation guard"))
+            matches!(error, StoreError::Refused(crate::Refusal::Contention(ref text)) if text.contains("concurrent writer owns operation guard"))
         );
         assert!(stored_status_ids(&first).is_empty());
         assert!(stored_status_ids(&second).is_empty());
@@ -871,7 +912,7 @@ mod tests {
         let error = crate::Store::open(&path)
             .err()
             .expect("bootstrap must refuse");
-        assert!(matches!(error, StoreError::Invariant(ref text) if text.contains("bootstrap SHM")));
+        assert!(matches!(error, StoreError::Refused(crate::Refusal::Capacity(ref text)) if text.contains("bootstrap SHM")));
         for error in [
             crate::Store::database_schema_version(&path).err(),
             crate::Store::open_read_only(&path).err(),
@@ -879,7 +920,7 @@ mod tests {
             crate::Store::open_v4_upgrade_source_read_only(&path).err(),
         ] {
             assert!(
-                matches!(error, Some(StoreError::Invariant(ref text)) if text.contains("bootstrap SHM"))
+                matches!(error, Some(StoreError::Refused(crate::Refusal::Capacity(ref text))) if text.contains("bootstrap SHM"))
             );
         }
     }
@@ -906,7 +947,7 @@ fn operation_guard_with_timeout(
     use std::os::unix::fs::OpenOptionsExt;
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
         if !metadata.is_file() || metadata.nlink() != 1 {
-            return Err(refusal("database requires an unaliased regular pathname"));
+            return Err(envelope_fault("database requires an unaliased regular pathname"));
         }
     }
     let parent = std::fs::canonicalize(
@@ -927,7 +968,7 @@ fn operation_guard_with_timeout(
         .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
         .open(parent.join(name))?;
     if !file.metadata()?.is_file() {
-        return Err(refusal("capacity lock is not a regular file"));
+        return Err(envelope_fault("capacity lock is not a regular file"));
     }
     let deadline = std::time::Instant::now() + timeout;
     loop {
@@ -945,7 +986,7 @@ fn operation_guard_with_timeout(
                 }
                 let now = std::time::Instant::now();
                 if now >= deadline {
-                    return Err(refusal(format!(
+                    return Err(contention(format!(
                         "concurrent writer owns operation guard after bounded wait: {error}"
                     )));
                 }

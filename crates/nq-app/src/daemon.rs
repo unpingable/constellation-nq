@@ -58,13 +58,23 @@ pub async fn run(options: Nqd) -> Result<()> {
     let cutoff = chrono::Utc::now()
         .checked_sub_signed(horizon)
         .context("retention cutoff exceeds timestamp range")?;
-    let expired = nq_core::engine::expire_ordinary_history(&mut store, &cutoff.to_rfc3339())?;
-    if expired.deleted_rows > 0 {
-        info!(
-            deleted_rows = expired.deleted_rows,
-            generation = expired.boundary.generation,
-            "ordinary completed history expired"
-        );
+    // Expiry is maintenance: a refusal is reported and startup continues;
+    // integrity and invariant failures still stop the daemon.
+    match nq_core::classify_retention_attempt(nq_core::engine::expire_ordinary_history(
+        &mut store,
+        &cutoff.to_rfc3339(),
+    ))? {
+        nq_core::RetentionAttempt::Completed(expired) if expired.deleted_rows > 0 => {
+            info!(
+                deleted_rows = expired.deleted_rows,
+                generation = expired.boundary.generation,
+                "ordinary completed history expired"
+            );
+        }
+        nq_core::RetentionAttempt::Completed(_) => {}
+        nq_core::RetentionAttempt::Refused { class, detail } => {
+            warn!(class, %detail, "retention expiry refused at startup; continuing");
+        }
     }
     nq_core::engine::record_component_status(
         &mut store,
@@ -265,6 +275,16 @@ async fn schedule_instance(
         })
         .await?;
         engine = returned_engine;
+        if let Some(nq_core::RetentionAttempt::Refused { class, detail }) =
+            engine.last_retention_attempt()
+        {
+            warn!(
+                instance = %watcher.instance_id,
+                class,
+                %detail,
+                "retention expiry refused; collection continued"
+            );
+        }
         let delay = match outcome {
             Ok(outcome) if outcome.is_success() => {
                 backoff = watcher.schedule.retry_backoff_seconds;
@@ -283,6 +303,14 @@ async fn schedule_instance(
                     governed_result = %governed_result,
                     "collection retained without admitted report"
                 );
+                let delay = backoff.max(1);
+                backoff = backoff
+                    .saturating_mul(2)
+                    .min(watcher.schedule.max_retry_backoff_seconds.max(1));
+                delay
+            }
+            Err(nq_core::engine::EngineError::Store(ref refused)) if refused.is_refusal() => {
+                warn!(instance = %watcher.instance_id, error = %refused, "collection refused");
                 let delay = backoff.max(1);
                 backoff = backoff
                     .saturating_mul(2)

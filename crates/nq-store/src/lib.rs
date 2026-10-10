@@ -272,6 +272,45 @@ pub enum StoreError {
     /// A validated history could not be recorded as a validation watermark.
     #[error("{0}")]
     WatermarkWrite(String),
+    /// The operation was refused without writing: a resource, contention or
+    /// concurrent-history condition, distinct from integrity or invariant
+    /// failures. A refused write leaves the store unchanged.
+    #[error(transparent)]
+    Refused(#[from] Refusal),
+}
+
+/// Why a write or retention operation was refused without effect.
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum Refusal {
+    /// The persisted envelope, filesystem reserve, inodes or per-file limit
+    /// do not admit the operation.
+    #[error("capacity refused: {0}")]
+    Capacity(String),
+    /// A reader or writer prevents the bounded write path (WAL checkpoint or
+    /// cooperating operation guard).
+    #[error("capacity refused: {0}")]
+    Contention(String),
+    /// Another writer changed history while expiry validated it; the expiry
+    /// was not applied. The phase is `during` or `after`.
+    #[error("expiry history changed {0} typed semantic validation; retry against current history")]
+    HistoryChanged(&'static str),
+}
+
+impl StoreError {
+    /// Whether this is a refusal (nothing written, retry may succeed later)
+    /// rather than an integrity or invariant failure. SQLite's own
+    /// full-database result at the persisted page ceiling is a capacity
+    /// refusal too.
+    #[must_use]
+    pub fn is_refusal(&self) -> bool {
+        match self {
+            Self::Refused(_) => true,
+            Self::Sqlite(rusqlite::Error::SqliteFailure(code, _)) => {
+                code.code == rusqlite::ErrorCode::DiskFull
+            }
+            _ => false,
+        }
+    }
 }
 
 /// A canonical JSON document and its SHA-256 semantic digest.
@@ -2022,7 +2061,7 @@ impl Store {
             || observed.available_bytes < 4096
             || observed.file_limit_bytes.is_some_and(|limit| limit < 8192)
         {
-            return Err(StoreError::Invariant("capacity refused before policy inspection: filesystem or per-file limit unavailable".into()));
+            return Err(StoreError::Refused(Refusal::Capacity("before policy inspection: filesystem or per-file limit unavailable".into())));
         }
         let _guard = capacity::operation_guard(path)?;
         capacity::bootstrap_preflight(path)?;
