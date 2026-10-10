@@ -212,11 +212,9 @@ fn collect(fixture: &Fixture, load: f64) {
 
 /// (revision, kind, evaluation source_expired, event_id), in revision order.
 fn finding_events(database: &Path) -> Vec<(i64, String, i64, String)> {
-    let connection = rusqlite::Connection::open_with_flags(
-        database,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .expect("probe");
+    let connection =
+        rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("probe");
     let mut statement = connection
         .prepare("SELECT f.event_revision, f.event_kind, e.source_expired, f.event_id FROM finding_events f JOIN evaluation_runs e ON e.evaluation_id=f.evaluation_id ORDER BY f.event_revision")
         .expect("finding query");
@@ -332,11 +330,17 @@ fn resolved_finding_closure_is_reclaimed_and_every_reader_declares_the_gap() {
     collect(&fixture, 1.0);
     let events = finding_events(&fixture.database);
     assert_eq!(
-        events.iter().map(|event| event.1.as_str()).collect::<Vec<_>>(),
+        events
+            .iter()
+            .map(|event| event.1.as_str())
+            .collect::<Vec<_>>(),
         ["opened", "updated", "updated", "resolved"],
         "{events:?}"
     );
-    assert_eq!(events[0].2, 0, "pending custody keeps the opening closure: {events:?}");
+    assert_eq!(
+        events[0].2, 0,
+        "pending custody keeps the opening closure: {events:?}"
+    );
     // Custody reaches terminal states.
     {
         let mut store = Store::open(&fixture.database).expect("store");
@@ -358,7 +362,11 @@ fn resolved_finding_closure_is_reclaimed_and_every_reader_declares_the_gap() {
 
     // The closure is compacted; the finding's own history rows are intact.
     let events = finding_events(&fixture.database);
-    assert_eq!(events.len(), 4, "finding events are never deleted: {events:?}");
+    assert_eq!(
+        events.len(),
+        4,
+        "finding events are never deleted: {events:?}"
+    );
     assert!(
         events.iter().all(|event| event.2 == 1),
         "every released decision is a compact record: {events:?}"
@@ -367,11 +375,25 @@ fn resolved_finding_closure_is_reclaimed_and_every_reader_declares_the_gap() {
     let doctor = success(run(&fixture, &["doctor"]));
     let retention = &doctor["retention"];
     assert!(retention["generation"].as_i64().unwrap() > 0, "{doctor}");
-    assert_eq!(retention["islands_by_root"]["released_pending"], 0, "{doctor}");
-    assert_eq!(retention["islands_by_root"]["notification_custody"], 0, "{doctor}");
+    assert_eq!(
+        retention["islands_by_root"]["released_pending"], 0,
+        "{doctor}"
+    );
+    assert_eq!(
+        retention["islands_by_root"]["notification_custody"], 0,
+        "{doctor}"
+    );
     assert_eq!(retention["custody_pending_events"], 0, "{doctor}");
-    assert!(retention["compact_evaluations"].as_i64().unwrap() >= 4, "{doctor}");
-    assert!(doctor["expiry_schedule"]["quantum_seconds"].as_u64().is_some(), "{doctor}");
+    assert!(
+        retention["compact_evaluations"].as_i64().unwrap() >= 4,
+        "{doctor}"
+    );
+    assert!(
+        doctor["expiry_schedule"]["quantum_seconds"]
+            .as_u64()
+            .is_some(),
+        "{doctor}"
+    );
 
     // Status export still reports the lineage, with its last evaluation.
     let status = success(run(&fixture, &["status", "export"]));
@@ -382,7 +404,10 @@ fn resolved_finding_closure_is_reclaimed_and_every_reader_declares_the_gap() {
         .find(|component| component["kind"] == "evaluation")
         .unwrap_or_else(|| panic!("the lineage stays in status: {status}"));
     assert_eq!(lineage["code"], "condition_explicitly_absent", "{lineage}");
-    assert!(lineage["observed_at"].is_string(), "last-evaluated time: {lineage}");
+    assert!(
+        lineage["observed_at"].is_string(),
+        "last-evaluated time: {lineage}"
+    );
 
     // Findings export reports the resolved finding with its decision marked
     // as made from a source that has since expired.
@@ -393,14 +418,19 @@ fn resolved_finding_closure_is_reclaimed_and_every_reader_declares_the_gap() {
         .first()
         .unwrap_or_else(|| panic!("the resolved finding is reported: {findings}"))
         .clone();
-    assert_eq!(finding["condition"]["state"], "explicitly_absent", "{finding}");
+    assert_eq!(
+        finding["condition"]["state"], "explicitly_absent",
+        "{finding}"
+    );
     assert_eq!(finding["source_expired"], true, "{finding}");
 
     // The first evaluations page names the floor and a contiguous resume.
     let (code, gone) = api_get(&fixture, "/v1/evaluations?limit=10");
     assert_eq!(code, 410, "{gone}");
     assert_eq!(gone["error"], "history_expired");
-    let floor = gone["expired_through_evaluation_sequence"].as_i64().unwrap();
+    let floor = gone["expired_through_evaluation_sequence"]
+        .as_i64()
+        .unwrap();
     let through = gone["resume"]["through_sequence"].as_i64().unwrap();
     assert_eq!(gone["resume"]["after_sequence"].as_i64(), Some(floor));
     let (code, page) = api_get(
@@ -437,13 +467,23 @@ fn resolved_finding_closure_is_reclaimed_and_every_reader_declares_the_gap() {
     let archive = fixture.root.join("archive");
     success(run(
         &fixture,
-        &["admin", "archive", "--destination", archive.to_str().unwrap()],
+        &[
+            "admin",
+            "archive",
+            "--destination",
+            archive.to_str().unwrap(),
+        ],
     ));
     let metadata: Value =
         serde_json::from_slice(&fs::read(archive.join("ARCHIVE.json")).unwrap()).unwrap();
     assert_eq!(metadata["complete_history"], false, "{metadata}");
     assert!(metadata["retention"]["generation"].as_i64().unwrap() > 0);
-    assert!(metadata["retention"]["compact_counts"]["evaluations"].as_i64().unwrap() >= 4);
+    assert!(
+        metadata["retention"]["compact_counts"]["evaluations"]
+            .as_i64()
+            .unwrap()
+            >= 4
+    );
     assert!(metadata["retention"]["islands_by_root"].is_object());
     let verified = Command::new(archive.join("bin/nq"))
         .args(["--json", "admin", "archive-verify"])
@@ -482,7 +522,10 @@ fn unknown_notification_custody_keeps_its_island_through_every_expiry() {
     assert!(retention["generation"].as_i64().unwrap() > 0, "{doctor}");
     assert_eq!(retention["custody_unknown_events"], 1, "{doctor}");
     assert!(
-        retention["islands_by_root"]["notification_custody"].as_i64().unwrap() >= 1,
+        retention["islands_by_root"]["notification_custody"]
+            .as_i64()
+            .unwrap()
+            >= 1,
         "{doctor}"
     );
 }
