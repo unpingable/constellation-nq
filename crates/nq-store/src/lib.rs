@@ -34,6 +34,8 @@ pub use history_scope::{
     VALIDATION_WATERMARK_SCHEMA, ValidationWatermark, sql_work_count, start_sql_work_count,
     stop_sql_work_count, watermark_path,
 };
+/// Every append-only history table a validation watermark covers.
+pub const HISTORY_TABLE_NAMES: &[&str] = history_scope::HISTORY_TABLES;
 use history_scope::{Scope, StoreIdentity};
 
 const SCHEMA: &str = include_str!("schema.sql");

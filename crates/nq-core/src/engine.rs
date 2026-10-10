@@ -2396,6 +2396,13 @@ impl CollectionEngine {
         })
     }
 
+    /// The engine's own store handle, for measurements that drive store
+    /// operations through the handle an engine opened.
+    #[cfg(test)]
+    pub(crate) fn store_mut_for_test(&mut self) -> &mut Store {
+        &mut self.store
+    }
+
     /// What the expiry before the most recent collection did, if one ran.
     #[must_use]
     pub fn last_retention_attempt(&self) -> Option<&RetentionAttempt> {
@@ -13843,83 +13850,229 @@ sys.stdout.write("\n")
             .expect("cited report")
     }
 
-    /// COST SPECIMEN (NQ #27 audit, DEFECT 4): with the prefix pinned by a
-    /// resolved finding, every expiry call still passes `prefix_may_advance`
-    /// and pays full validation before rolling back. Measures wall time per
-    /// call against retained collections. Run with --ignored --nocapture.
-    #[test]
-    #[ignore = "audit cost measurement; minutes of runtime"]
-    fn audit_specimen_pinned_expiry_cost_scales_with_retained_history() {
-        let config = NqConfig::from_toml(&host_example_text()).expect("host config");
-        let watcher = &config.watchers[0];
-        let directory = tempfile::tempdir().expect("fixture directory");
-        let path = directory.path().join("pinned-cost.db");
-        let mut store = Store::initialize_with_capacity(
-            &path,
-            604_800,
-            Some(1024 * 1024 * 1024),
-            Some(0),
-            Some(0),
-        )
-        .expect("bounded store");
-        let targets: Vec<usize> = std::env::var("NQ_AUDIT_S4_TARGETS")
-            .ok()
-            .map(|value| value.split(',').map(|n| n.parse().expect("target")).collect())
-            .unwrap_or_else(|| vec![500, 2000, 8000]);
+    /// NQ #27 S4 fixture at `path`: one resolved finding, one open finding
+    /// (kept open by every later collection) and one `unknown`-custody
+    /// notification, all aged and expired (generation >= 1); then one aged
+    /// candidate collection at the prefix and `target` collections in total,
+    /// none aged at the returned candidate cutoff. Returns (first cutoff,
+    /// candidate cutoff, growth milliseconds).
+    fn s4_fixture(path: &Path, watcher: &WatcherConfig, target: usize) -> (String, String, f64) {
+        let mut store =
+            Store::initialize_with_capacity(path, 604_800, Some(1024 * 1024 * 1024), Some(0), Some(0))
+                .expect("bounded store");
         let mut committed = 0usize;
-        let commit = |store: &mut Store, load: f64, committed: &mut usize| {
-            let suffix = format!("audit-cost-{committed}");
+        let mut commit = |store: &mut Store, observed: DateTime<Utc>, load: f64| {
+            let suffix = format!("s4-{committed}");
             commit_real_host_detector_report(
                 store,
                 watcher,
                 &format!("report-{suffix}"),
                 &suffix,
-                Utc::now() - Duration::seconds(30),
+                observed,
                 load,
                 None,
             );
-            *committed += 1;
+            committed += 1;
+            committed
         };
-        // Pin: one present (opens a finding), one absent (resolves it).
-        commit(&mut store, 8.0, &mut committed);
-        commit(&mut store, 1.0, &mut committed);
+        let base = Utc::now() - Duration::seconds(30);
+        for (index, load) in [8.0, 1.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0].iter().enumerate() {
+            commit(&mut store, base + Duration::milliseconds(i64::try_from(index).unwrap() * 10), *load);
+        }
+        let first_event: String = rusqlite::Connection::open(path)
+            .expect("probe")
+            .query_row("SELECT event_id FROM finding_events ORDER BY event_revision LIMIT 1", [], |r| r.get(0))
+            .expect("first finding event");
+        let notification = nq_store::NotificationInput {
+            notification_id: "s4-unknown".into(),
+            idempotency_key: "key-s4-unknown".into(),
+            finding_event_id: Some(first_event.clone()),
+            destination_kind: "fixture".into(),
+            payload: canonical(&json!({"fixture": "s4"})).expect("payload"),
+            available_at: timestamp(Utc::now()),
+            max_attempts: 3,
+            created_at: timestamp(Utc::now()),
+        };
+        store
+            .retain_notification_delivery(
+                &notification,
+                &nq_store::NotificationDeliveryIntentInput {
+                    notification_id: "s4-unknown".into(),
+                    stable_event_id: first_event,
+                    attention_kind: "operator_assertion".into(),
+                    attention_receipt_digest: None,
+                    attention_policy_id: "fixture-policy".into(),
+                    attention_policy_digest: nq_protocol::sha256_bytes(b"policy").as_str().to_owned(),
+                    transition_id: "fixture-transition".into(),
+                    route_reference: "fixture-route".into(),
+                    destination_identity: "fixture-destination".into(),
+                    content_digest: nq_protocol::sha256_bytes(b"content").as_str().to_owned(),
+                    intent: canonical(&json!({"fixture": "intent"})).expect("intent"),
+                    created_at: timestamp(Utc::now()),
+                },
+            )
+            .expect("delivery intent");
+        for (number, outcome) in [(1, "claimed"), (2, "unknown")] {
+            store
+                .append_notification_delivery_event(&nq_store::NotificationDeliveryEventInput {
+                    notification_id: "s4-unknown".into(),
+                    event_number: number,
+                    occurred_at: timestamp(Utc::now()),
+                    outcome: outcome.into(),
+                    detail: canonical(&json!({})).expect("detail"),
+                })
+                .expect("delivery event");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let first_cutoff = timestamp(Utc::now());
+        let first = expire_ordinary_history(&mut store, &first_cutoff).expect("first expiry");
+        assert!(first.boundary.generation >= 1, "{first:?}");
+        commit(&mut store, Utc::now() - Duration::seconds(1), 8.0);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let candidate_cutoff = timestamp(Utc::now());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let grow = std::time::Instant::now();
+        while commit(&mut store, Utc::now() - Duration::seconds(1), 8.0) < target {}
+        let grow_ms = grow.elapsed().as_secs_f64() * 1000.0;
+        // Reclaim the islands released while growing (each new open-finding
+        // event supersedes the latest one), so (d) below has no candidate.
+        expire_ordinary_history(&mut store, &first_cutoff).expect("settling expiry");
+        (first_cutoff, candidate_cutoff, grow_ms)
+    }
+
+    /// NQ #27 S4 measurement (adapted from the audit cost specimen, which is
+    /// preserved on audit/nq-27-specimens-20261010): open and expiry cost
+    /// against retained collections after a generation transition. For each
+    /// N (env `NQ_S4_TARGETS`, default 50,100,200,400,800) a fresh
+    /// [`s4_fixture`] is built and, with all handles dropped, this times (a)
+    /// `Store::open_with_capacity`, (b) `CollectionEngine::open`, (c) a second
+    /// (a)+(b), (d) an expiry with zero candidates and (e) an expiry with
+    /// exactly one candidate, each with the SQL work counter. A final
+    /// released-island cycle must reduce the row count. Run with `--ignored
+    /// --nocapture`; it prints the table and the acceptance verdicts.
+    #[test]
+    #[ignore = "NQ #27 S4 measurement; minutes of runtime"]
+    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+    fn retention_open_cost_is_flat_in_retained_collections() {
+        let mut config = NqConfig::from_toml(&host_example_text()).expect("host config");
+        config.retention = crate::config::RetentionConfig {
+            horizon_seconds: 604_800,
+            byte_ceiling: Some(1024 * 1024 * 1024),
+            reserve_bytes: Some(0),
+            auxiliary_bytes: Some(0),
+        };
+        let watcher = config.watchers[0].clone();
+        let targets: Vec<usize> = std::env::var("NQ_S4_TARGETS")
+            .ok()
+            .map(|value| value.split(',').map(|n| n.trim().parse().expect("target")).collect())
+            .unwrap_or_else(|| vec![50, 100, 200, 400, 800]);
+        let measure = |work: &mut dyn FnMut()| -> (f64, u64) {
+            nq_store::start_sql_work_count();
+            let started = std::time::Instant::now();
+            work();
+            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+            (elapsed, nq_store::stop_sql_work_count().unwrap_or(0))
+        };
+        let rows = |path: &Path| -> i64 {
+            let connection = rusqlite::Connection::open(path).expect("probe");
+            nq_store::HISTORY_TABLE_NAMES
+                .iter()
+                .map(|table| {
+                    connection
+                        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get::<_, i64>(0))
+                        .expect("count")
+                })
+                .sum()
+        };
+        let mut table = Vec::new();
+        let mut last_path = None;
+        let directory = tempfile::tempdir().expect("fixture directory");
         for target in targets {
-            let grow = std::time::Instant::now();
-            let start = committed;
-            while committed < target {
-                commit(&mut store, 1.0, &mut committed);
-            }
-            let grow_seconds = grow.elapsed().as_secs_f64();
-            let per_commit_ms = if committed > start {
-                grow_seconds * 1000.0 / (committed - start) as f64
-            } else {
-                0.0
+            let path = directory.path().join(format!("s4-{target}.db"));
+            config.database_path = path.clone();
+            let (first_cutoff, candidate_cutoff, grow_ms) = s4_fixture(&path, &watcher, target);
+            let open_pair = |config: &NqConfig| {
+                let mut opened = None;
+                let store_cost = measure(&mut || {
+                    opened = Some(
+                        Store::open_with_capacity(&config.database_path, 604_800, Some(1024 * 1024 * 1024), Some(0), Some(0))
+                            .expect("store open"),
+                    );
+                });
+                let mode = opened
+                    .as_ref()
+                    .map_or("none", |store| if store.applied_watermark().is_some() { "since_watermark" } else { "full" });
+                drop(opened);
+                let mut engine = None;
+                let engine_cost = measure(&mut || {
+                    engine = Some(CollectionEngine::open(config).expect("engine open"));
+                });
+                drop(engine);
+                (store_cost, engine_cost, mode)
             };
-            std::thread::sleep(std::time::Duration::from_millis(1100));
-            let cutoff = timestamp(Utc::now());
-            let file_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            let validated = std::time::Instant::now();
-            let result = expire_ordinary_history(&mut store, &cutoff).expect("pinned expiry");
-            let validated_seconds = validated.elapsed().as_secs_f64();
-            let store_only = std::time::Instant::now();
-            let result_store = store
-                .expire_ordinary_before(&cutoff)
-                .expect("store-only pinned expiry");
-            let store_seconds = store_only.elapsed().as_secs_f64();
+            let (a, b, first_mode) = open_pair(&config);
+            let (c_store, c_engine, second_mode) = open_pair(&config);
+            let c = (c_store.0 + c_engine.0, c_store.1 + c_engine.1);
+            let mut engine = CollectionEngine::open(&config).expect("engine for expiry");
+            let mut zero = None;
+            let d = measure(&mut || {
+                let store = engine.store_mut_for_test();
+                store.count_sql_work_on_this_handle();
+                zero = Some(expire_ordinary_history(store, &first_cutoff).expect("zero-candidate expiry"));
+            });
+            let zero = zero.expect("zero result");
+            let mut one = None;
+            let e = measure(&mut || {
+                let store = engine.store_mut_for_test();
+                store.count_sql_work_on_this_handle();
+                one = Some(expire_ordinary_history(store, &candidate_cutoff).expect("one-candidate expiry"));
+            });
+            let one = one.expect("one result");
+            drop(engine);
+            let retained = rows(&path);
             println!(
-                "S4 N={committed} file_bytes={file_bytes} grow_s={grow_seconds:.1} commit_ms_avg={per_commit_ms:.2} \
-                 expire_ordinary_history_s={validated_seconds:.3} expire_ordinary_before_s={store_seconds:.3} \
-                 deleted={}/{} boundary={:?}",
-                result.deleted_rows, result_store.deleted_rows, result.boundary
+                "S4C N={target} rows={retained} grow_ms={grow_ms:.0} \
+                 a_ms={:.1} a_ticks={} b_ms={:.1} b_ticks={} c_ms={:.1} c_ticks={} \
+                 d_ms={:.1} d_ticks={} d_deleted={} e_ms={:.1} e_ticks={} e_deleted={} gen={} open={first_mode}/{second_mode}",
+                a.0, a.1, b.0, b.1, c.0, c.1, d.0, d.1, zero.deleted_rows, e.0, e.1, one.deleted_rows,
+                one.boundary.generation
             );
-            assert_eq!(result.deleted_rows, 0, "prefix pinned by resolved finding");
-            assert_eq!(result_store.deleted_rows, 0);
-            // Fixture growth cost (full evaluation snapshot per commit) is not
-            // the quantity under measurement; bound it separately.
-            if validated_seconds > 300.0 || grow_seconds > 1800.0 {
-                println!("S4 stopping: expiry call exceeded 5 minutes or growth exceeded 30");
-                break;
-            }
+            table.push((target, c, e, one.deleted_rows, zero.deleted_rows));
+            last_path = Some((path, candidate_cutoff));
+        }
+        // Released-island cycle on the last fixture: resolve the open
+        // finding, then reclaim its released islands with no newly aged
+        // history (the cutoff precedes the resolving collection).
+        let (path, cutoff) = last_path.expect("at least one target");
+        let mut store = Store::open(&path).expect("reopen for release");
+        commit_real_host_detector_report(
+            &mut store,
+            &watcher,
+            "report-s4-resolve",
+            "s4-resolve",
+            Utc::now() - Duration::seconds(1),
+            1.0,
+            None,
+        );
+        let before_rows = rows(&path);
+        let released = store.retention_report().expect("report").islands_by_root.get("released_pending").copied();
+        let reclaimed = expire_ordinary_history(&mut store, &cutoff).expect("released-island cycle");
+        let after_rows = rows(&path);
+        println!(
+            "S4C released-island cycle: released_pending={released:?} rows {before_rows}->{after_rows} deleted={} generation={}",
+            reclaimed.deleted_rows, reclaimed.boundary.generation
+        );
+        if let (Some(first), Some(last)) = (table.first(), table.last()) {
+            let wall_ratio = last.1 .0 / first.1 .0;
+            let tick_ratio = last.1 .1 as f64 / first.1 .1.max(1) as f64;
+            let slope = (last.2 .0 - first.2 .0) / (last.0 as f64 - first.0 as f64);
+            let exact = table.iter().all(|row| row.3 > 0 && row.4 == 0);
+            println!(
+                "S4C acceptance: (c) wall N={}/N={} = {wall_ratio:.2} (<=1.50: {}); (c) ticks ratio = {tick_ratio:.3} (<=1.10: {}); \
+                 (e) slope = {slope:.4} ms/collection (<=0.3: {}); (d) zero and (e) one candidate each round: {exact}; \
+                 released cycle reduces rows: {}",
+                last.0, first.0, wall_ratio <= 1.5, tick_ratio <= 1.10, slope <= 0.3, after_rows < before_rows
+            );
         }
     }
 

@@ -918,6 +918,13 @@ fn remove_stale_temporaries(path: &Path) {
 /// Each returns the records whose obligations are not covered by `frontier`,
 /// in append order; the caller reopens and validates exactly those.
 impl crate::Store {
+    /// Count this handle's SQL work into the thread's work counter (see
+    /// [`start_sql_work_count`]) from now on, for a handle opened before
+    /// counting started. Measurement only; inert unless counting.
+    pub fn count_sql_work_on_this_handle(&self) {
+        install_sql_work_counter(&self.connection);
+    }
+
     /// The watermark this handle's open applied, or `None` when the open
     /// validated history in full.
     #[must_use]
