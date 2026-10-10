@@ -14170,6 +14170,16 @@ mod tests {
         suffix: &str,
         receipt: &str,
     ) -> CollectionInput {
+        retention_collection_with_raw(store, profile, suffix, receipt, suffix.as_bytes().to_vec())
+    }
+
+    fn retention_collection_with_raw(
+        store: &mut Store,
+        profile: &str,
+        suffix: &str,
+        receipt: &str,
+        raw_bytes: Vec<u8>,
+    ) -> CollectionInput {
         let receipt = chrono::DateTime::parse_from_rfc3339(receipt)
             .expect("retention fixture receipt")
             .to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -14199,12 +14209,243 @@ mod tests {
             bound,
             Some(SubmissionInput {
                 submission_id: format!("submission-{suffix}"),
-                raw_bytes: suffix.as_bytes().to_vec(),
+                raw_bytes,
                 received_at: receipt,
                 protocol_outcome: "valid_report".into(),
                 disposition: SubmissionDisposition::Admitted(observed),
             }),
         )
+    }
+
+    fn retention_qualification_phase(
+        store: &Store,
+        case: &str,
+        phase: &str,
+        started: std::time::Instant,
+    ) {
+        let secure_delete: i64 = store
+            .connection
+            .query_row("PRAGMA secure_delete", [], |r| r.get(0))
+            .unwrap();
+        let sqlite_version: String = store
+            .connection
+            .query_row("SELECT sqlite_version()", [], |r| r.get(0))
+            .unwrap();
+        let options: Vec<String> = store
+            .connection
+            .prepare("PRAGMA compile_options")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let memory: Vec<String> = std::fs::read_to_string("/proc/self/status")
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.starts_with("VmHWM:") || line.starts_with("VmRSS:"))
+            .map(str::to_owned)
+            .collect();
+        let (identities, retired): (i64, i64) = store
+            .connection
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(history_expired),0) FROM provider_intake_attempts",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        println!(
+            "{}",
+            json!({"qualification":"retention", "case":case, "phase":phase,
+            "phase_elapsed_ms":started.elapsed().as_millis(), "identities":identities,
+            "retired_identities":retired, "sqlite_version":sqlite_version,
+            "secure_delete":secure_delete, "compile_options":options, "process_memory":memory})
+        );
+    }
+
+    #[test]
+    #[ignore = "bounded cardinality qualification; root admits durable serialized runner"]
+    fn retained_identity_cardinality_two_expiry_cycles_qualification() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1800);
+        for cardinality in [128_usize, 4096] {
+            let root = tempdir().unwrap();
+            let path = root.path().join("cardinality.db");
+            let mut store = Store::initialize_with_capacity(
+                &path,
+                604800,
+                Some(256 * 1024 * 1024),
+                Some(1024 * 1024),
+                Some(1024 * 1024),
+            )
+            .unwrap();
+            let profile = append_fixture_descriptor(&mut store);
+            // The installed daemon opens an initialized database before collection.
+            // Reopen establishes its validated frontier rather than repeatedly
+            // scanning all history through the fresh-initialize fixture handle.
+            drop(store);
+            store = Store::open(&path).unwrap();
+            let case = format!("identities-{cardinality}");
+            let mut controls = Vec::new(); // Exactly two small intake inputs, not all identities.
+            for cycle in 0..2 {
+                let started = std::time::Instant::now();
+                for number in 0..cardinality {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "finite qualification deadline"
+                    );
+                    let suffix = format!("q{cycle}-{number:04}");
+                    let receipt = if cycle == 0 {
+                        TIME
+                    } else {
+                        "2100-01-02T00:00:00Z"
+                    };
+                    let collection = retention_collection(&mut store, &profile, &suffix, receipt);
+                    assert!(collection.intake.raw_bytes.len() <= 1024);
+                    if number == 0 {
+                        controls.push(collection.intake.clone());
+                    }
+                    commit_admitted_fixture(&mut store, collection).unwrap();
+                    if (number + 1) % 128 == 0 {
+                        retention_qualification_phase(
+                            &store,
+                            &case,
+                            &format!("populate-cycle-{cycle}-committed-{}", number + 1),
+                            started,
+                        );
+                    }
+                }
+                retention_qualification_phase(&store, &case, "populate", started);
+                let started = std::time::Instant::now();
+                let cutoff = if cycle == 0 {
+                    "2100-01-01T00:00:00Z"
+                } else {
+                    "2100-01-03T00:00:00Z"
+                };
+                let expiry = store.expire_ordinary_before(cutoff).unwrap();
+                assert!(expiry.deleted_rows > 0);
+                assert_eq!(admitted_report_count(&store), 1);
+                assert_eq!(
+                    expiry.boundary.report_floor,
+                    ((cycle + 1) * cardinality - 1) as i64
+                );
+                retention_qualification_phase(&store, &case, "retire", started);
+                let started = std::time::Instant::now();
+                // Full validation recomputes every retired identity commitment digest.
+                store.validate().unwrap();
+                retention_qualification_phase(&store, &case, "validate", started);
+                drop(store);
+                store = Store::open(&path).unwrap();
+                store.validate().unwrap();
+                for original in &controls {
+                    assert!(matches!(
+                        store.preflight_provider_intake(original),
+                        Err(StoreError::HistoricalEvidenceExpired(_))
+                    ));
+                    let mut changed = original.clone();
+                    changed.received_at = "2100-01-04T00:00:00Z".into();
+                    changed.raw_bytes = b"changed original identity".to_vec();
+                    assert!(matches!(
+                        store.preflight_provider_intake(&changed),
+                        Err(StoreError::ReplayConflict(_))
+                    ));
+                }
+                let (total, retired): (i64, i64) = store
+                    .connection
+                    .query_row(
+                        "SELECT COUNT(*), SUM(history_expired) FROM provider_intake_attempts",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(total, ((cycle + 1) * cardinality) as i64);
+                assert_eq!(retired, total - 1);
+                retention_qualification_phase(&store, &case, "reopen-and-replay", started);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "bounded configured capture qualification; root admits durable serialized runner"]
+    fn eight_one_mib_captures_store_custody_expiry_qualification() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("captures.db");
+        // 64 MiB aggregate explicitly accommodates duplicate raw custody and WAL.
+        let mut store = Store::initialize_with_capacity(
+            &path,
+            604800,
+            Some(64 * 1024 * 1024),
+            Some(1024 * 1024),
+            Some(1024 * 1024),
+        )
+        .unwrap();
+        let profile = append_fixture_descriptor(&mut store);
+        let started = std::time::Instant::now();
+        let mut original = None;
+        for number in 0..8 {
+            let suffix = format!("capture-{number}");
+            let receipt = if number == 7 {
+                "2100-01-02T00:00:00Z"
+            } else {
+                TIME
+            };
+            let collection = retention_collection_with_raw(
+                &mut store,
+                &profile,
+                &suffix,
+                receipt,
+                vec![b' '; 1024 * 1024],
+            );
+            if number == 0 {
+                original = Some(collection.intake.clone());
+            }
+            commit_admitted_fixture(&mut store, collection).unwrap();
+        }
+        store.validate().unwrap();
+        let raw_bytes: i64 = store
+            .connection
+            .query_row(
+                "SELECT SUM(length(raw_bytes)) FROM provider_intake_attempts",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw_bytes, 8 * 1024 * 1024);
+        retention_qualification_phase(&store, "eight-one-mib", "populate-and-validate", started);
+        let started = std::time::Instant::now();
+        assert!(
+            store
+                .expire_ordinary_before("2100-01-01T00:00:00Z")
+                .unwrap()
+                .deleted_rows
+                > 0
+        );
+        assert_eq!(admitted_report_count(&store), 1);
+        store.verify_admitted_snapshot("report-capture-7").unwrap();
+        store.validate().unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        store.validate().unwrap();
+        let original = original.unwrap();
+        assert!(matches!(
+            store.preflight_provider_intake(&original),
+            Err(StoreError::HistoricalEvidenceExpired(_))
+        ));
+        let mut changed = original;
+        changed.received_at = "2100-01-02T00:00:00Z".into();
+        changed.raw_bytes = b"changed capture".to_vec();
+        assert!(matches!(
+            store.preflight_provider_intake(&changed),
+            Err(StoreError::ReplayConflict(_))
+        ));
+        let raw_bytes: i64 = store
+            .connection
+            .query_row(
+                "SELECT SUM(length(raw_bytes)) FROM provider_intake_attempts",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw_bytes, 1024 * 1024);
+        retention_qualification_phase(&store, "eight-one-mib", "retire-validate-reopen", started);
     }
 
     #[test]
