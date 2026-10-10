@@ -66,6 +66,9 @@ pub struct NqConfig {
     /// Root for NQ-owned private persistent-helper socket directories.
     #[serde(default = "default_helper_runtime_dir")]
     pub helper_runtime_dir: PathBuf,
+    /// Bounded ordinary history and persisted storage-envelope overrides.
+    #[serde(default)]
+    pub retention: RetentionConfig,
     /// Independently scheduled watcher instances.
     #[serde(default)]
     pub watchers: Vec<WatcherConfig>,
@@ -73,6 +76,33 @@ pub struct NqConfig {
     /// is resolved only at an enabled dispatch boundary and is never stored.
     #[serde(default)]
     pub notification_routes: Vec<NotificationRouteConfig>,
+}
+
+/// Retention policy overrides. Automatic sizing is chosen once and persisted;
+/// a restart never silently replaces that envelope with a smaller one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct RetentionConfig {
+    /// Ordinary completed history availability window; defaults to seven days.
+    pub horizon_seconds: u64,
+    /// Aggregate byte ceiling override, including main database and auxiliaries.
+    pub byte_ceiling: Option<u64>,
+    /// Free-space reserve override. Absent uses the larger of 1 GiB and 20% of
+    /// filesystem capacity when the first envelope is established.
+    pub reserve_bytes: Option<u64>,
+    /// Metadata and housekeeping allowance override; automatic default is 64 MiB.
+    pub auxiliary_bytes: Option<u64>,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            horizon_seconds: 7 * 24 * 60 * 60,
+            byte_ceiling: None,
+            reserve_bytes: None,
+            auxiliary_bytes: None,
+        }
+    }
 }
 
 /// One bounded notification route.
@@ -431,6 +461,30 @@ impl NqConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.schema != CONFIG_SCHEMA {
             return Err(invalid("schema", format!("expected {CONFIG_SCHEMA}")));
+        }
+        if self.retention.horizon_seconds == 0
+            || i64::try_from(self.retention.horizon_seconds)
+                .ok()
+                .and_then(chrono::TimeDelta::try_seconds)
+                .and_then(|duration| chrono::Utc::now().checked_sub_signed(duration))
+                .is_none()
+        {
+            return Err(invalid(
+                "retention.horizon_seconds",
+                "must be positive and produce a representable retention cutoff",
+            ));
+        }
+        for (name, value) in [
+            ("byte_ceiling", self.retention.byte_ceiling),
+            ("reserve_bytes", self.retention.reserve_bytes),
+            ("auxiliary_bytes", self.retention.auxiliary_bytes),
+        ] {
+            if value == Some(0) {
+                return Err(invalid(
+                    format!("retention.{name}"),
+                    "must be positive when provided",
+                ));
+            }
         }
         require_absolute("database_path", &self.database_path)?;
         require_absolute("socket_path", &self.socket_path)?;
@@ -1017,6 +1071,22 @@ version = 1
         let config = NqConfig::from_toml(&minimal()).expect("valid config");
         assert_eq!(config.watchers[0].schedule.deadline_ms, 30_000);
         assert_eq!(config.watchers[0].carrier, Carrier::Stdio);
+        assert_eq!(config.retention, RetentionConfig::default());
+    }
+
+    #[test]
+    fn retention_overrides_are_explicit_and_validated() {
+        let text = format!(
+            "{}\n[retention]\nhorizon_seconds = 86400\nbyte_ceiling = 536870912\nreserve_bytes = 1073741824\nauxiliary_bytes = 67108864\n",
+            minimal()
+        );
+        let config = NqConfig::from_toml(&text).expect("retention overrides");
+        assert_eq!(config.retention.horizon_seconds, 86400);
+        assert_eq!(config.retention.byte_ceiling, Some(536870912));
+        let zero = text.replace("horizon_seconds = 86400", "horizon_seconds = 0");
+        assert!(NqConfig::from_toml(&zero).is_err());
+        let unknown = format!("{text}\nunknown_retention_option = true");
+        assert!(NqConfig::from_toml(&unknown).is_err());
     }
 
     #[test]

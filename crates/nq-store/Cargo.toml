@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+nix.workspace = true
 chrono.workspace = true
 nq-protocol = { path = "../nq-protocol" }
 rusqlite.workspace = true

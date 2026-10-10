@@ -2249,7 +2249,13 @@ impl CollectionEngine {
     /// Returns a version, integrity, or database-opening error.
     pub fn open(config: &NqConfig) -> Result<Self, EngineError> {
         validate_compiled_config(config)?;
-        let store = Store::open(&config.database_path)?;
+        let store = Store::open_with_capacity(
+            &config.database_path,
+            config.retention.horizon_seconds,
+            config.retention.byte_ceiling,
+            config.retention.reserve_bytes,
+            config.retention.auxiliary_bytes,
+        )?;
         let replay = validate_engine_open_history(&store)?;
         Ok(Self {
             config: config.clone(),
@@ -2295,7 +2301,13 @@ impl CollectionEngine {
                 watcher.instance_id
             )));
         }
-        let store = Store::open(&config.database_path)?;
+        let store = Store::open_with_capacity(
+            &config.database_path,
+            config.retention.horizon_seconds,
+            config.retention.byte_ceiling,
+            config.retention.reserve_bytes,
+            config.retention.auxiliary_bytes,
+        )?;
         let replay = validate_engine_open_history(&store)?;
         let mut engine = Self {
             config: config.clone(),
@@ -2320,7 +2332,13 @@ impl CollectionEngine {
         evaluator_identity: Result<EvaluatorRuntimeIdentity, String>,
     ) -> Result<Self, EngineError> {
         validate_compiled_config(config)?;
-        let store = Store::open(&config.database_path)?;
+        let store = Store::open_with_capacity(
+            &config.database_path,
+            config.retention.horizon_seconds,
+            config.retention.byte_ceiling,
+            config.retention.reserve_bytes,
+            config.retention.auxiliary_bytes,
+        )?;
         let replay = validate_engine_open_history(&store)?;
         Ok(Self {
             config: config.clone(),
@@ -2764,6 +2782,19 @@ impl CollectionEngine {
         // unavailable rather than commit an admitted report and only then refuse
         // at evaluation, leaving a durable report behind.
         self.require_evaluator_identity()?;
+        let horizon = chrono::TimeDelta::try_seconds(
+            i64::try_from(self.config.retention.horizon_seconds).map_err(|_| {
+                EngineError::Invariant("retention horizon exceeds duration range".into())
+            })?,
+        )
+        .ok_or_else(|| EngineError::Invariant("retention horizon exceeds duration range".into()))?;
+        let cutoff = Utc::now().checked_sub_signed(horizon).ok_or_else(|| {
+            EngineError::Invariant("retention cutoff exceeds timestamp range".into())
+        })?;
+        let expired = expire_ordinary_history(&mut self.store, &cutoff.to_rfc3339())?;
+        if expired.deleted_rows > 0 {
+            self.replay = validate_engine_open_history(&self.store)?;
+        }
         self.reconcile_pending_binding(watcher)?;
         let profile = resolve(watcher)?;
         let diagnostic_node_id = emit_diagnostic
@@ -8277,7 +8308,9 @@ pub fn record_component_status(
 pub fn backup_store(store: &Store, destination: &Path) -> Result<(), EngineError> {
     validate_semantic_history(store)?;
     let _artifact = store.backup_verified(destination)?;
-    let reopened = Store::open(destination)?;
+    // A backup preserves the source envelope; only explicit restore admits
+    // writable operation on a different filesystem.
+    let reopened = Store::open_read_only(destination)?;
     validate_semantic_history(&reopened)?;
     Ok(())
 }
@@ -8326,6 +8359,9 @@ fn engine_core_frontier(store: &Store) -> Option<&nq_store::HistoryFrontier> {
 fn engine_semantic_state(
     store: &Store,
 ) -> Option<(&nq_store::HistoryFrontier, &nq_store::SemanticState)> {
+    if store.retention_generation().ok()? > 0 {
+        return None;
+    }
     engine_watermark(store).and_then(|watermark| {
         watermark
             .semantic
@@ -8365,10 +8401,13 @@ fn validate_engine_open_history(store: &Store) -> Result<Option<ReplayCursor>, E
     // when a later plane withdraws the certification.
     let cursor = evaluation
         .map(|heads| {
-            certified_replay_bound(store).map(|through| ReplayCursor {
-                through,
-                heads,
-                reference: None,
+            certified_replay_bound(store).and_then(|through| {
+                Ok(ReplayCursor {
+                    retention_generation: store.retention_generation()?,
+                    through,
+                    heads,
+                    reference: None,
+                })
             })
         })
         .transpose()?;
@@ -8677,6 +8716,18 @@ fn replay_heads(state: &nq_store::SemanticState) -> Result<HistoryHeads, EngineE
 ///
 /// Returns when any persisted history plane is incomplete, corrupt, or does
 /// not correspond exactly to the plane from which it was derived.
+/// Retire ordinary history only after complete typed semantic validation.
+/// Both daemon startup and collection use this boundary; a no-op prefix probe
+/// avoids replay, and snapshot changes before deletion are explicitly refused.
+pub fn expire_ordinary_history(
+    store: &mut Store,
+    cutoff: &str,
+) -> Result<nq_store::RetentionResult, EngineError> {
+    store.expire_ordinary_before_validated(cutoff, |snapshot| {
+        validate_semantic_history(snapshot).map(|_| ())
+    })
+}
+
 pub fn validate_semantic_history(
     store: &Store,
 ) -> Result<DiagnosticArtifactHistoryVerification, EngineError> {
@@ -9485,6 +9536,13 @@ pub fn evaluation_history_bounded(
         ));
     }
 
+    let expired = store.retention_boundary()?.evaluation_floor;
+    if after.unwrap_or(0) < expired {
+        return Err(nq_store::StoreError::HistoryExpired {
+            through_evaluation_sequence: expired,
+        }
+        .into());
+    }
     let page_rows = store.evaluation_refusal_history_bounded(limit, after, requested_through)?;
     let cursor = after.unwrap_or(0);
     let available = requested_through.checked_sub(cursor).ok_or_else(|| {
@@ -9850,6 +9908,7 @@ fn validate_evaluation_history_before_evaluating(store: &Store) -> Result<(), En
 /// finding-lineage and evaluation-lineage state `heads`.
 #[derive(Clone)]
 struct ReplayCursor {
+    retention_generation: i64,
     through: i64,
     heads: HistoryHeads,
     /// Append bounds captured in the transaction that last advanced the
@@ -9878,6 +9937,7 @@ fn establish_replay_cursor(
         |_, _, _, _| Ok(()),
     )?;
     Ok(ReplayCursor {
+        retention_generation: store.retention_generation()?,
         through: bounds.evaluation_sequence,
         heads,
         reference: Some(bounds.clone()),
@@ -9900,6 +9960,9 @@ fn advance_replay_cursor(
     bounds: &nq_store::HistoryFrontier,
 ) -> Result<ReplayCursor, EngineError> {
     let through = bounds.evaluation_sequence;
+    if cursor.retention_generation != store.retention_generation()? {
+        return establish_replay_cursor(store, bounds);
+    }
     if cursor.through > through {
         return Err(EngineError::Invariant(format!(
             "evaluation history ends at sequence {through}, before the sequence {} this \
@@ -9923,6 +9986,7 @@ fn advance_replay_cursor(
         |_, _, _, _| Ok(()),
     )?;
     Ok(ReplayCursor {
+        retention_generation: store.retention_generation()?,
         through,
         heads,
         reference: Some(bounds.clone()),
@@ -9935,7 +9999,10 @@ fn ensure_replay_cursor(
     store: &Store,
     replay: &mut Option<ReplayCursor>,
 ) -> Result<(), EngineError> {
-    if replay.is_none() {
+    if replay
+        .as_ref()
+        .is_none_or(|cursor| store.retention_generation().ok() != Some(cursor.retention_generation))
+    {
         *replay = Some(store.with_read_snapshot(establish_replay_cursor)?);
     }
     Ok(())
@@ -12738,6 +12805,307 @@ sys.stdout.write("\n")
         assert_ne!(present.result.state, absent.result.state);
     }
 
+    #[test]
+    fn native_healthy_detector_history_reclaims_two_expiry_cycles_and_replays_retained_state() {
+        let config = NqConfig::from_toml(&host_example_text()).expect("host config");
+        let watcher = &config.watchers[0];
+        let mut store = Store::initialize_in_memory().expect("store");
+        let observed = Utc::now() - Duration::seconds(30);
+        for suffix in [
+            "retention-native-a",
+            "retention-native-b",
+            "retention-native-c",
+        ] {
+            commit_real_host_detector_report(
+                &mut store,
+                watcher,
+                &format!("report-{suffix}"),
+                suffix,
+                observed,
+                1.0,
+                None,
+            );
+        }
+        assert!(
+            store.finding_snapshots().unwrap().is_empty(),
+            "healthy explicit absence has no unresolved finding"
+        );
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let cutoff = Utc::now() - Duration::seconds(1);
+        let first = store
+            .expire_ordinary_before(&timestamp(cutoff))
+            .expect("native first expiry");
+        assert!(first.deleted_rows > 0);
+        assert_eq!(first.boundary.evaluation_floor, 2);
+        assert_eq!(first.boundary.report_floor, 2);
+        validate_semantic_history(&store).expect("surviving native source remains verifiable");
+        validate_evaluation_refusal_history(&store).expect("retained evaluation replay");
+        assert!(matches!(
+            evaluation_history_bounded(&store, 10, None, None),
+            Err(EngineError::Store(
+                nq_store::StoreError::HistoryExpired { .. }
+            ))
+        ));
+        let page = evaluation_history_bounded(&store, 10, Some(2), Some(3))
+            .expect("retained declared interval");
+        assert_eq!(page.records.len(), 1);
+        assert!(page.complete);
+        assert_eq!(
+            page.records[0].result.result.state,
+            DetectorState::ExplicitlyAbsent
+        );
+        for suffix in ["retention-native-d", "retention-native-e"] {
+            commit_real_host_detector_report(
+                &mut store,
+                watcher,
+                &format!("report-{suffix}"),
+                suffix,
+                Utc::now(),
+                1.0,
+                None,
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let second = store
+            .expire_ordinary_before(&timestamp(Utc::now() - Duration::seconds(1)))
+            .expect("native second expiry");
+        assert!(second.deleted_rows > 0);
+        assert_eq!(second.boundary.evaluation_floor, 4);
+        assert_eq!(second.boundary.report_floor, 4);
+        store.validate().expect("retained store validation");
+        validate_evaluation_refusal_history(&store).expect("native replay after second cycle");
+        assert_eq!(store.latest_evaluation_sequence().unwrap(), 5);
+    }
+
+    fn typed_expiry_fixture(path: &Path) -> Store {
+        let config = NqConfig::from_toml(&host_example_text()).expect("host config");
+        let mut store =
+            Store::initialize_with_capacity(path, 604_800, Some(8 * 1024 * 1024), Some(0), Some(0))
+                .expect("bounded typed-expiry store");
+        for index in 0..3 {
+            let suffix = format!("typed-expiry-native-{index}");
+            commit_real_host_detector_report(
+                &mut store,
+                &config.watchers[0],
+                &format!("report-{suffix}"),
+                &suffix,
+                Utc::now() - Duration::seconds(30),
+                1.0,
+                None,
+            );
+        }
+        store
+    }
+
+    fn substitute_old_evaluation_schema(path: &Path) {
+        let mut connection = rusqlite::Connection::open(path).expect("fixture writer");
+        let transaction = connection
+            .transaction()
+            .expect("coherent fixture transition");
+        let triggers: Vec<(String, String)> = transaction.prepare(
+            "SELECT name,sql FROM sqlite_schema WHERE type='trigger' AND tbl_name IN ('evaluation_runs','status_events','provider_intake_acknowledgments')",
+        ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap().collect::<Result<_, _>>().unwrap();
+        for (name, _) in &triggers {
+            transaction
+                .execute_batch(&format!("DROP TRIGGER {name}"))
+                .unwrap();
+        }
+        let (evaluation_id, run_id, detail): (String, String, Vec<u8>) = transaction.query_row(
+            "SELECT evaluation_id,trigger_run_id,detail_json FROM evaluation_runs ORDER BY evaluation_sequence LIMIT 1",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        let mut evaluation: Value = serde_json::from_slice(&detail).unwrap();
+        evaluation["schema"] = json!("nq.evaluation.envelope.invalid");
+        let evaluation_document = canonical(&evaluation).unwrap();
+        assert_eq!(
+            transaction
+                .execute(
+                    "UPDATE evaluation_runs SET detail_json=?1 WHERE evaluation_id=?2",
+                    rusqlite::params![evaluation_document.as_bytes(), evaluation_id],
+                )
+                .unwrap(),
+            1
+        );
+        let (status_id, status_bytes): (String, Vec<u8>) = transaction
+            .query_row(
+                "SELECT status_event_id,detail_json FROM status_events WHERE run_id=?1",
+                [&run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let mut status: Value = serde_json::from_slice(&status_bytes).unwrap();
+        let projected = status["result"]["evaluations"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["evaluation_id"].as_str() == Some(evaluation_id.as_str()))
+            .expect("exact result projection of old evaluation");
+        *projected = evaluation;
+        let status_document = canonical(&status).unwrap();
+        assert_eq!(
+            transaction
+                .execute(
+                    "UPDATE status_events SET detail_json=?1 WHERE status_event_id=?2",
+                    rusqlite::params![status_document.as_bytes(), status_id],
+                )
+                .unwrap(),
+            1
+        );
+        let (ack_id, ack_bytes): (String, Vec<u8>) = transaction.query_row(
+            "SELECT acknowledgment_id,detail_json FROM provider_intake_acknowledgments WHERE run_id=?1",
+            [&run_id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        let mut acknowledgment: Value = serde_json::from_slice(&ack_bytes).unwrap();
+        acknowledgment["canonical_result_digest"] = json!(status_document.digest());
+        let acknowledgment_document = canonical(&acknowledgment).unwrap();
+        assert_eq!(transaction.execute(
+            "UPDATE provider_intake_acknowledgments SET detail_json=?1,acknowledgment_digest=?2 WHERE acknowledgment_id=?3",
+            rusqlite::params![acknowledgment_document.as_bytes(), acknowledgment_document.digest(), ack_id],
+        ).unwrap(), 1);
+        for (_, sql) in &triggers {
+            transaction
+                .execute_batch(sql)
+                .expect("restore exact fixture schema");
+        }
+        transaction
+            .commit()
+            .expect("commit coherent canonical substitution");
+    }
+
+    #[test]
+    fn startup_and_collection_expiry_preserve_semantically_invalid_old_evaluation() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("typed-expiry-invalid.db");
+        let mut store = typed_expiry_fixture(&path);
+        substitute_old_evaluation_schema(&path);
+        store
+            .validate()
+            .expect("coherent canonical row satisfies Store laws");
+        assert!(validate_evaluation_refusal_history(&store).is_err());
+        let before = store.retention_boundary().expect("boundary");
+        // This exact shared entrypoint is used by daemon startup and collection.
+        assert!(expire_ordinary_history(&mut store, "2100-01-01T00:00:00Z").is_err());
+        assert_eq!(store.retention_boundary().unwrap(), before);
+        assert!(
+            validate_evaluation_refusal_history(&store).is_err(),
+            "refusal must preserve the original invalid typed evidence"
+        );
+        // Deterministic age-only negative control proves that the old carrier
+        // was actually eligible for deletion under Store-only closure rules.
+        let age_only = store
+            .expire_ordinary_before("2100-01-01T00:00:00Z")
+            .expect("age-only control executes");
+        assert!(age_only.deleted_rows > 0);
+        assert!(age_only.boundary.evaluation_floor >= 1);
+    }
+
+    #[test]
+    fn typed_expiry_refuses_concurrent_old_row_change_with_unchanged_frontier() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("typed-expiry-race.db");
+        let mut store = typed_expiry_fixture(&path);
+        let before = store.retention_boundary().unwrap();
+        let result: Result<nq_store::RetentionResult, EngineError> = store
+            .expire_ordinary_before_validated("2100-01-01T00:00:00Z", |snapshot| {
+                validate_semantic_history(snapshot)?;
+                // Exact schema is restored and no append sequence changes.
+                // The same-connection data_version stamp must still refuse.
+                substitute_old_evaluation_schema(&path);
+                Ok(())
+            });
+        let error = result.expect_err("concurrent content mutation must refuse expiry");
+        assert!(error.to_string().contains("history changed"), "{error}");
+        assert_eq!(store.retention_boundary().unwrap(), before);
+        assert!(validate_evaluation_refusal_history(&store).is_err());
+    }
+
+    #[test]
+    fn native_healthy_history_expiry_can_maintain_a_store_at_write_refusal() {
+        let config = NqConfig::from_toml(&host_example_text()).expect("host config");
+        let watcher = &config.watchers[0];
+        let root = tempfile::tempdir().expect("bounded fixture directory");
+        let path = root.path().join("maintenance-full.db");
+        let mut store = Store::initialize_with_capacity(
+            &path,
+            604_800,
+            Some(8 * 1024 * 1024),
+            Some(0),
+            Some(0),
+        )
+        .expect("8 MiB store envelope");
+        let observed = Utc::now() - Duration::seconds(30);
+        for index in 0..3 {
+            let suffix = format!("maintenance-native-{index}");
+            commit_real_host_detector_report(
+                &mut store,
+                watcher,
+                &format!("report-{suffix}"),
+                &suffix,
+                observed,
+                1.0,
+                None,
+            );
+        }
+        // At most 8 MiB of input and an 8 MiB physical envelope. Retained
+        // daemon statuses provide page pressure without adding a dependency
+        // on the ordinary host report/evaluation closure under qualification.
+        let mut refused = false;
+        for index in 0..128 {
+            let status = nq_store::StatusEventInput {
+                status_event_id: format!("maintenance-pressure-{index}"),
+                component_kind: "daemon".into(),
+                component_id: "maintenance-pressure".into(),
+                state: "healthy".into(),
+                code: "maintenance_pressure".into(),
+                detail: nq_store::CanonicalDocument::from_serializable(&json!({
+                    "sample": "x".repeat(64 * 1024)
+                }))
+                .expect("pressure document"),
+                observed_at: timestamp(observed),
+            };
+            match store.record_status(&status) {
+                Ok(()) => {}
+                Err(error) => {
+                    let message = error.to_string();
+                    assert!(
+                        message.contains("database or disk is full")
+                            || message.contains("capacity refused:"),
+                        "unexpected pressure refusal: {error}"
+                    );
+                    refused = true;
+                    break;
+                }
+            }
+        }
+        assert!(refused, "finite pressure loop must reach write refusal");
+        store
+            .validate()
+            .expect("refused write preserves typed history");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let cutoff = timestamp(Utc::now() - Duration::seconds(1));
+        let result = store
+            .expire_ordinary_before(&cutoff)
+            .expect("ordinary maintenance must work at configured write refusal");
+        assert!(result.deleted_rows > 0);
+        assert_eq!(result.boundary.report_floor, 2);
+        let suffix = "maintenance-native-after-expiry";
+        commit_real_host_detector_report(
+            &mut store,
+            watcher,
+            &format!("report-{suffix}"),
+            suffix,
+            Utc::now() - Duration::seconds(1),
+            1.0,
+            None,
+        );
+        store
+            .validate()
+            .expect("new collection after full-store maintenance");
+        validate_evaluation_refusal_history(&store)
+            .expect("native retained replay after full-store maintenance");
+    }
+
     #[allow(clippy::too_many_lines)]
     fn commit_real_host_detector_report(
         store: &mut Store,
@@ -13477,6 +13845,7 @@ sys.stdout.write("\n")
         };
         validate_compiled_watcher(&watcher).expect("owner-valid watcher");
         let config = NqConfig {
+            retention: Default::default(),
             schema: crate::config::CONFIG_SCHEMA.to_owned(),
             database_path: root.join("nq.db"),
             socket_path: root.join("nqd.sock"),
@@ -13675,6 +14044,7 @@ sys.stdout.write("\n")
             checkpoint_policy: CheckpointPolicy::Disabled,
         };
         let config = NqConfig {
+            retention: Default::default(),
             schema: crate::config::CONFIG_SCHEMA.to_owned(),
             database_path: root.join("nq.db"),
             socket_path: root.join("nqd.sock"),
@@ -13754,6 +14124,7 @@ sys.stdout.write("\n")
             checkpoint_policy: CheckpointPolicy::Disabled,
         };
         let config = NqConfig {
+            retention: Default::default(),
             schema: crate::config::CONFIG_SCHEMA.to_owned(),
             database_path: root.join("nq.db"),
             socket_path: root.join("nqd.sock"),
@@ -19363,6 +19734,7 @@ sys.stdout.write("\n")
         )
         .expect("seed");
         let behind = ReplayCursor {
+            retention_generation: store.retention_generation().expect("retention generation"),
             through: latest - BEHIND,
             heads,
             reference: None,

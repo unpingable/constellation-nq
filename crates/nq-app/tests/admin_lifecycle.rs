@@ -895,6 +895,79 @@ fn backup_restore_and_already_current_upgrade_are_verified_and_non_destructive()
 }
 
 #[test]
+fn backup_on_another_filesystem_is_an_archive_until_explicit_restore() {
+    use std::os::unix::fs::MetadataExt;
+    let Some(destination_root) = std::env::var_os("NQ_TEST_SECOND_FILESYSTEM") else {
+        eprintln!("cross-filesystem case requires NQ_TEST_SECOND_FILESYSTEM");
+        return;
+    };
+    for explicit in [false, true] {
+        let source = tempfile::tempdir().expect("source fixture");
+        let destination = tempfile::tempdir_in(&destination_root).expect("destination fixture");
+        assert_ne!(
+            fs::metadata(source.path()).unwrap().dev(),
+            fs::metadata(destination.path()).unwrap().dev(),
+            "qualification requires two actual filesystems"
+        );
+        let nq = env!("CARGO_BIN_EXE_nq");
+        let database = source.path().join("source.db");
+        let config = write_config(source.path(), "cross-device", &database);
+        // Exercise both automatic reserve provenance and explicit fixed policy.
+        let policy = if explicit {
+            "\n[retention]\nbyte_ceiling = 16777216\nreserve_bytes = 1048576\nauxiliary_bytes = 1048576\n"
+        } else {
+            ""
+        };
+        let contents = fs::read_to_string(&config).unwrap();
+        fs::write(&config, format!("{contents}{policy}")).unwrap();
+        success(run(nq, &config, &["init"]));
+        let backup = destination.path().join("archive.db");
+        let archived = success(run(nq, &config, &["backup", backup.to_str().unwrap()]));
+        assert_eq!(archived["verified"], true);
+        assert_eq!(archived["sha256"], sha256_file(&backup));
+        let original_bytes = fs::read(&backup).unwrap();
+        nq_store::Store::open_read_only(&backup)
+            .unwrap()
+            .validate()
+            .unwrap();
+        assert!(
+            nq_store::Store::open(&backup).is_err(),
+            "archive has not been readmitted"
+        );
+        assert_eq!(fs::read(&backup).unwrap(), original_bytes);
+
+        let restored = destination.path().join("restored.db");
+        let receipt = success(run(
+            nq,
+            &config,
+            &[
+                "restore",
+                backup.to_str().unwrap(),
+                restored.to_str().unwrap(),
+            ],
+        ));
+        assert_ne!(
+            receipt["capacity_admission"]["prior"]["observed"]["device"],
+            receipt["capacity_admission"]["current"]["observed"]["device"]
+        );
+        assert_eq!(fs::read(&backup).unwrap(), original_bytes);
+        let restored_config = write_config(destination.path(), "restored", &restored);
+        let contents = fs::read_to_string(&restored_config).unwrap();
+        fs::write(&restored_config, format!("{contents}{policy}")).unwrap();
+        success(run(nq, &restored_config, &["status", "export"]));
+        let admitted = nq_store::Store::open_with_capacity(
+            &restored,
+            604800,
+            explicit.then_some(16777216),
+            explicit.then_some(1048576),
+            explicit.then_some(1048576),
+        )
+        .expect("restored store admits writable reopen with original policy intent");
+        admitted.validate().unwrap();
+    }
+}
+
+#[test]
 fn backup_and_restore_report_preserved_artifact_custody_without_claiming_full_replay() {
     let nq = env!("CARGO_BIN_EXE_nq");
     let directory = tempfile::tempdir().expect("temporary test directory");
@@ -1049,8 +1122,8 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     let receipts = read_only_upgrade_receipts(&database);
     assert_eq!(
         receipts.len(),
-        4,
-        "v3 to the current schema requires four exact receipts"
+        5,
+        "v3 to the current schema requires five exact receipts"
     );
     let receipt = &receipts[0];
     assert_eq!(receipt.from_version, 3);
@@ -1104,6 +1177,25 @@ fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_d
     assert_eq!(
         upgraded["v12_backup_digest"],
         receipt_v12.backup_digest.as_str()
+    );
+    let receipt_v13 = &receipts[4];
+    assert_eq!(receipt_v13.from_version, 13);
+    assert_eq!(receipt_v13.to_version, 14);
+    assert_eq!(receipt_v13.result, "migrated");
+    let v13_backup = PathBuf::from(&receipt_v13.backup_location);
+    assert_eq!(sha256_file(&v13_backup), receipt_v13.backup_digest);
+    assert_eq!(
+        nq_store::Store::database_schema_version(&v13_backup).unwrap(),
+        13
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&receipt_v13.migrations_json).unwrap(),
+        serde_json::json!(["schema_v13_to_v14_bounded_retention"])
+    );
+    let expiry_verification: Value = serde_json::from_str(&receipt_v13.verification_json).unwrap();
+    assert_eq!(
+        expiry_verification["historical_expiry"],
+        "absent_not_synthesized"
     );
     let verification: Value = serde_json::from_str(&receipt.verification_json).unwrap();
     assert_eq!(

@@ -186,10 +186,17 @@ admission, and daemon drift verification fail closed when the relevant boundary
 is exceeded.
 
 Initialization is explicit and fails rather than taking ownership of an
-existing incompatible database:
+existing incompatible database. First define the existing
+[`nq_helper_command` transient maintenance wrapper](#test-and-admit-a-watcher)
+below. Use its intended service limits for initialization: the shipped
+`nqd.service` and wrapper both have `LimitFSIZE=1G`. An unlimited login process
+can establish a capacity envelope that the service cannot use. Keep any
+explicitly admitted service override and the wrapper synchronized before
+initialization. See [retention and capacity admission](retention.md) for the
+seven-day target, initialization-only overrides and persisted reserve intent:
 
 ```sh
-sudo -u nq nq --config /etc/nq/nq.toml init
+nq_helper_command --config /etc/nq/nq.toml init
 ```
 
 With the sample watcher configured, `doctor` is expected to report a missing
@@ -197,13 +204,15 @@ admission until the next section is complete. That is a useful failed state,
 not a reason to create a lock by hand.
 
 At the time this historical section was written, the binary normally opened
-only SQLite schema v5. The current source opens schema v13 and has an explicit
+only SQLite schema v5. The current source opens schema v14 and has an explicit
 upgrade from the published v5 schema. For a v5 store, the v5→v12
 transition takes a separate verified backup and adds empty saved-check custody;
 it also adds empty notification-delivery custody, without synthesizing historical
 checks or delivery records. Development schema versions6–11 are not accepted
 inputs to this public migration. The subsequent v12→v13 transition takes its
-own verified backup and adds empty local-successor acquisition custody. Use the current binary's `admin
+own verified backup and adds empty local-successor acquisition custody. The
+v13→v14 transition adds bounded retention state and establishes the configured
+capacity envelope under the maintenance process limits. Use the current binary's `admin
 upgrade` output and preserve every recorded backup before relying on an older
 schema procedure below.
 
@@ -229,7 +238,7 @@ At a hard successor cut, provide the already-created immutable legacy manifest
 digest; this records a reference and imports no legacy finding state:
 
 ```sh
-sudo -u nq nq --config /etc/nq/nq.toml init \
+nq_helper_command --config /etc/nq/nq.toml init \
   --legacy-manifest-digest sha256:LOWERCASE_64_HEX_DIGEST
 ```
 
@@ -294,9 +303,17 @@ restrictions; keep it synchronized with `nqd.service`. Use it for commands that
 execute or runtime-verify a watcher: `watcher test/admit/rotate/rollback`,
 `collect`, and `doctor`. In particular, `doctor` and rollback trace the current
 runtime loader under the admitted watcher UID, so they are not capability-free
-inspection operations. Configuration, initialization, backup, restore,
-upgrade, query, status, findings, and other pure exports remain capability-free
-`sudo -u nq nq ...` operations.
+inspection operations. Initialization, backup, restore, archive creation,
+upgrade and validation-watermark writes also use this wrapper so their actual
+file-size and memory limits match the intended service; that requirement does
+not mean they execute a watcher or require its capabilities. For destinations
+outside `/var/lib/nq`, admit the exact writable destination in the transient
+unit's `ReadWritePaths` before running the operation, retaining its other
+limits. Configuration checks and ordinary read-only query, status, findings,
+exports and immutable archive verification can remain `sudo -u nq nq ...`
+operations. Ordinary SQLite read-only opens may need bounded SHM allocation;
+they check that bootstrap allocation without silently redefining the store's
+persisted capacity policy.
 
 ```sh
 sudo -u nq nq protocol check
@@ -834,7 +851,7 @@ it was written for another schema or store rule set, on `init`, on every
 `admin upgrade` result, and on demand:
 
 ```sh
-sudo -u nq nq --config /etc/nq/nq.toml --json admin validate --full
+nq_helper_command --config /etc/nq/nq.toml --json admin validate --full
 ```
 
 It adds SQLite `quick_check` and `foreign_key_check`, revalidates every
@@ -953,7 +970,7 @@ boundary:
 
 ```sh
 sudo systemctl stop nqd.service
-sudo -u nq nq --config /etc/nq/nq.toml backup \
+nq_helper_command --config /etc/nq/nq.toml backup \
   /var/lib/nq/backups/nq-before-maintenance.db
 sha256sum /var/lib/nq/backups/nq-before-maintenance.db
 sudo systemctl start nqd.service
@@ -977,7 +994,7 @@ sudo sh -c 'for p in /var/lib/nq/nq.db /var/lib/nq/nq.db-wal /var/lib/nq/nq.db-s
     /var/lib/nq/nq.db.validation-watermark.json; do
   if test -e "$p"; then mv -- "$p" /var/lib/nq/restore-quarantine/; fi
 done'
-sudo -u nq nq --config /etc/nq/nq.toml restore \
+nq_helper_command --config /etc/nq/nq.toml restore \
   /SAFE/BACKUP/nq.db /var/lib/nq/nq.db
 nq_helper_command --config /etc/nq/nq.toml doctor
 sudo systemctl start nqd.service
@@ -988,6 +1005,16 @@ and restore the quarantined database and matching sidecars as one set.
 `restore` removes a validation watermark left beside the absent destination,
 so the first open of the restored database validates it in full; run
 `admin validate --full` afterwards to certify its semantic history again.
+
+For a current-schema restore, destination capacity admission is explicit. A
+same-filesystem copy whose original envelope still fits preserves its database
+bytes and envelope. A required destination re-admission records prior and
+current envelopes: automatic reserve is resolved from the destination total,
+while explicit reserve bytes stay fixed. Normal open never performs this
+resize. Keep the configured reserve selection consistent with the receipt;
+see [reserve provenance and restore](retention.md#backup-and-explicit-restore).
+Full original-history replay is explicitly expired after committed retirement;
+validate the surviving history without claiming the removed history was verified.
 
 ## Cold archive and historical reopen
 
@@ -1007,7 +1034,7 @@ Create a cold archive at a new destination, then verify it with the exact
 preserved verifier:
 
 ```sh
-sudo -u nq nq --config /etc/nq/nq.toml admin archive \
+nq_helper_command --config /etc/nq/nq.toml admin archive \
   --destination /SAFE/ARCHIVES/nq-ARCHIVE-ID
 /SAFE/ARCHIVES/nq-ARCHIVE-ID/bin/nq admin archive-verify /SAFE/ARCHIVES/nq-ARCHIVE-ID
 ```
@@ -1037,17 +1064,17 @@ unit fails or its resulting active state is not exactly `inactive`. After
 installing new bytes, run:
 
 ```sh
-sudo -u nq nq --config /etc/nq/nq.toml admin upgrade \
+nq_helper_command --config /etc/nq/nq.toml admin upgrade \
   --backup-directory /var/lib/nq/backups
 nq_helper_command --config /etc/nq/nq.toml doctor
 sudo systemctl start nqd.service
 ```
 
-Schema v13 is current. `admin upgrade` creates and semantically verifies a
+Schema v14 is current. `admin upgrade` creates and semantically verifies a
 digest-addressed backup before each supported transition, and returns
-`already_current` only for an exactly compatible v13 store. Current source
+`already_current` only for an exactly compatible v14 store. Current source
 preserves the v3→v4→v5 chain, its explicit v5→v12 transition, and a separately
-backed-up v12→v13 transition;
+backed-up v12→v13 transition and v13→v14 bounded-retention transition;
 each preserves gaps rather than manufacturing historical provider activity,
 notification delivery, or saved-check results. Every backup is complete before
 the corresponding source write; failure leaves that transition's source

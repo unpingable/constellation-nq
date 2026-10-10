@@ -60,6 +60,16 @@ transient maintenance unit because both execute or runtime-verify under the
 separate watcher UID; a plain `sudo -u nq` process lacks the four narrowly
 bounded parent capabilities. See `docs/OPERATIONS.md`.
 
+## Retention and initialization limits
+
+The shipped unit retains `LimitFSIZE=1G`. Initialize through the existing
+transient `nq_helper_command` maintenance wrapper with the same intended
+service limits; an unlimited login-process initialization can persist an
+envelope that the service refuses. Keep local service overrides and the
+maintenance wrapper synchronized. See [retention and capacity admission](../../docs/retention.md)
+for the seven-day target, persisted policy, refusal conditions, and explicit
+restore behavior. The capacity formula is not a sustained-window qualification.
+
 ## Why there is no `nqd.socket`
 
 The developer-preview daemon owns `/run/nq/nqd.sock`: it binds the socket,

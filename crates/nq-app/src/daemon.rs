@@ -42,7 +42,7 @@ pub async fn run(options: Nqd) -> Result<()> {
     let config = NqConfig::load(&options.config)
         .with_context(|| format!("cannot load {}", options.config.display()))?;
     let _database_ownership = crate::ownership::acquire(&config.database_path, "nqd")?;
-    let mut store = nq_store::Store::open(&config.database_path).context(
+    let mut store = open_configured_store(&config).context(
         "database is absent or has an incompatible schema; run `nq init` or `nq admin upgrade`",
     )?;
     store.validate()?;
@@ -53,6 +53,19 @@ pub async fn run(options: Nqd) -> Result<()> {
     nq_core::engine::validate_provider_intake_history(&store)
         .context("provider-intake history failed typed startup verification")?;
     validate_catalog(&config)?;
+    let horizon = chrono::TimeDelta::try_seconds(i64::try_from(config.retention.horizon_seconds)?)
+        .context("retention horizon exceeds duration range")?;
+    let cutoff = chrono::Utc::now()
+        .checked_sub_signed(horizon)
+        .context("retention cutoff exceeds timestamp range")?;
+    let expired = nq_core::engine::expire_ordinary_history(&mut store, &cutoff.to_rfc3339())?;
+    if expired.deleted_rows > 0 {
+        info!(
+            deleted_rows = expired.deleted_rows,
+            generation = expired.boundary.generation,
+            "ordinary completed history expired"
+        );
+    }
     nq_core::engine::record_component_status(
         &mut store,
         "daemon",
@@ -85,7 +98,7 @@ pub async fn run(options: Nqd) -> Result<()> {
         }
         None => None,
     };
-    let mut ready_store = nq_store::Store::open(&config.database_path)?;
+    let mut ready_store = open_configured_store(&config)?;
     nq_core::engine::record_component_status(
         &mut ready_store,
         "daemon",
@@ -155,7 +168,7 @@ pub async fn run(options: Nqd) -> Result<()> {
     let _ = shutdown_tx.send(true);
     services.abort_all();
     while services.join_next().await.is_some() {}
-    let mut stopped_store = nq_store::Store::open(&config.database_path)?;
+    let mut stopped_store = open_configured_store(&config)?;
     nq_core::engine::record_component_status(
         &mut stopped_store,
         "daemon",
@@ -165,6 +178,16 @@ pub async fn run(options: Nqd) -> Result<()> {
         &serde_json::json!({"pid": std::process::id()}),
     )?;
     Ok(())
+}
+
+fn open_configured_store(config: &NqConfig) -> Result<nq_store::Store> {
+    Ok(nq_store::Store::open_with_capacity(
+        &config.database_path,
+        config.retention.horizon_seconds,
+        config.retention.byte_ceiling,
+        config.retention.reserve_bytes,
+        config.retention.auxiliary_bytes,
+    )?)
 }
 
 async fn collect_once(config: NqConfig) -> Result<()> {

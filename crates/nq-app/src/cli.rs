@@ -748,7 +748,7 @@ fn saved_check_command(
             definition.validate()?;
             let document = CanonicalDocument::from_serializable(&definition)?;
             let digest = format!("sha256:{:x}", Sha256::digest(document.as_bytes()));
-            let mut store = Store::open(&config.database_path)?;
+            let mut store = open_configured_store(&config)?;
             store.install_saved_check(&SavedCheckDefinitionInput {
                 definition_id: uuid::Uuid::new_v4().to_string(),
                 stable_reference: definition.reference.clone(),
@@ -784,7 +784,7 @@ fn saved_check_command(
             let observed_at = chrono::DateTime::parse_from_rfc3339(&source_observed_at)
                 .context("source_observed_at must be an explicit RFC3339 timestamp")?
                 .with_timezone(&chrono::Utc);
-            let mut store = Store::open(&config.database_path)?;
+            let mut store = open_configured_store(&config)?;
             let record = store
                 .saved_check_definition(&reference)?
                 .context("saved check reference is not installed")?;
@@ -1232,7 +1232,7 @@ fn maintenance_command(
             declaration.validate()?;
             let document = CanonicalDocument::from_serializable(&declaration)?;
             let digest = format!("sha256:{:x}", Sha256::digest(document.as_bytes()));
-            let mut store = Store::open(&config.database_path)?;
+            let mut store = open_configured_store(&config)?;
             if let Some(retained) = store.maintenance_declaration(&declaration.maintenance_id)? {
                 if retained.declaration_digest == digest {
                     return print_value(
@@ -1329,7 +1329,7 @@ fn maintenance_command(
             carried.validate()?;
             let carried_document = CanonicalDocument::from_serializable(&carried)?;
             let carried_digest = carried_document.digest().to_owned();
-            let mut destination = Store::open(&config.database_path)?;
+            let mut destination = open_configured_store(&config)?;
             let genesis_id = destination.sole_genesis_id()?;
             let lineage_id = format!("rollover-maintenance-{new_maintenance_id}");
             let lineage = CanonicalDocument::from_serializable(&json!({
@@ -1515,8 +1515,14 @@ fn initialize(config_path: &Path, arguments: InitArgs, json_output: bool) -> Res
             config.helper_runtime_dir.display()
         )
     })?;
-    let mut store = Store::initialize(&config.database_path)
-        .with_context(|| format!("cannot initialize {}", config.database_path.display()))?;
+    let mut store = Store::initialize_with_capacity(
+        &config.database_path,
+        config.retention.horizon_seconds,
+        config.retention.byte_ceiling,
+        config.retention.reserve_bytes,
+        config.retention.auxiliary_bytes,
+    )
+    .with_context(|| format!("cannot initialize {}", config.database_path.display()))?;
     for module in all_profiles() {
         append_descriptor_if_supported(&mut store, module)?;
     }
@@ -1921,7 +1927,7 @@ fn diagnostic_import(
     }
     let imported_at = chrono::Utc::now().to_rfc3339();
     let import_id = import_id.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned);
-    let mut store = Store::open(&config.database_path)?;
+    let mut store = open_configured_store(&config)?;
     let receipt = store.import_diagnostic_artifact(&DiagnosticArtifactImportInput {
         import_id,
         artifact_id,
@@ -2272,7 +2278,7 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
 
 fn backup(config_path: &Path, destination: &Path, json_output: bool) -> Result<()> {
     let config = NqConfig::load(config_path)?;
-    let store = Store::open(&config.database_path)?;
+    let store = open_configured_store(&config)?;
     store.validate()?;
     let source_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&store)?;
     if destination.exists() {
@@ -2287,7 +2293,9 @@ fn backup(config_path: &Path, destination: &Path, json_output: bool) -> Result<(
     // SQLite's online backup API is used by the store so WAL state is captured
     // consistently; a filesystem copy is not sufficient.
     store_backup_if_supported(&store, destination)?;
-    let backup_store = Store::open(destination)?;
+    // An archive preserves its source envelope. Reading it on another
+    // filesystem does not admit it as a writable deployment there.
+    let backup_store = Store::open_read_only(destination)?;
     backup_store.validate()?;
     let backup_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&backup_store)?;
     if backup_artifacts != source_artifacts {
@@ -2331,6 +2339,7 @@ fn restore(backup: &Path, destination: &Path, json_output: bool) -> Result<()> {
     ));
     let restore_result = (|| {
         store_backup_if_supported(&source, &temporary)?;
+        let capacity_admission = nq_store::capacity::readmit_restored_copy(&temporary)?;
         let restored = Store::open_read_only(&temporary)?;
         restored.validate()?;
         let restored_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&restored)?;
@@ -2350,14 +2359,25 @@ fn restore(backup: &Path, destination: &Path, json_output: bool) -> Result<()> {
                 destination.display()
             )
         })?;
-        Ok::<_, anyhow::Error>(restored_artifacts)
+        Ok::<_, anyhow::Error>((restored_artifacts, capacity_admission))
     })();
-    let _ = fs::remove_file(&temporary);
-    let restored_artifacts = restore_result?;
+    // These exact UUID-named temporary paths belong to this restore. Every
+    // source/target connection and the capacity admission guard has closed.
+    for suffix in ["", "-wal", "-shm", ".capacity.lock"] {
+        let mut member = temporary.as_os_str().to_os_string();
+        member.push(suffix);
+        match fs::remove_file(PathBuf::from(member)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("remove restore-owned temporary member"),
+        }
+    }
+    let (restored_artifacts, capacity_admission) = restore_result?;
     print_value(
         &json!({
             "restored": true,
             "destination": destination,
+            "capacity_admission": capacity_admission,
             "sha256": digest_file(destination)?,
             "diagnostic_artifacts":
                 diagnostic_artifact_preservation_value(&restored_artifacts),
@@ -2473,6 +2493,16 @@ fn diagnostic_artifact_custody_summary(store: &Store) -> Result<DiagnosticArtifa
     }
 }
 
+fn open_configured_store(config: &NqConfig) -> Result<Store> {
+    Ok(Store::open_with_capacity(
+        &config.database_path,
+        config.retention.horizon_seconds,
+        config.retention.byte_ceiling,
+        config.retention.reserve_bytes,
+        config.retention.auxiliary_bytes,
+    )?)
+}
+
 /// Verified backups written by one chained upgrade: the schema-5 source and the
 /// intermediate schema-12 store.
 struct ChainedUpgradeBackups {
@@ -2487,6 +2517,7 @@ fn upgrade_v5_to_current(
     backup_directory: &Path,
     binary_digest: &str,
     operator_identity: &CanonicalDocument,
+    retention: &nq_core::config::RetentionConfig,
 ) -> Result<ChainedUpgradeBackups> {
     let started_at = chrono::Utc::now();
     let temporary = backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
@@ -2519,6 +2550,7 @@ fn upgrade_v5_to_current(
         backup_directory,
         binary_digest,
         operator_identity,
+        retention,
     )?;
     Ok(ChainedUpgradeBackups {
         v5: (backup, artifact.sha256),
@@ -2532,6 +2564,7 @@ fn upgrade_v12_to_current(
     backup_directory: &Path,
     binary_digest: &str,
     operator_identity: &CanonicalDocument,
+    retention: &nq_core::config::RetentionConfig,
 ) -> Result<(PathBuf, String)> {
     let started_at = chrono::Utc::now();
     let temporary = backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
@@ -2553,7 +2586,56 @@ fn upgrade_v12_to_current(
             &json!({"integrity":"ok","source_schema_version":12,"source_schema_artifact_digest":nq_store::SCHEMA_V12_ARTIFACT_DIGEST,"backup_reopened":true,"historical_local_successor_acquisitions":"absent_not_synthesized"}),
         )?,
     };
-    Store::upgrade_v12_to_v13(database_path, &receipt)?.validate()?;
+    drop(Store::upgrade_v12_to_v13(database_path, &receipt)?);
+    upgrade_v13_to_current(
+        database_path,
+        backup_directory,
+        binary_digest,
+        operator_identity,
+        retention,
+    )?;
+    Ok((backup, artifact.sha256))
+}
+
+/// Apply the bounded-history schema only through explicit, backed-up upgrade.
+fn upgrade_v13_to_current(
+    database_path: &Path,
+    backup_directory: &Path,
+    binary_digest: &str,
+    operator_identity: &CanonicalDocument,
+    retention: &nq_core::config::RetentionConfig,
+) -> Result<(PathBuf, String)> {
+    let started_at = chrono::Utc::now();
+    let temporary = backup_directory.join(format!(".nq-upgrade-{}.db", uuid::Uuid::new_v4()));
+    let artifact = Store::backup_v13_verified(database_path, &temporary)?;
+    let backup = finalize_upgrade_backup(&temporary, backup_directory, &artifact.sha256)?;
+    let receipt = UpgradeReceiptInput {
+        receipt_id: uuid::Uuid::new_v4().to_string(),
+        from_schema_version: 13,
+        to_schema_version: 14,
+        migrations: CanonicalDocument::from_serializable(&["schema_v13_to_v14_bounded_retention"])?,
+        binary_digest: binary_digest.to_owned(),
+        backup_digest: artifact.sha256.clone(),
+        backup_location: backup.display().to_string(),
+        started_at: started_at.to_rfc3339(),
+        finished_at: started_at.to_rfc3339(),
+        result: "migrated".into(),
+        operator_identity: operator_identity.clone(),
+        verification: CanonicalDocument::from_serializable(&json!({
+            "integrity":"ok", "source_schema_version":13,
+            "source_schema_artifact_digest":nq_store::SCHEMA_V13_ARTIFACT_DIGEST,
+            "backup_reopened":true, "historical_expiry":"absent_not_synthesized"
+        }))?,
+    };
+    Store::upgrade_v13_to_v14_with_capacity(
+        database_path,
+        &receipt,
+        retention.horizon_seconds,
+        retention.byte_ceiling,
+        retention.reserve_bytes,
+        retention.auxiliary_bytes,
+    )?
+    .validate()?;
     Ok((backup, artifact.sha256))
 }
 
@@ -2654,7 +2736,7 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
 
             match source_version {
                 nq_store::SCHEMA_VERSION => {
-                    let mut store = Store::open(&config.database_path)?;
+                    let mut store = open_configured_store(&config)?;
                     store.validate()?;
                     let source_digest = digest_file(&config.database_path)?;
                     // An already-current upgrade still promises a verified
@@ -2778,8 +2860,9 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         &backup_directory,
                         &binary_digest,
                         &operator_identity,
+                        &config.retention,
                     )?;
-                    let store = Store::open(&config.database_path)?;
+                    let store = open_configured_store(&config)?;
                     store.validate()?;
                     record_full_validation(&config.database_path)?;
                     print_value(
@@ -2839,8 +2922,9 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         &backup_directory,
                         &binary_digest,
                         &operator_identity,
+                        &config.retention,
                     )?;
-                    let store = Store::open(&config.database_path)?;
+                    let store = open_configured_store(&config)?;
                     store.validate()?;
                     record_full_validation(&config.database_path)?;
                     print_value(
@@ -2865,8 +2949,9 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         &backup_directory,
                         &binary_digest,
                         &operator_identity,
+                        &config.retention,
                     )?;
-                    let store = Store::open(&config.database_path)?;
+                    let store = open_configured_store(&config)?;
                     store.validate()?;
                     record_full_validation(&config.database_path)?;
                     print_value(
@@ -2886,6 +2971,7 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         &backup_directory,
                         &binary_digest,
                         &operator_identity,
+                        &config.retention,
                     )?;
                     record_full_validation(&config.database_path)?;
                     print_value(
@@ -2893,10 +2979,26 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
                         json_output,
                     )
                 }
+                13 => {
+                    let (backup, backup_digest) = upgrade_v13_to_current(
+                        &config.database_path,
+                        &backup_directory,
+                        &binary_digest,
+                        &operator_identity,
+                        &config.retention,
+                    )?;
+                    record_full_validation(&config.database_path)?;
+                    print_value(
+                        &json!({"result":"migrated","from_schema_version":13,
+                        "schema_version":nq_store::SCHEMA_VERSION,"backup":backup,
+                        "backup_digest":backup_digest,"historical_expiry":"absent_not_synthesized"}),
+                        json_output,
+                    )
+                }
                 _ => {
                     // Reuse the store's exact fail-closed diagnostic. `open`
                     // checks version and identity before any persistent PRAGMA.
-                    let _ = Store::open(&config.database_path)?;
+                    let _ = open_configured_store(&config)?;
                     unreachable!("a non-current schema cannot pass exact Store::open")
                 }
             }

@@ -1,8 +1,11 @@
 //! Bounded history validation: the append frontier, the scope a validator
 //! covers, and the store-specific validation watermark.
 //!
-//! Every history table is append-only (update/delete triggers abort, and the
-//! schema fingerprint proves those triggers exist on every open). Rowids
+//! Before the first explicit expiry every history table is append-only.
+//! After expiry the store disables this advisory accelerator and validates
+//! surviving bounded history in full; retired bytes are not re-certified.
+//! Ordinary update/delete triggers abort, and the
+//! schema fingerprint proves those triggers exist on every open. Rowids
 //! therefore grow monotonically in append order. A completed validation
 //! records, per table, the highest validated rowid, the row count, and a hash
 //! chain over the complete encoding (rowid and every column value) of each
@@ -44,7 +47,7 @@ pub const VALIDATION_WATERMARK_SCHEMA: &str = "nq.validation_watermark.v3";
 /// watermarks stop applying and the next open validates in full. Semantic
 /// rules layered above the store are bound separately through the engine
 /// rules a watermark records.
-pub const VALIDATION_RULES: &str = concat!("nq-store/", env!("CARGO_PKG_VERSION"), "/rules.2");
+pub const VALIDATION_RULES: &str = concat!("nq-store/", env!("CARGO_PKG_VERSION"), "/rules.3");
 
 /// Every append-only history table. The frontier covers all of them.
 pub(crate) const HISTORY_TABLES: &[&str] = &[
@@ -849,6 +852,8 @@ pub(crate) fn write_watermark(
     };
     watermark.commitment_digest = watermark.computed_commitment();
     let document = CanonicalDocument::from_serializable(&watermark)?;
+    crate::capacity::preflight_watermark(database, document.as_bytes().len())
+        .map_err(|error| StoreError::WatermarkWrite(error.to_string()))?;
     let path = watermark_path(database);
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(format!(

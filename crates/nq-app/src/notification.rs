@@ -1714,6 +1714,7 @@ mod tests {
 
     fn config(root: &TempDir) -> NqConfig {
         let config = NqConfig {
+            retention: Default::default(),
             schema: CONFIG_SCHEMA.into(),
             database_path: root.path().join("notification.db"),
             socket_path: root.path().join("nqd.sock"),
@@ -1731,6 +1732,7 @@ mod tests {
         fs::create_dir(&inbox).expect("create inbox");
         fs::set_permissions(&inbox, fs::Permissions::from_mode(0o711)).expect("protect inbox");
         let config = NqConfig {
+            retention: Default::default(),
             schema: CONFIG_SCHEMA.into(),
             database_path: root.path().join("notification.db"),
             socket_path: root.path().join("nqd.sock"),
