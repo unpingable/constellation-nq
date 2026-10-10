@@ -1299,6 +1299,18 @@ impl Store {
                     run_evaluations: std::cell::RefCell::new(None),
                 };
             }
+            // No certification was carried: later opens and engine paths
+            // validate in full, and this handle records nothing under the
+            // new boundary. Its own store-level frontier stays proven (the
+            // surviving rows below it were validated, and this transaction
+            // validated what it changed), re-anchored past deleted bounds.
+            (None, Some((open, validated))) => {
+                self.validation = ValidationState {
+                    open_frontier: Some(open),
+                    store_validated: Some(validated),
+                    ..ValidationState::default()
+                };
+            }
             _ => self.validation = ValidationState::default(),
         }
         Ok(RetentionResult {
