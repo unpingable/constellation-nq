@@ -14448,12 +14448,16 @@ sys.stdout.write("\n")
             // A second one-candidate expiry whose process stops after COMMIT
             // and before the carried watermark is written.
             let sidecar = nq_store::watermark_path(&path);
-            let before_crash = std::fs::read(&sidecar).expect("watermark before the crash");
+            // A store that never certifies after expiry has no sidecar; the
+            // simulated crash then changes nothing.
+            let before_crash = std::fs::read(&sidecar).ok();
             let mut engine = CollectionEngine::open(&config).expect("engine for crash expiry");
             let crashed = expire_ordinary_history(engine.store_mut_for_test(), &crash_cutoff)
                 .expect("crash-phase expiry");
             drop(engine);
-            std::fs::write(&sidecar, &before_crash).expect("restore the pre-commit watermark");
+            if let Some(before_crash) = &before_crash {
+                std::fs::write(&sidecar, before_crash).expect("restore the pre-commit watermark");
+            }
             let (g_store, g_engine, crash_mode) = open_pair(&config);
             let g = (g_store.0 + g_engine.0, g_store.1 + g_engine.1);
             let (h_store, h_engine, recovered_mode) = open_pair(&config);
