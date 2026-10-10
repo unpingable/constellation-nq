@@ -3,6 +3,11 @@ Description=NQ-ng local operational evidence service
 Documentation=file:///usr/share/doc/nq-ng/OPERATIONS.md
 After=local-fs.target
 RequiresMountsFor=/var/lib/nq
+# A startup refusal (capacity, envelope mismatch, integrity) exits 1. Bound
+# Restart=on-failure so a refusing store stops after five attempts in five
+# minutes instead of restart-looping; `systemctl reset-failed nqd` re-arms it.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple

@@ -525,6 +525,20 @@ mod tests {
         );
     }
 
+    /// A startup refusal exits 1; the packaged unit must bound restarts so a
+    /// refusing store cannot restart-loop forever (NQ #27 audit G1).
+    #[test]
+    fn packaged_unit_bounds_restart_attempts() {
+        const UNIT: &str = include_str!("../../../packaging/systemd/nqd.service");
+        let unit_section = UNIT
+            .split("[Service]")
+            .next()
+            .expect("unit section precedes service section");
+        assert!(unit_section.lines().any(|line| line == "StartLimitIntervalSec=300"));
+        assert!(unit_section.lines().any(|line| line == "StartLimitBurst=5"));
+        assert!(UNIT.lines().any(|line| line == "Restart=on-failure"));
+    }
+
     /// Default packaged startup must expose no host-local INET listener: the
     /// shipped unit carries no console address, and parsing its exact nqd
     /// invocation yields none.

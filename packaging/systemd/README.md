@@ -53,6 +53,14 @@ pinned. Before creating a private directory, NQ pins `/run/nq/helpers` and
 requires its canonical inode, exact `nq:nq` ownership, mode `0711`, no POSIX
 ACL, and protected real-directory ancestors.
 
+Startup refusals exit with status 1. `Restart=on-failure` is bounded by
+`StartLimitIntervalSec=300` and `StartLimitBurst=5`: after five failed starts
+within five minutes systemd leaves the unit failed instead of restarting it
+forever. Inspect the journal and `nq doctor` (retention and capacity fields),
+correct the cause, then run `systemctl reset-failed nqd` before starting it
+again. Refused retention expiry and refused collections do not stop a running
+daemon; they are logged as warnings with their refusal class.
+
 The service is not started by package installation. Before enabling it, an
 operator must create `/etc/nq/nq.toml`, run `nq init`, admit each configured
 watcher, and run `nq doctor`. Admission and doctor must use the documented
