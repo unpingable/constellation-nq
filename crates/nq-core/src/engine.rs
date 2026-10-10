@@ -13106,6 +13106,225 @@ sys.stdout.write("\n")
             .expect("native retained replay after full-store maintenance");
     }
 
+    /// Current finding states as (condition_state, visibility_state).
+    fn audit_finding_states(store: &Store) -> Vec<(String, String)> {
+        store
+            .finding_snapshots()
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.condition_state, row.visibility_state))
+            .collect()
+    }
+
+    /// Read-only probe of finding custody for the NQ #27 defect specimens.
+    fn audit_finding_probe(path: &Path) -> (i64, Option<i64>, Vec<(String, i64)>) {
+        let connection = rusqlite::Connection::open(path).expect("audit reader");
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM finding_events", [], |r| r.get(0))
+            .expect("finding event count");
+        let first_sequence: Option<i64> = connection
+            .query_row(
+                "SELECT MIN(e.evaluation_sequence) FROM finding_events f JOIN evaluation_runs e ON e.evaluation_id=f.evaluation_id",
+                [],
+                |r| r.get(0),
+            )
+            .expect("first finding evaluation sequence");
+        let mut statement = connection
+            .prepare(
+                "SELECT f.event_kind,e.evaluation_sequence FROM finding_events f JOIN evaluation_runs e ON e.evaluation_id=f.evaluation_id ORDER BY e.evaluation_sequence",
+            )
+            .expect("finding event query");
+        let events = statement
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("finding events")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("finding event rows");
+        (count, first_sequence, events)
+    }
+
+    /// DEFECT SPECIMEN (NQ #27 audit, DEFECT 1): a finding that opened and then
+    /// RESOLVED still pins the global expiry prefix. Expiry never retires
+    /// `finding_events`, every evaluation they cite is protected, and only a
+    /// contiguous prefix can retire, so the evaluation floor stays below the
+    /// finding's opening evaluation forever and later cycles reclaim nothing.
+    /// This test passes while the defect is present; a repair should flip it.
+    #[test]
+    fn audit_specimen_resolved_finding_still_pins_global_expiry_prefix() {
+        let config = NqConfig::from_toml(&host_example_text()).expect("host config");
+        let watcher = &config.watchers[0];
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("resolved-finding-pin.db");
+        let mut store = Store::initialize_with_capacity(
+            &path,
+            604_800,
+            Some(32 * 1024 * 1024),
+            Some(0),
+            Some(0),
+        )
+        .expect("bounded store");
+        let observed = Utc::now() - Duration::seconds(30);
+        // healthy, healthy, PRESENT (opens), absent (resolves), then healthy.
+        let loads = [1.0, 1.0, 8.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        for (index, load) in loads.iter().enumerate() {
+            let suffix = format!("audit-pin-{index}");
+            commit_real_host_detector_report(
+                &mut store,
+                watcher,
+                &format!("report-{suffix}"),
+                &suffix,
+                observed + Duration::milliseconds(i64::try_from(index).unwrap() * 10),
+                *load,
+                None,
+            );
+            let (count, _, _) = audit_finding_probe(&path);
+            println!(
+                "S1 collection {index} load_1m={load} finding_events={count} finding_current={:?}",
+                audit_finding_states(&store)
+            );
+        }
+        let (finding_count, finding_sequence, events) = audit_finding_probe(&path);
+        println!("S1 finding events (kind, evaluation_sequence): {events:?}");
+        let finding_sequence = finding_sequence.expect("a finding was opened");
+        assert!(finding_count >= 2, "finding opened and resolved");
+        assert_eq!(
+            events.last().map(|(kind, _)| kind.as_str()),
+            Some("resolved"),
+            "the finding is resolved before expiry"
+        );
+        assert!(
+            audit_finding_states(&store)
+                .iter()
+                .all(|(condition, _)| condition != "present"),
+            "no finding is currently present"
+        );
+        let latest = store.latest_evaluation_sequence().unwrap();
+        let before = store.retention_boundary().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let cutoff = timestamp(Utc::now() - Duration::seconds(1));
+        let first = expire_ordinary_history(&mut store, &cutoff).expect("first expiry");
+        println!(
+            "S1 cycle1 cutoff={cutoff} latest_evaluation_sequence={latest} finding_open_sequence={finding_sequence} before={before:?} after={:?} deleted_rows={}",
+            first.boundary, first.deleted_rows
+        );
+        for index in 10..13 {
+            let suffix = format!("audit-pin-{index}");
+            commit_real_host_detector_report(
+                &mut store,
+                watcher,
+                &format!("report-{suffix}"),
+                &suffix,
+                Utc::now() - Duration::seconds(2),
+                1.0,
+                None,
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let cutoff = timestamp(Utc::now() - Duration::seconds(1));
+        let second = expire_ordinary_history(&mut store, &cutoff).expect("second expiry");
+        let third = expire_ordinary_history(&mut store, &timestamp(Utc::now()))
+            .expect("third expiry");
+        println!(
+            "S1 cycle2 cutoff={cutoff} latest_evaluation_sequence={} boundary={:?} deleted_rows={}",
+            store.latest_evaluation_sequence().unwrap(),
+            second.boundary,
+            second.deleted_rows
+        );
+        println!(
+            "S1 cycle3 boundary={:?} deleted_rows={} finding_current={:?}",
+            third.boundary,
+            third.deleted_rows,
+            audit_finding_states(&store)
+        );
+        // Defect present: the floor cannot pass the resolved finding's opening
+        // evaluation, so every later, fully aged collection is retained.
+        assert!(first.boundary.evaluation_floor < finding_sequence);
+        assert_eq!(second.deleted_rows, 0);
+        assert_eq!(third.deleted_rows, 0);
+        assert_eq!(second.boundary, first.boundary);
+        assert_eq!(third.boundary, first.boundary);
+        assert!(store.latest_evaluation_sequence().unwrap() > finding_sequence + 5);
+    }
+
+    /// COST SPECIMEN (NQ #27 audit, DEFECT 4): with the prefix pinned by a
+    /// resolved finding, every expiry call still passes `prefix_may_advance`
+    /// and pays full validation before rolling back. Measures wall time per
+    /// call against retained collections. Run with --ignored --nocapture.
+    #[test]
+    #[ignore = "audit cost measurement; minutes of runtime"]
+    fn audit_specimen_pinned_expiry_cost_scales_with_retained_history() {
+        let config = NqConfig::from_toml(&host_example_text()).expect("host config");
+        let watcher = &config.watchers[0];
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("pinned-cost.db");
+        let mut store = Store::initialize_with_capacity(
+            &path,
+            604_800,
+            Some(1024 * 1024 * 1024),
+            Some(0),
+            Some(0),
+        )
+        .expect("bounded store");
+        let targets: Vec<usize> = std::env::var("NQ_AUDIT_S4_TARGETS")
+            .ok()
+            .map(|value| value.split(',').map(|n| n.parse().expect("target")).collect())
+            .unwrap_or_else(|| vec![500, 2000, 8000]);
+        let mut committed = 0usize;
+        let commit = |store: &mut Store, load: f64, committed: &mut usize| {
+            let suffix = format!("audit-cost-{committed}");
+            commit_real_host_detector_report(
+                store,
+                watcher,
+                &format!("report-{suffix}"),
+                &suffix,
+                Utc::now() - Duration::seconds(30),
+                load,
+                None,
+            );
+            *committed += 1;
+        };
+        // Pin: one present (opens a finding), one absent (resolves it).
+        commit(&mut store, 8.0, &mut committed);
+        commit(&mut store, 1.0, &mut committed);
+        for target in targets {
+            let grow = std::time::Instant::now();
+            let start = committed;
+            while committed < target {
+                commit(&mut store, 1.0, &mut committed);
+            }
+            let grow_seconds = grow.elapsed().as_secs_f64();
+            let per_commit_ms = if committed > start {
+                grow_seconds * 1000.0 / (committed - start) as f64
+            } else {
+                0.0
+            };
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            let cutoff = timestamp(Utc::now());
+            let file_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let validated = std::time::Instant::now();
+            let result = expire_ordinary_history(&mut store, &cutoff).expect("pinned expiry");
+            let validated_seconds = validated.elapsed().as_secs_f64();
+            let store_only = std::time::Instant::now();
+            let result_store = store
+                .expire_ordinary_before(&cutoff)
+                .expect("store-only pinned expiry");
+            let store_seconds = store_only.elapsed().as_secs_f64();
+            println!(
+                "S4 N={committed} file_bytes={file_bytes} grow_s={grow_seconds:.1} commit_ms_avg={per_commit_ms:.2} \
+                 expire_ordinary_history_s={validated_seconds:.3} expire_ordinary_before_s={store_seconds:.3} \
+                 deleted={}/{} boundary={:?}",
+                result.deleted_rows, result_store.deleted_rows, result.boundary
+            );
+            assert_eq!(result.deleted_rows, 0, "prefix pinned by resolved finding");
+            assert_eq!(result_store.deleted_rows, 0);
+            // Fixture growth cost (full evaluation snapshot per commit) is not
+            // the quantity under measurement; bound it separately.
+            if validated_seconds > 300.0 || grow_seconds > 1800.0 {
+                println!("S4 stopping: expiry call exceeded 5 minutes or growth exceeded 30");
+                break;
+            }
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn commit_real_host_detector_report(
         store: &mut Store,

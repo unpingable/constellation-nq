@@ -1576,6 +1576,128 @@ mod tests {
         body
     }
 
+    /// NQ #27 audit specimen fixture: a capacity-initialized store with three
+    /// aged typed evaluations (no finding), expired through the same typed
+    /// entrypoint daemon startup and collection use.
+    fn audit_expired_evaluation_store(root: &Path) -> PathBuf {
+        let database = root.join("nq.db");
+        let mut store = Store::initialize_with_capacity(
+            &database,
+            604_800,
+            Some(64 * 1024 * 1024),
+            Some(0),
+            Some(0),
+        )
+        .expect("capacity-aware store");
+        for suffix in ["audit-a", "audit-b", "audit-c"] {
+            seed_present_then_refused_evaluation(
+                &mut store,
+                suffix,
+                BTreeMap::from([("reason".to_owned(), "missing_testimony".to_owned())]),
+                false,
+            );
+        }
+        let before = store.retention_boundary().expect("boundary");
+        let expired =
+            nq_core::engine::expire_ordinary_history(&mut store, "2100-01-01T00:00:00Z")
+                .expect("typed expiry of aged evaluations");
+        println!(
+            "audit fixture: before={before:?} after={:?} deleted_rows={} latest_evaluation_sequence={}",
+            expired.boundary,
+            expired.deleted_rows,
+            store.latest_evaluation_sequence().unwrap()
+        );
+        assert!(expired.boundary.generation > 0);
+        assert!(expired.boundary.evaluation_floor > 0);
+        drop(store);
+        database
+    }
+
+    /// DEFECT SPECIMEN (NQ #27 audit, DEFECT 2): `nq admin archive` (the
+    /// documented route for retiring an oversized store) fails on any store
+    /// after expiry, because archive validation pages evaluation history from
+    /// `after=None`. Passes while the defect is present.
+    #[test]
+    fn audit_specimen_archive_fails_after_expiry() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let root = directory.path();
+        let database = audit_expired_evaluation_store(root);
+        let config = root.join("nq.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "schema = \"nq.config.v1\"\ndatabase_path = \"{}\"\nsocket_path = \"{}\"\n\
+                 admissions_dir = \"{}\"\nhelper_runtime_dir = \"{}\"\n",
+                database.display(),
+                root.join("nqd.sock").display(),
+                root.join("admissions").display(),
+                root.join("helpers").display(),
+            ),
+        )
+        .expect("write config");
+        let destination = root.join("archive");
+        let error = crate::archive::create_archive(&config, &destination)
+            .expect_err("archive after expiry");
+        let rendered = format!("{error:#}");
+        println!("S2 create_archive error: {rendered}");
+        assert!(rendered.contains("full history unavailable"), "{rendered}");
+        assert!(!destination.exists(), "no sealed archive");
+    }
+
+    /// DEFECT SPECIMEN (NQ #27 audit, DEFECT 3): after expiry, the documented
+    /// first page `GET /v1/evaluations?limit=10` gets no HTTP response; the
+    /// handler returns the HistoryExpired error and the connection closes.
+    /// Passes while the defect is present.
+    #[tokio::test]
+    async fn audit_specimen_evaluations_first_page_after_expiry_has_no_http_response() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let database = audit_expired_evaluation_store(directory.path());
+        let probe = |path: &'static str| {
+            let database = database.clone();
+            async move {
+                let (mut client, server) = tokio::io::duplex(64 * 1024);
+                let task = tokio::spawn(handle_connection(server, database));
+                client
+                    .write_all(format!("GET {path} HTTP/1.1\r\nHost: local\r\n\r\n").as_bytes())
+                    .await
+                    .expect("write request");
+                let mut response = Vec::new();
+                client
+                    .read_to_end(&mut response)
+                    .await
+                    .expect("read until close");
+                let handler = task.await.expect("request task joins");
+                (response, handler.map_err(|error| format!("{error:#}")))
+            }
+        };
+        let (response, handler) = probe("/v1/evaluations?limit=10").await;
+        println!(
+            "S3 no-cursor: response_bytes={} response={:?} handler={handler:?}",
+            response.len(),
+            String::from_utf8_lossy(&response)
+        );
+        assert!(response.is_empty(), "no HTTP response is written");
+        let handler_error = handler.expect_err("handler returns the expiry error");
+        assert!(handler_error.contains("full history unavailable"), "{handler_error}");
+        // Controls: `after` alone is a 400 by the query contract, so the
+        // consumer cannot discover the floor; a declared interval at the
+        // retained floor is answered.
+        for path in [
+            "/v1/evaluations?limit=10&after=2",
+            "/v1/evaluations?limit=10&after=2&through=3",
+        ] {
+            let (response, handler) = probe(path).await;
+            let text = String::from_utf8_lossy(&response).into_owned();
+            println!(
+                "S3 control {path}: status_line={:?} body={:?} handler_ok={}",
+                text.lines().next(),
+                text.split_once("\r\n\r\n")
+                    .map(|(_, body)| body.chars().take(160).collect::<String>()),
+                handler.is_ok()
+            );
+        }
+    }
+
     #[test]
     fn console_binding_is_loopback_only() {
         assert!(parse_loopback("127.0.0.1:8787").is_ok());
