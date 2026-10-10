@@ -839,9 +839,21 @@ open (as rows at or below the open frontier were before 0.2.4). After
 restoring or replacing the database file, restart `nqd`.
 
 `nqd` also stops on SIGTERM (as `systemctl stop` sends) as it does on SIGINT:
-it records its stopped status and closes its store connections, so SQLite
-checkpoints and removes the write-ahead log. Up to 0.2.3 SIGTERM killed the
-process without closing them. A collection already running in a helper is
+it records its stopped status, runs one bounded `TRUNCATE` checkpoint through
+the same guarded, envelope-checked path that precedes every write, and closes
+its store connections. Up to 0.2.3 SIGTERM killed the process without closing
+them. Since bounded retention, closing a connection never checkpoints (that
+would be a main-file write outside the capacity envelope), so the stop
+checkpoint is what leaves the main file complete: after a clean stop
+`nq.db-wal` is empty (0 bytes) and `nq.db-shm` and `nq.db.capacity.lock`
+remain. The lock file is persistent; every writer locks it and the kernel
+releases it when the process exits. Do not delete it while any `nq` process
+may run. If the stop checkpoint is refused (a concurrent reader or writer, or
+the envelope; the guard and the reader wait are each bounded at 5 s), `nqd`
+logs `bounded stop checkpoint refused` and `nq.db-wal` keeps committed frames.
+Every `nq` CLI write also leaves its last commit in the WAL. `nq.db` together
+with `nq.db-wal` is always one consistent store, but `nq.db` alone may be
+missing the newest commits: see [Backup](#backup). A collection already running in a helper is
 not interrupted: the process exits after it finishes, which can follow the
 `stopped` record, and systemd's `TimeoutStopSec` (45 s in the packaged unit)
 bounds the wait, after which SIGKILL rolls back any open transaction.
@@ -981,6 +993,12 @@ sudo systemctl start nqd.service
 The destination must not exist. Copy a retained backup off the host together
 with its reported digest and protect it like the evidence database.
 
+A file-level copy, snapshot, or digest of `nq.db` alone is not the store:
+connections do not checkpoint on close, so the newest commits can reside only
+in `nq.db-wal` (after a refused stop checkpoint, or after any `nq` CLI write).
+If a file-level copy is unavoidable, take it while no `nq` process runs and
+copy `nq.db` and `nq.db-wal` together; `nq backup` has no such caveat.
+
 ## Restore
 
 Restore validates the source and refuses to replace an existing destination.
@@ -1043,7 +1061,11 @@ nq_helper_command --config /etc/nq/nq.toml admin archive \
 
 Creation uses a verified online backup, checkpoints the standalone copy out of
 WAL mode, normalizes the preserved verifier to mode `0755`, and seals an exact
-file inventory. Verification requires the archive format, schema artifact,
+file inventory. The staged copy's own capacity lock and any empty WAL or SHM
+belong to the staging copy and are removed under that copy's lock once its
+connections close; a staged WAL that still holds frames refuses the archive.
+The live store's lock and sidecars are never touched, and a writer holding
+the live lock makes the archive refuse after the bounded wait. Verification requires the archive format, schema artifact,
 tool version, archived-binary digest, and executing verifier bytes to agree. It
 opens `db/nq.db` through SQLite immutable mode and exhaustively reopens every
 admitted judgment and materialized child row, watcher-run outcome, immutable

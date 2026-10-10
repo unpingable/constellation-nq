@@ -68,10 +68,42 @@ fn sigterm_stops_nqd_and_closes_the_store() {
         output.status
     );
     assert!(log.contains("termination requested"), "{log}");
-    // Every connection closed: the last close checkpoints and removes the WAL.
     assert!(
-        !root.join("nq.db-wal").exists(),
-        "the write-ahead log survived the stop"
+        log.contains("write-ahead log checkpointed at stop"),
+        "{log}"
+    );
+    // Closing never checkpoints (an unbudgeted write); the stop runs one
+    // bounded TRUNCATE checkpoint instead, so the WAL is empty or absent and
+    // the main file alone holds the stopped record.
+    let wal = root.join("nq.db-wal");
+    assert!(
+        fs::metadata(&wal).map_or(true, |metadata| metadata.len() == 0),
+        "the stop left committed frames in the write-ahead log"
+    );
+    let main_only_root = tempfile::tempdir().expect("main-file copy directory");
+    let main_only = main_only_root.path().join("nq.db");
+    fs::copy(&database, &main_only).expect("copy the main file alone");
+    let code: String = rusqlite::Connection::open(&main_only)
+        .expect("open main-file copy")
+        .query_row(
+            "SELECT code FROM status_events
+             WHERE component_kind = 'daemon' AND component_id = 'nqd'
+             ORDER BY status_sequence DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("daemon status in the main file");
+    assert_eq!(code, "stopped", "the main file holds the stop");
+    // The persistent capacity lock remains, released.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join("nq.db.capacity.lock"))
+        .expect("capacity lock remains");
+    drop(
+        nix::fcntl::Flock::lock(lock, nix::fcntl::FlockArg::LockExclusiveNonblock)
+            .map_err(|(_, error)| error)
+            .expect("no process retains the capacity guard"),
     );
     let connection = rusqlite::Connection::open(&database).expect("open store");
     let code: String = connection

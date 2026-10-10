@@ -973,7 +973,14 @@ fn bounded_status_export_equals_the_complete_history_walk() {
     let unwatermarked_root = root.join("unwatermarked");
     fs::create_dir(&unwatermarked_root).expect("create copy directory");
     let unwatermarked = unwatermarked_root.join("nq.db");
+    // Connections do not checkpoint on close: the newest commits (gamma's
+    // refusal) reside in the WAL, so the closed store is nq.db plus nq.db-wal.
     fs::copy(&database, &unwatermarked).expect("copy database");
+    let mut wal = database.as_os_str().to_owned();
+    wal.push("-wal");
+    let mut copied_wal = unwatermarked.as_os_str().to_owned();
+    copied_wal.push("-wal");
+    fs::copy(PathBuf::from(wal), PathBuf::from(copied_wal)).expect("copy write-ahead log");
     let unwatermarked_config = write_config(&unwatermarked_root, "complete", &unwatermarked);
     let complete = success(run(nq, &unwatermarked_config, &["status", "export"]));
     assert!(!nq_store::watermark_path(&unwatermarked).exists());

@@ -774,6 +774,190 @@ mod tests {
         assert_eq!(stored_status_ids(&first).len(), 1);
     }
 
+    fn lock_path(path: &Path) -> PathBuf {
+        let mut name = path.as_os_str().to_owned();
+        name.push(".capacity.lock");
+        PathBuf::from(name)
+    }
+
+    fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    }
+
+    #[test]
+    fn operation_guard_never_holds_a_lock_file_unlinked_from_the_database_path() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("nq.db");
+        let first = operation_guard(&path).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let waiter_path = path.clone();
+        let waiter = std::thread::spawn(move || {
+            let guard =
+                operation_guard_with_timeout(&waiter_path, std::time::Duration::from_secs(10));
+            sender.send(()).unwrap();
+            guard
+        });
+        // The waiter has opened the original lock inode and is polling it.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // The original inode is unlinked and a cooperating writer's locked
+        // replacement takes its name in one rename, before the original
+        // holder releases: the waiter never sees an unheld name.
+        let staged = root.path().join("replacement.lock");
+        let replacement = nix::fcntl::Flock::lock(
+            std::fs::File::create(&staged).unwrap(),
+            nix::fcntl::FlockArg::LockExclusiveNonblock,
+        )
+        .map_err(|(_, error)| error)
+        .unwrap();
+        std::fs::rename(&staged, lock_path(&path)).unwrap();
+        drop(first);
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "a guard on the unlinked inode must not coexist with the path's guard"
+        );
+        drop(replacement);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        let guard = waiter.join().unwrap().unwrap();
+        let held = guard.metadata().unwrap();
+        let named = std::fs::symlink_metadata(lock_path(&path)).unwrap();
+        assert_eq!((held.dev(), held.ino()), (named.dev(), named.ino()));
+    }
+
+    #[test]
+    fn closed_private_copy_sidecars_are_retired_under_their_own_guard() {
+        let (_root, path, mut store) = tiny_store();
+        store.record_status(&status(0, 1024)).unwrap();
+        drop(store);
+        let copy_root = tempfile::tempdir().unwrap();
+        let copy = copy_root.path().join("nq.db");
+        crate::Store::open_read_only(&path)
+            .unwrap()
+            .backup_verified(&copy)
+            .unwrap();
+        let archived = crate::Store::open(&copy).unwrap();
+        archived.prepare_archive_copy().unwrap();
+        drop(archived);
+        std::fs::write(sidecar(&copy, "-shm"), [0_u8; 32]).unwrap();
+        std::fs::write(sidecar(&copy, "-wal"), []).unwrap();
+        assert!(lock_path(&copy).is_file());
+
+        retire_private_copy_sidecars(&copy).unwrap();
+
+        let mut names = std::fs::read_dir(copy_root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(names, ["nq.db"]);
+        drop(crate::Store::open_immutable(&copy).unwrap());
+        // The source store's own lock is untouched by retiring the copy's.
+        assert!(lock_path(&path).is_file());
+    }
+
+    #[test]
+    fn a_private_copy_with_committed_wal_frames_is_not_retired() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("nq.db");
+        drop(
+            crate::Store::initialize_with_capacity(
+                &path,
+                DEFAULT_HORIZON_SECONDS,
+                Some(8 * 1024 * 1024),
+                Some(0),
+                Some(0),
+            )
+            .unwrap(),
+        );
+        let mut store = crate::Store::open(&path).unwrap();
+        store.record_status(&status(0, 1024)).unwrap();
+        drop(store);
+        let wal = std::fs::metadata(sidecar(&path, "-wal")).unwrap().len();
+        assert!(wal > 0, "the last commit remains WAL-resident after close");
+
+        let error = retire_private_copy_sidecars(&path).unwrap_err();
+        assert!(
+            matches!(error, StoreError::Integrity(ref text) if text.contains("write-ahead log")),
+            "{error:?}"
+        );
+        assert_eq!(
+            std::fs::metadata(sidecar(&path, "-wal")).unwrap().len(),
+            wal
+        );
+        assert!(lock_path(&path).is_file());
+        assert!(sidecar(&path, "-shm").is_file());
+    }
+
+    #[test]
+    fn a_held_guard_prevents_retiring_its_lock() {
+        let (_root, path, store) = tiny_store();
+        drop(store);
+        let held = operation_guard(&path).unwrap();
+        let before = std::fs::symlink_metadata(lock_path(&path)).unwrap().ino();
+        let error =
+            retire_private_copy_sidecars_with_timeout(&path, std::time::Duration::from_millis(10))
+                .unwrap_err();
+        assert!(
+            matches!(error, StoreError::Refused(crate::Refusal::Contention(ref text)) if text.contains("concurrent writer owns operation guard"))
+        );
+        assert_eq!(
+            std::fs::symlink_metadata(lock_path(&path)).unwrap().ino(),
+            before
+        );
+        drop(held);
+    }
+
+    #[test]
+    fn explicit_wal_checkpoint_folds_the_last_commit_or_refuses_and_keeps_it() {
+        let (_root, path, mut store) = tiny_store();
+        store.record_status(&status(0, 1024)).unwrap();
+        let wal = sidecar(&path, "-wal");
+        let resident = std::fs::metadata(&wal).unwrap().len();
+        assert!(resident > 0);
+        let main_only = |label: &str| -> i64 {
+            let copy_root = tempfile::tempdir().unwrap();
+            let copy = copy_root.path().join("nq.db");
+            std::fs::copy(&path, &copy).unwrap();
+            Connection::open(&copy)
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM status_events", [], |row| row.get(0))
+                .unwrap_or_else(|error| panic!("{label}: {error}"))
+        };
+        assert_eq!(main_only("before"), 0, "the commit is WAL-resident");
+
+        let reader =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM status_events", [], |row| row.get(0))
+            .unwrap();
+        let error = store.checkpoint_wal().unwrap_err();
+        assert!(
+            matches!(error, StoreError::Refused(crate::Refusal::Contention(ref text)) if text.contains("prevents bounded WAL checkpoint")),
+            "{error:?}"
+        );
+        // A reader's snapshot blocks the reset, not the backfill already
+        // admitted by the preflight: the WAL itself is kept.
+        assert!(std::fs::metadata(&wal).unwrap().len() >= resident);
+        reader.execute_batch("ROLLBACK").unwrap();
+        drop(reader);
+
+        store.checkpoint_wal().unwrap();
+        assert_eq!(std::fs::metadata(&wal).unwrap().len(), 0);
+        assert_eq!(main_only("checkpointed"), 1);
+        drop(store);
+        assert_eq!(std::fs::metadata(&wal).unwrap().len(), 0);
+        assert_eq!(
+            stored_status_ids(&crate::Store::open(&path).unwrap()).len(),
+            1
+        );
+    }
+
     #[test]
     fn leftover_cold_rollback_journal_is_charged_without_removal() {
         let (_root, path, mut store) = tiny_store();
@@ -950,6 +1134,60 @@ fn operation_guard_with_timeout(
             return Err(envelope_fault("database requires an unaliased regular pathname"));
         }
     }
+    let lock = capacity_lock_path(path)?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+            .open(&lock)?;
+        if !file.metadata()?.is_file() {
+            return Err(envelope_fault("capacity lock is not a regular file"));
+        }
+        let error = match nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
+        {
+            Ok(guard) => {
+                // The lock is the inode currently named by the lock path. A
+                // guard won on an inode that was unlinked (by the owner of a
+                // private copy) or replaced while this process waited would
+                // coexist with a guard on the named inode, so it is dropped and
+                // the current name is locked instead.
+                let held = guard.metadata()?;
+                match std::fs::symlink_metadata(&lock) {
+                    Ok(named) if (named.dev(), named.ino()) == (held.dev(), held.ino()) => {
+                        return Ok(guard);
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+                nix::errno::Errno::EWOULDBLOCK
+            }
+            Err((_, error)) => error,
+        };
+        if !matches!(
+            error,
+            nix::errno::Errno::EWOULDBLOCK | nix::errno::Errno::EINTR
+        ) {
+            return Err(refusal(format!(
+                "operation guard acquisition failed: {error}"
+            )));
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(contention(format!(
+                "concurrent writer owns operation guard after bounded wait: {error}"
+            )));
+        }
+        std::thread::sleep((deadline - now).min(std::time::Duration::from_millis(2)));
+    }
+}
+
+fn capacity_lock_path(path: &Path) -> Result<PathBuf, StoreError> {
     let parent = std::fs::canonicalize(
         path.parent()
             .ok_or_else(|| refusal("database has no parent"))?,
@@ -959,41 +1197,72 @@ fn operation_guard_with_timeout(
         .ok_or_else(|| refusal("database has no file name"))?
         .to_owned();
     name.push(".capacity.lock");
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
-        .open(parent.join(name))?;
-    if !file.metadata()?.is_file() {
-        return Err(envelope_fault("capacity lock is not a regular file"));
+    Ok(parent.join(name))
+}
+
+/// Remove the SQLite and capacity sidecars of a private database copy whose
+/// connections have all closed, such as an archive staging copy.
+///
+/// The caller must own the copy exclusively: it was created under a fresh
+/// private path by this process and no connection to it remains open. The
+/// copy's own operation guard is acquired first (a bounded wait), so a lock
+/// held by any other cooperating process is never removed, and the lock file
+/// is unlinked while that guard is held; a waiter on the unlinked inode
+/// re-locks the current name (see `operation_guard_with_timeout`). A
+/// non-empty write-ahead log or a rollback journal holds committed or
+/// uncommitted state that is not in the main file and is refused, leaving
+/// every member in place. The empty WAL and the SHM index carry no state.
+///
+/// # Errors
+///
+/// Returns a refusal when another process holds the copy's guard, and an
+/// integrity error when the main file does not hold the complete copy.
+pub fn retire_private_copy_sidecars(path: &Path) -> Result<(), StoreError> {
+    retire_private_copy_sidecars_with_timeout(path, std::time::Duration::from_secs(5))
+}
+
+fn retire_private_copy_sidecars_with_timeout(
+    path: &Path,
+    timeout: std::time::Duration,
+) -> Result<(), StoreError> {
+    let member = |suffix: &str| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    let guard = operation_guard_with_timeout(path, timeout)?;
+    match std::fs::symlink_metadata(member("-journal")) {
+        Ok(_) => {
+            return Err(StoreError::Integrity(
+                "private copy has a rollback journal; its main file is not complete".into(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock) {
-            Ok(guard) => return Ok(guard),
-            Err((returned, error)) => {
-                file = returned;
-                if !matches!(
-                    error,
-                    nix::errno::Errno::EWOULDBLOCK | nix::errno::Errno::EINTR
-                ) {
-                    return Err(refusal(format!(
-                        "operation guard acquisition failed: {error}"
-                    )));
-                }
-                let now = std::time::Instant::now();
-                if now >= deadline {
-                    return Err(contention(format!(
-                        "concurrent writer owns operation guard after bounded wait: {error}"
-                    )));
-                }
-                std::thread::sleep((deadline - now).min(std::time::Duration::from_millis(2)));
+    let mut removable = Vec::new();
+    for suffix in ["-wal", "-shm"] {
+        match std::fs::symlink_metadata(member(suffix)) {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(envelope_fault("private copy sidecar is not a regular file"));
             }
+            Ok(metadata) if suffix == "-wal" && metadata.len() != 0 => {
+                return Err(StoreError::Integrity(format!(
+                    "private copy write-ahead log holds {} bytes not in its main file",
+                    metadata.len()
+                )));
+            }
+            Ok(_) => removable.push(member(suffix)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
     }
+    for sidecar in removable {
+        std::fs::remove_file(sidecar)?;
+    }
+    std::fs::remove_file(capacity_lock_path(path)?)?;
+    drop(guard);
+    Ok(())
 }
 
 pub(crate) struct GuardedTransaction<'a> {

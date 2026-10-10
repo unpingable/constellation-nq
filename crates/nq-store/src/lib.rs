@@ -4692,6 +4692,21 @@ impl Store {
         validate_projection_invariants(&self.connection, Scope::FULL)
     }
 
+    /// Fold the write-ahead log into the main file through the same guarded,
+    /// envelope-checked TRUNCATE checkpoint that precedes every write. Close
+    /// never checkpoints; a graceful stop calls this once so the main file
+    /// alone holds every commit. A refusal (another reader or writer, or the
+    /// envelope) changes nothing and leaves the WAL in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns the capacity or contention refusal of the bounded checkpoint.
+    pub fn checkpoint_wal(&self) -> Result<(), StoreError> {
+        self.require_current_schema()?;
+        drop(self.write_guard()?);
+        Ok(())
+    }
+
     fn write_guard(&self) -> Result<Option<capacity::OperationGuard>, StoreError> {
         let Some(path) = &self.path else {
             return Ok(None);
