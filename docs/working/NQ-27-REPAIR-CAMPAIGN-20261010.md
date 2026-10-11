@@ -224,8 +224,9 @@ Do not claim seven-day qualification from the accelerated tests here. NQ #27 sta
 
 ## 10. Exact next action
 
-Owner review of this report and of `campaign/nq-27-repair-20261010` at 3d0b2b6 (diff against
-257096b: 25 commits). If accepted: merge or fast-forward is the owner's decision (nothing is
+Owner review of this report and of `campaign/nq-27-repair-20261010` at 3d0b2b6, plus the docs
+commit 33c87ce that records this report (33 commits above 257096b, including the two
+specimen/audit-docs commits the branch was based on). If accepted: merge or fast-forward is the owner's decision (nothing is
 pushed); then supervised operation on a non-production store under an 8 GiB-class profile, and
 the obligations in §9 before scheduling the seven-day run. Production recovery remains a separate
 controlled generation rollover; fill `ZONE-ROLLOVER-PLAN-DRAFT.md` identities only from a
