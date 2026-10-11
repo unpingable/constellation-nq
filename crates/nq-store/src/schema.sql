@@ -723,7 +723,16 @@ SELECT
             WHERE event_id = e.event_id
             ORDER BY ordinal
         ) AS ordered
-    ), '[]') AS evidence_json
+    ), '[]') AS evidence_json,
+    -- 1 when the finding's evaluation or a cited report survives only as a
+    -- compact source-expired record (the decision stands; its source expired).
+    (evaluation.source_expired <> 0 OR EXISTS (
+        SELECT 1 FROM finding_evidence AS cited
+        JOIN admitted_reports AS cited_report
+          ON cited_report.report_id = cited.report_id
+         AND cited_report.semantic_digest = cited.report_semantic_digest
+        WHERE cited.event_id = e.event_id AND cited_report.source_expired <> 0
+    )) AS source_expired
 FROM finding_current AS f
 JOIN finding_events AS e ON e.event_id = f.latest_event_id
 JOIN evaluation_runs AS evaluation ON evaluation.evaluation_id = e.evaluation_id;

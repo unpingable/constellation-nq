@@ -32,3 +32,67 @@ CREATE TRIGGER compact_evaluation_runs_insert BEFORE INSERT ON evaluation_runs W
 CREATE TRIGGER compact_admitted_reports_insert BEFORE INSERT ON admitted_reports WHEN NEW.source_expired<>0 AND NOT (COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0)=1 AND NEW.canonical_json=CAST('{}' AS BLOB) AND NEW.validated_report_json=CAST('{}' AS BLOB) AND NEW.next_checkpoint_json IS NULL) BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER compact_raw_submissions_insert BEFORE INSERT ON raw_submissions WHEN NEW.source_expired<>0 AND NOT (COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0)=1 AND length(NEW.raw_bytes)=0) BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER retired_provider_intake_attempts_insert BEFORE INSERT ON provider_intake_attempts WHEN NEW.history_expired<>0 AND NOT (COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0)=1 AND NEW.retired_identity_digest IS NOT NULL AND length(NEW.raw_bytes)=0) BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+-- The public finding read model declares an expired source (`nq query`).
+DROP VIEW public_finding_snapshot_v3;
+CREATE VIEW public_finding_snapshot_v3 AS
+SELECT
+    f.finding_id,
+    e.instance_id,
+    e.detector_id,
+    e.detector_version,
+    e.detector_digest,
+    e.evaluation_revision,
+    evaluation.profile_id,
+    evaluation.profile_version,
+    evaluation.profile_digest,
+    evaluation.profile_semantic_id,
+    CAST(e.subject_json AS TEXT) AS subject_json,
+    e.condition_name,
+    e.condition_state,
+    e.visibility_state,
+    e.operator_work_state,
+    e.severity,
+    e.summary,
+    CAST(e.limitations_json AS TEXT) AS limitations_json,
+    CAST(e.safe_next_checks_json AS TEXT) AS safe_next_checks_json,
+    CAST(e.freshness_json AS TEXT) AS freshness_json,
+    CAST(e.basis_json AS TEXT) AS basis_json,
+    CAST(e.refusal_json AS TEXT) AS refusal_json,
+    e.origin_mode,
+    CAST(e.historical_refs_json AS TEXT) AS historical_refs_json,
+    e.observed_at,
+    e.received_at,
+    e.evaluated_at,
+    e.evaluation_id,
+    (
+        SELECT CAST(refusal.detail_json AS TEXT)
+        FROM refusals AS refusal
+        WHERE refusal.evaluation_id = e.evaluation_id
+    ) AS evaluation_refusal_json,
+    COALESCE((
+        SELECT json_group_array(json_object(
+            'report_id', ordered.report_id,
+            'semantic_digest', ordered.report_semantic_digest,
+            'observation_ordinal', ordered.observation_ordinal,
+            'observed_at', ordered.observed_at,
+            'received_at', ordered.received_at
+        ))
+        FROM (
+            SELECT report_id, report_semantic_digest, observation_ordinal, observed_at, received_at
+            FROM finding_evidence
+            WHERE event_id = e.event_id
+            ORDER BY ordinal
+        ) AS ordered
+    ), '[]') AS evidence_json,
+    -- 1 when the finding's evaluation or a cited report survives only as a
+    -- compact source-expired record (the decision stands; its source expired).
+    (evaluation.source_expired <> 0 OR EXISTS (
+        SELECT 1 FROM finding_evidence AS cited
+        JOIN admitted_reports AS cited_report
+          ON cited_report.report_id = cited.report_id
+         AND cited_report.semantic_digest = cited.report_semantic_digest
+        WHERE cited.event_id = e.event_id AND cited_report.source_expired <> 0
+    )) AS source_expired
+FROM finding_current AS f
+JOIN finding_events AS e ON e.event_id = f.latest_event_id
+JOIN evaluation_runs AS evaluation ON evaluation.evaluation_id = e.evaluation_id;

@@ -14771,6 +14771,11 @@ sys.stdout.write("\n")
             .expect("updated event");
         assert_eq!((condition.as_str(), visibility.as_str()), ("explicitly_absent", "stale"));
         assert_eq!(evidence, cited, "the event re-cites the retained decision's evidence");
+        let view: i64 = rusqlite::Connection::open(path)
+            .expect("probe")
+            .query_row("SELECT source_expired FROM public_finding_snapshot_v3", [], |r| r.get(0))
+            .expect("public view");
+        assert_eq!(view, 1, "the public SQL view declares the expired source");
         let findings = list_findings(store).expect("findings");
         assert_eq!(findings.len(), 1);
         assert!(
