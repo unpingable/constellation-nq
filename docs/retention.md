@@ -125,8 +125,15 @@ existing islands, each batch its own guarded transaction (one generation),
 releasing the operation lock between batches so a concurrent writer waits for
 at most one batch. Batches continue for up to 20 seconds; whatever remains is
 deferred, and the collection path continues it at its next collection rather
-than at the next quantum. A refusal of a later batch keeps the batches already
-committed and defers the rest.
+than at the next quantum. A later batch refused by a concurrent commit is
+retried up to three times within the budget; if it stays refused, the batches
+already committed are kept and the rest is deferred. A refused first batch is
+reported and retried at the next collection.
+
+Each evaluation records the lowest admitted-report sequence its envelope names
+(`min_cited_report_sequence`, derived at insert and re-derived by validation),
+so an expiry finds the evaluations that still name an aged report through an
+index rather than scanning every envelope above the floor.
 Eligibility uses local arrival/admission and completed-run times. Provider
 sample time is not permission to discard a freshly received report.
 

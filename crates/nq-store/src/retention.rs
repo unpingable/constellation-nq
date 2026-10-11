@@ -258,6 +258,35 @@ fn validate_boundary_with(
     }
     Ok(())
 }
+/// Each full evaluation in `scope` carries the exact derived
+/// `min_cited_report_sequence` (the lowest sequence among admitted reports
+/// its envelope names), on which expiry's closure relies to find the
+/// evaluations that name an aged report.
+pub(crate) fn validate_cited_report_sequences(
+    connection: &Connection,
+    scope: Scope<'_>,
+) -> Result<(), StoreError> {
+    if !holes_schema(connection)? {
+        return Ok(());
+    }
+    let new_rows = scope.new_rows("evaluation_runs", "e");
+    let invalid: Option<String> = connection
+        .query_row(
+            &format!(
+                "SELECT e.evaluation_id FROM evaluation_runs e WHERE ({new_rows}) AND e.source_expired=0 AND e.min_cited_report_sequence IS NOT (SELECT MIN((SELECT a.report_sequence FROM admitted_reports a WHERE a.report_id=j.value)) FROM json_tree(CAST(e.detail_json AS TEXT)) j WHERE j.type='text') LIMIT 1"
+            ),
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = invalid {
+        return Err(StoreError::Integrity(format!(
+            "evaluation {id} misstates the lowest admitted report its envelope names"
+        )));
+    }
+    Ok(())
+}
+
 /// Evaluation `e` (full) has a root relationship that may keep it below the
 /// floor: a finding or saved-check row names it, it is a diagnostic origin,
 /// or it is the newest evaluation of its lineage at or below the floor.
@@ -283,7 +312,7 @@ fn justified_run_sql(x: &str) -> String {
                ja.report_id IN (SELECT report_id FROM finding_evidence)
             OR ja.report_sequence=(SELECT MAX(jx.report_sequence) FROM admitted_reports jx WHERE jx.instance_id=ja.instance_id AND jx.report_sequence<=?2)
             OR EXISTS(SELECT 1 FROM evaluation_watermarks jw JOIN evaluation_runs jwe ON jwe.evaluation_id=jw.evaluation_id WHERE jw.instance_id=ja.instance_id AND jw.max_report_sequence=ja.report_sequence AND jwe.source_expired=0)
-            OR ja.report_id IN (SELECT j.value FROM evaluation_runs jj, json_tree(CAST(jj.detail_json AS TEXT)) j WHERE jj.source_expired=0 AND j.type='text')
+            OR EXISTS(SELECT 1 FROM evaluation_runs jj, json_tree(CAST(jj.detail_json AS TEXT)) j WHERE jj.source_expired=0 AND jj.min_cited_report_sequence IS NOT NULL AND jj.min_cited_report_sequence<=ja.report_sequence AND j.type='text' AND j.value=ja.report_id)
             OR (ja.next_checkpoint_json IS NOT NULL AND EXISTS(SELECT 1 FROM watcher_runs jcw JOIN local_watcher_provider_intakes jcl ON jcl.run_id=jcw.run_id JOIN provider_intake_acknowledgments jca ON jca.intake_id=jcl.intake_id AND jca.run_id=jcl.run_id WHERE jcw.run_id={x} AND NOT EXISTS(SELECT 1 FROM admitted_reports newer JOIN raw_submissions ns ON ns.submission_id=newer.submission_id JOIN watcher_runs nw ON nw.run_id=ns.run_id JOIN local_watcher_provider_intakes nl ON nl.run_id=nw.run_id JOIN provider_intake_acknowledgments na ON na.intake_id=nl.intake_id AND na.run_id=nl.run_id WHERE newer.instance_id=ja.instance_id AND nw.checkpoint_contract_digest=jcw.checkpoint_contract_digest AND newer.next_checkpoint_json IS NOT NULL AND newer.report_sequence>ja.report_sequence AND newer.report_sequence<=?2)))))
           OR EXISTS(SELECT 1 FROM status_events jt WHERE jt.run_id={x} AND jt.status_sequence=(SELECT MAX(jo2.status_sequence) FROM status_events jo2 WHERE jo2.component_kind=jt.component_kind AND jo2.component_id=jt.component_id AND jo2.run_id IS NOT NULL AND jo2.status_sequence<=?4)))"
     )
@@ -727,7 +756,7 @@ fn plan_expiry(
         let islands: i64 = tx.query_row("SELECT COUNT(*) FROM expiry_evaluations WHERE disposition='island'", [], |r| r.get(0))?;
         tx.execute("INSERT OR IGNORE INTO expiry_protected SELECT trigger_run_id FROM expiry_evaluations WHERE disposition='island' AND trigger_run_id IS NOT NULL AND trigger_run_id IN (SELECT run_id FROM expiry_runs)", [])?;
         tx.execute("UPDATE expiry_evaluations SET disposition='island' WHERE trigger_run_id IN (SELECT run_id FROM expiry_protected)", [])?;
-        tx.execute("INSERT OR IGNORE INTO expiry_protected SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_runs) AND (EXISTS(SELECT 1 FROM evaluation_watermarks w JOIN evaluation_runs e ON e.evaluation_id=w.evaluation_id WHERE w.instance_id=a.instance_id AND w.max_report_sequence=a.report_sequence AND (e.evaluation_sequence>?1 OR e.evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='island'))) OR a.report_id IN (SELECT j.value FROM evaluation_runs e, json_tree(CAST(e.detail_json AS TEXT)) j WHERE (e.evaluation_sequence>?1 OR e.evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='island')) AND j.type='text'))", [ef])?;
+        tx.execute("INSERT OR IGNORE INTO expiry_protected SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_runs) AND (EXISTS(SELECT 1 FROM evaluation_watermarks w JOIN evaluation_runs e ON e.evaluation_id=w.evaluation_id WHERE w.instance_id=a.instance_id AND w.max_report_sequence=a.report_sequence AND (e.evaluation_sequence>?1 OR e.evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='island'))) OR EXISTS(SELECT 1 FROM evaluation_runs e, json_tree(CAST(e.detail_json AS TEXT)) j WHERE e.source_expired=0 AND e.min_cited_report_sequence IS NOT NULL AND e.min_cited_report_sequence<=a.report_sequence AND (e.evaluation_sequence>?1 OR e.evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='island')) AND j.type='text' AND j.value=a.report_id))", [ef])?;
         let protected_after: i64 = tx.query_row("SELECT COUNT(*) FROM expiry_protected", [], |r| r.get(0))?;
         let islands_after: i64 = tx.query_row("SELECT COUNT(*) FROM expiry_evaluations WHERE disposition='island'", [], |r| r.get(0))?;
         if protected == protected_after && islands == islands_after {

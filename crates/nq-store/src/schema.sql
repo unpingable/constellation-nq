@@ -354,7 +354,7 @@ CREATE TABLE evaluation_runs (
     started_at TEXT NOT NULL,
     evaluated_at TEXT NOT NULL,
     outcome TEXT NOT NULL CHECK (outcome IN ('condition_present', 'condition_explicitly_absent', 'cannot_evaluate')),
-    detail_json BLOB NOT NULL CHECK (json_valid(CAST(detail_json AS TEXT))), source_expired INTEGER NOT NULL DEFAULT 0 CHECK(source_expired IN (0,1)),
+    detail_json BLOB NOT NULL CHECK (json_valid(CAST(detail_json AS TEXT))), source_expired INTEGER NOT NULL DEFAULT 0 CHECK(source_expired IN (0,1)), min_cited_report_sequence INTEGER,
     UNIQUE (detector_id, detector_version, evaluation_revision),
     FOREIGN KEY (trigger_run_id) REFERENCES watcher_runs(run_id),
     FOREIGN KEY (profile_id, profile_version, profile_digest)
@@ -791,7 +791,7 @@ CREATE TRIGGER immutable_observation_coverage_update BEFORE UPDATE ON observatio
 CREATE TRIGGER immutable_observation_coverage_delete BEFORE DELETE ON observation_coverage WHEN COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0) != 1 BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_report_errors_update BEFORE UPDATE ON report_errors BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_report_errors_delete BEFORE DELETE ON report_errors WHEN COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0) != 1 BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
-CREATE TRIGGER immutable_evaluation_runs_update BEFORE UPDATE ON evaluation_runs WHEN NOT (COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0)=1 AND OLD.source_expired=0 AND NEW.source_expired=1 AND NEW.detail_json=CAST('{}' AS BLOB) AND NEW.evaluation_id IS OLD.evaluation_id AND NEW.evaluation_sequence IS OLD.evaluation_sequence AND NEW.detector_id IS OLD.detector_id AND NEW.detector_version IS OLD.detector_version AND NEW.detector_digest IS OLD.detector_digest AND NEW.evaluator_artifact_digest IS OLD.evaluator_artifact_digest AND NEW.trigger_run_id IS OLD.trigger_run_id AND NEW.profile_id IS OLD.profile_id AND NEW.profile_version IS OLD.profile_version AND NEW.profile_digest IS OLD.profile_digest AND NEW.profile_semantic_id IS OLD.profile_semantic_id AND NEW.evaluation_revision IS OLD.evaluation_revision AND NEW.started_at IS OLD.started_at AND NEW.evaluated_at IS OLD.evaluated_at AND NEW.outcome IS OLD.outcome) BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+CREATE TRIGGER immutable_evaluation_runs_update BEFORE UPDATE ON evaluation_runs WHEN NOT (COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0)=1 AND OLD.source_expired=0 AND NEW.source_expired=1 AND NEW.detail_json=CAST('{}' AS BLOB) AND NEW.evaluation_id IS OLD.evaluation_id AND NEW.evaluation_sequence IS OLD.evaluation_sequence AND NEW.detector_id IS OLD.detector_id AND NEW.detector_version IS OLD.detector_version AND NEW.detector_digest IS OLD.detector_digest AND NEW.evaluator_artifact_digest IS OLD.evaluator_artifact_digest AND NEW.trigger_run_id IS OLD.trigger_run_id AND NEW.profile_id IS OLD.profile_id AND NEW.profile_version IS OLD.profile_version AND NEW.profile_digest IS OLD.profile_digest AND NEW.profile_semantic_id IS OLD.profile_semantic_id AND NEW.evaluation_revision IS OLD.evaluation_revision AND NEW.started_at IS OLD.started_at AND NEW.evaluated_at IS OLD.evaluated_at AND NEW.outcome IS OLD.outcome AND NEW.min_cited_report_sequence IS OLD.min_cited_report_sequence) BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_evaluation_runs_delete BEFORE DELETE ON evaluation_runs WHEN COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0) != 1 BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_evaluation_watermarks_update BEFORE UPDATE ON evaluation_watermarks BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
 CREATE TRIGGER immutable_evaluation_watermarks_delete BEFORE DELETE ON evaluation_watermarks WHEN COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0) != 1 BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
@@ -878,6 +878,8 @@ CREATE UNIQUE INDEX provider_intake_attempts_by_retired_submission_id ON provide
 CREATE UNIQUE INDEX provider_intake_attempts_by_retired_report_id ON provider_intake_attempts(retired_report_id) WHERE retired_report_id IS NOT NULL;
 
 CREATE INDEX evaluation_runs_full_by_sequence ON evaluation_runs(evaluation_sequence) WHERE source_expired=0;
+
+CREATE INDEX evaluation_runs_by_min_cited_report ON evaluation_runs(min_cited_report_sequence) WHERE source_expired=0 AND min_cited_report_sequence IS NOT NULL;
 
 CREATE INDEX admitted_reports_full_by_sequence ON admitted_reports(report_sequence) WHERE source_expired=0;
 

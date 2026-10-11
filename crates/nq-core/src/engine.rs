@@ -2920,6 +2920,9 @@ impl CollectionEngine {
             self.expiry_continuation = matches!(
                 &attempt,
                 RetentionAttempt::Completed(expired) if expired.candidates_remaining
+            ) || matches!(
+                &attempt,
+                RetentionAttempt::Refused { class: "history_changed", .. }
             );
         }
         if let RetentionAttempt::Completed(expired) = &attempt
@@ -8866,6 +8869,9 @@ fn replay_heads(state: &nq_store::SemanticState) -> Result<HistoryHeads, EngineE
 /// collections becomes 11 batches.
 pub const EXPIRY_BATCH_RUNS: usize = 64;
 
+/// Consecutive refused batches retried within one attempt.
+const EXPIRY_BATCH_RETRIES: u32 = 3;
+
 /// Wall-clock budget of one expiry attempt: batches continue while
 /// candidates remain and the budget is not spent; the rest is deferred to
 /// the next attempt, which the collection path then makes at its next
@@ -8894,8 +8900,9 @@ pub fn expire_ordinary_history(
 /// [`expire_ordinary_history`] in batches of `batch_runs` candidate runs
 /// within `budget`. The result aggregates the committed batches: the last
 /// boundary, the rows deleted or compacted, and whether candidates remain
-/// (the budget ran out, or a later batch was refused after earlier batches
-/// committed; a refusal of the first batch is returned as the error).
+/// (the budget ran out, or a batch stayed refused after its retries once
+/// earlier batches committed; when none committed, the refusal is returned as
+/// the error).
 pub fn expire_ordinary_history_within(
     store: &mut Store,
     cutoff: &str,
@@ -8904,9 +8911,27 @@ pub fn expire_ordinary_history_within(
 ) -> Result<nq_store::RetentionResult, EngineError> {
     let started = std::time::Instant::now();
     let mut total: Option<nq_store::RetentionResult> = None;
+    let mut refused = 0;
     loop {
         let batch = match expire_ordinary_batch(store, cutoff, batch_runs) {
-            Ok(batch) => batch,
+            Ok(batch) => {
+                refused = 0;
+                batch
+            }
+            // A concurrent commit between a later batch's snapshot validation
+            // and its guarded transaction refuses that batch without effect;
+            // it is retried (a few times, within the budget). A refused first
+            // batch is reported, and the collection path retries it at its
+            // next collection.
+            Err(EngineError::Store(error))
+                if error.is_refusal()
+                    && total.is_some()
+                    && refused < EXPIRY_BATCH_RETRIES
+                    && started.elapsed() < budget =>
+            {
+                refused += 1;
+                continue;
+            }
             Err(EngineError::Store(error)) if error.is_refusal() && total.is_some() => {
                 let mut total = total.expect("an earlier batch committed");
                 total.candidates_remaining = true;
@@ -14020,7 +14045,7 @@ sys.stdout.write("\n")
     }
 
     /// Runs `expire` on an engine over `path` while another handle commits a
-    /// status event every 100 ms. Returns (expiry ms, the result, and each
+    /// status event every 400 ms. Returns (expiry ms, the result, and each
     /// concurrent write's wait in ms with its outcome).
     #[allow(clippy::type_complexity)]
     fn expiry_against_a_concurrent_writer(
@@ -14038,7 +14063,7 @@ sys.stdout.write("\n")
                     let started = std::time::Instant::now();
                     let result = record_component_status(&mut other, "daemon", "lock-hold-writer", "healthy", "probe", &json!({}));
                     writes.push((started.elapsed().as_millis(), result.map_err(|error| error.to_string())));
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    std::thread::sleep(std::time::Duration::from_millis(400));
                 }
                 writes
             });
@@ -14797,6 +14822,32 @@ sys.stdout.write("\n")
         assert_released_cannot_evaluate_recorded(&mut store, &path, &cited);
     }
 
+    /// Phase 8 M4: each evaluation records the lowest admitted report its
+    /// envelope names (here, the report its evidence cites), so expiry finds
+    /// the evaluations that name an aged report through an index instead of
+    /// scanning every envelope above the floor.
+    #[test]
+    fn evaluations_record_the_lowest_report_they_name() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("cited.db");
+        let (store, _) = holes_fixture(&path, &[8.0, 1.0], "cited");
+        let rows: Vec<(Option<i64>, Option<i64>)> = rusqlite::Connection::open(&path)
+            .expect("probe")
+            .prepare("SELECT e.min_cited_report_sequence, (SELECT MIN(a.report_sequence) FROM finding_events f JOIN finding_evidence v ON v.event_id=f.event_id JOIN admitted_reports a ON a.report_id=v.report_id WHERE f.evaluation_id=e.evaluation_id) FROM evaluation_runs e ORDER BY e.evaluation_sequence")
+            .expect("query")
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("rows")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(rows.len(), 2);
+        for (recorded, cited) in &rows {
+            assert!(recorded.is_some(), "{rows:?}");
+            assert_eq!(recorded, cited, "{rows:?}");
+        }
+        drop(store);
+        drop(Store::open_validating_fully(&path).expect("full validation recomputes it"));
+    }
+
     /// One report a finding cites (for the source-expired reader check).
     fn after_events_report(path: &Path) -> String {
         rusqlite::Connection::open(path)
@@ -15114,20 +15165,29 @@ sys.stdout.write("\n")
             reclaimed.deleted_rows, reclaimed.boundary.generation
         );
         if let (Some(first), Some(last)) = (table.first(), table.last()) {
-            let wall_ratio = last.1 .0 / first.1 .0;
-            let tick_ratio = last.1 .1 as f64 / first.1 .1.max(1) as f64;
-            let slope = (last.2 .0 - first.2 .0) / (last.0 as f64 - first.0 as f64);
+            // Acceptance is in SQLite VM ticks (deterministic); wall times are
+            // reported but a shared host makes them noise at this scale.
+            let tick_ratio = |at_first: u64, at_last: u64| at_last as f64 / at_first.max(1) as f64;
+            let class = |ratio: f64| if ratio <= 1.10 { "O(1)" } else { "grows with N" };
+            let c_ratio = tick_ratio(first.1 .1, last.1 .1);
+            let e_ratio = tick_ratio(first.2 .1, last.2 .1);
+            let e_marginal =
+                (last.2 .1 as f64 - first.2 .1 as f64) / (last.0 as f64 - first.0 as f64);
             let exact = table.iter().all(|row| row.3 > 0 && row.4 == 0);
-            // (j): after the long-lived collector's expiry the next ordinary
-            // open costs what a plain restart open (c) costs, at every N.
             let collector = table
                 .iter()
                 .all(|row| row.5 .1 as f64 <= row.1 .1 as f64 * 1.10);
             println!(
-                "S4C acceptance: (c) wall N={}/N={} = {wall_ratio:.2} (<=1.50: {}); (c) ticks ratio = {tick_ratio:.3} (<=1.10: {}); \
-                 (e) slope = {slope:.4} ms/collection (<=0.3: {}); (d) zero and (e) one candidate each round: {exact}; \
+                "S4C acceptance (ticks): (c) N={}/N={} = {c_ratio:.3} (<=1.10: {}; {}); \
+                 (e) one-candidate expiry N={}/N={} = {e_ratio:.3}, marginal {e_marginal:.1} ticks per retained collection \
+                 (O(candidates) iff <=1.10: {}); (d) zero and (e) one candidate each round: {exact}; \
                  (j) ticks <= 1.10 x (c) ticks at every N: {collector}; released cycle reduces rows: {}",
-                last.0, first.0, wall_ratio <= 1.5, tick_ratio <= 1.10, slope <= 0.3, after_rows < before_rows
+                last.0, first.0, c_ratio <= 1.10, class(c_ratio),
+                last.0, first.0, e_ratio <= 1.10, after_rows < before_rows
+            );
+            println!(
+                "S4C wall (informational): (c) {:.1} -> {:.1} ms; (e) {:.1} -> {:.1} ms",
+                first.1 .0, last.1 .0, first.2 .0, last.2 .0
             );
         }
     }

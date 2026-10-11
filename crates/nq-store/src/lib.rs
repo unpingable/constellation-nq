@@ -2717,6 +2717,7 @@ impl Store {
 
     fn validate_history(&self, scope: Scope<'_>) -> Result<(), StoreError> {
         retention::validate_boundary_scoped(&self.connection, scope)?;
+        retention::validate_cited_report_sequences(&self.connection, scope)?;
         validate_stored_digests(&self.connection, scope)?;
         validate_upgrade_receipts(&self.connection)?;
         validate_all_admission_context_digests(&self.connection)?;
@@ -14087,9 +14088,14 @@ fn insert_evaluation(
             evaluation_id, evaluation_sequence, trigger_run_id, detector_id, detector_version,
             detector_digest, evaluator_artifact_digest,
             profile_id, profile_version, profile_digest, profile_semantic_id,
-            evaluation_revision, started_at, evaluated_at, outcome, detail_json
+            evaluation_revision, started_at, evaluated_at, outcome, detail_json,
+            min_cited_report_sequence
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                   ?13, ?14, ?15, ?16)",
+                   ?13, ?14, ?15, ?16,
+                   (SELECT MIN((SELECT a.report_sequence FROM admitted_reports AS a
+                                WHERE a.report_id = j.value))
+                    FROM json_tree(CAST(?16 AS TEXT)) AS j
+                    WHERE j.type = 'text'))",
         params![
             evaluation.evaluation_id,
             evaluation_sequence,
