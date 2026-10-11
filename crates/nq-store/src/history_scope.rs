@@ -946,6 +946,67 @@ pub(crate) fn write_watermark(
     semantic: SemanticCertification,
     validated_at: String,
 ) -> Result<ValidationWatermark, StoreError> {
+    let watermark = build_watermark(identity, engine_rules, frontier, semantic, validated_at);
+    if let Some(reason) = regresses_shared_sidecar(database, &watermark) {
+        // The shared sidecar already certifies more of this store under the
+        // same retention boundary (another handle recorded it). Replacing it
+        // would make the next open validate history it already proves. The
+        // write is refused and logged; the caller's own certification stays
+        // valid in memory.
+        eprintln!(
+            "nq: warning: not replacing validation watermark {}: {reason}",
+            watermark_path(database).display()
+        );
+        return Ok(watermark);
+    }
+    persist_watermark(database, &watermark)?;
+    Ok(watermark)
+}
+
+/// Why writing `watermark` would move the shared sidecar's frontier
+/// backwards under the same retention boundary, if it would: the sidecar on
+/// disk belongs to the same store and boundary and covers a higher rowid in
+/// some history table (or a nonempty table the new frontier does not).
+pub(crate) fn regresses_shared_sidecar(
+    database: &Path,
+    watermark: &ValidationWatermark,
+) -> Option<String> {
+    let SidecarState::Present(current) = read_sidecar(database) else {
+        return None;
+    };
+    if current.genesis_id != watermark.genesis_id
+        || current.retention != watermark.retention
+        || current.schema != watermark.schema
+        || current.validation_rules != watermark.validation_rules
+        || current.schema_version != watermark.schema_version
+        || current.schema_artifact_digest != watermark.schema_artifact_digest
+    {
+        return None;
+    }
+    current.frontier.tables.iter().find_map(|(table, frontier)| {
+        (frontier.max_rowid > watermark.frontier.max_rowid(table)).then(|| {
+            format!(
+                "it covers {table} through rowid {} under the same retention boundary (generation {}); \
+                 this certification ends at {}",
+                frontier.max_rowid.map_or_else(|| "none".to_owned(), |rowid| rowid.to_string()),
+                watermark.retention.generation,
+                watermark
+                    .frontier
+                    .max_rowid(table)
+                    .map_or_else(|| "none".to_owned(), |rowid| rowid.to_string()),
+            )
+        })
+    })
+}
+
+/// The watermark for `frontier` under `identity`, with its commitment.
+pub(crate) fn build_watermark(
+    identity: &StoreIdentity,
+    engine_rules: &str,
+    frontier: HistoryFrontier,
+    semantic: SemanticCertification,
+    validated_at: String,
+) -> ValidationWatermark {
     let mut watermark = ValidationWatermark {
         schema: VALIDATION_WATERMARK_SCHEMA.to_owned(),
         validation_rules: VALIDATION_RULES.to_owned(),
@@ -963,7 +1024,12 @@ pub(crate) fn write_watermark(
         validated_at,
     };
     watermark.commitment_digest = watermark.computed_commitment();
-    let document = CanonicalDocument::from_serializable(&watermark)?;
+    watermark
+}
+
+/// Atomically replace the sidecar with `watermark`.
+fn persist_watermark(database: &Path, watermark: &ValidationWatermark) -> Result<(), StoreError> {
+    let document = CanonicalDocument::from_serializable(watermark)?;
     crate::capacity::preflight_watermark(database, document.as_bytes().len())
         .map_err(|error| StoreError::WatermarkWrite(error.to_string()))?;
     let path = watermark_path(database);
@@ -996,7 +1062,7 @@ pub(crate) fn write_watermark(
         )));
     }
     remove_stale_temporaries(&path);
-    Ok(watermark)
+    Ok(())
 }
 
 /// The covered rows one expiry transaction deleted or rewrote, recorded

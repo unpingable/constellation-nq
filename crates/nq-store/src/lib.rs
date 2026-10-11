@@ -2709,6 +2709,12 @@ impl Store {
     /// History invariants for the rows `scope` covers. Configuration-scale
     /// tables (descriptors, upgrade receipts, admissions, bindings) are
     /// always validated in full; they grow with administration, not history.
+    /// Store-level history laws for the rows beyond `frontier`, exactly as
+    /// an open that applied a watermark at `frontier` validates them.
+    pub(crate) fn validate_history_since(&self, frontier: &HistoryFrontier) -> Result<(), StoreError> {
+        self.validate_history(Scope::after(frontier))
+    }
+
     fn validate_history(&self, scope: Scope<'_>) -> Result<(), StoreError> {
         retention::validate_boundary_scoped(&self.connection, scope)?;
         validate_stored_digests(&self.connection, scope)?;
@@ -15088,6 +15094,11 @@ mod tests {
     // This exercises real atomic Store collection/evaluation commits. Its
     // detector documents are store fixtures, not native engine semantics.
     fn commit_ordinary_evaluated_for_crash(store: &mut Store, profile: &str, suffix: &str) {
+        commit_ordinary_evaluated_received(store, profile, suffix, TIME);
+    }
+
+    /// [`commit_ordinary_evaluated_for_crash`] received at `received_at`.
+    fn commit_ordinary_evaluated_received(store: &mut Store, profile: &str, suffix: &str, received_at: &str) {
         let detector = digest("crash-detector");
         let evaluator = typed_digest("crash-evaluator");
         let mut identity = fixture_identity();
@@ -15101,10 +15112,10 @@ mod tests {
         let report_id = format!("report-{suffix}");
         let collection = fixture_collection(store, bound, Some(SubmissionInput {
             submission_id: format!("submission-{suffix}"),
-            raw_bytes: suffix.as_bytes().to_vec(), received_at: TIME.into(),
+            raw_bytes: suffix.as_bytes().to_vec(), received_at: received_at.into(),
             protocol_outcome: "valid_report".into(),
-            disposition: SubmissionDisposition::Admitted(report("fixture-a", suffix, profile,
-                document(json!({"state":"healthy"})))),
+            disposition: SubmissionDisposition::Admitted(report_at("fixture-a", suffix, profile,
+                document(json!({"state":"healthy"})), received_at)),
         }));
         store.commit_admitted_collection(&collection, |_view, receipt| {
             let detail = json!({"result":"absent"});
@@ -15119,7 +15130,7 @@ mod tests {
                         outcome: "condition_explicitly_absent".into(), detail: document(detail.clone()),
                         profile: evaluation_profile(profile),
                         watermarks: vec![EvaluationWatermark { instance_id: "fixture-a".into(),
-                            max_report_sequence: receipt.report_sequence.unwrap(), watermark_received_at: Some(TIME.into()) }],
+                            max_report_sequence: receipt.report_sequence.unwrap(), watermark_received_at: Some(received_at.into()) }],
                         refusal: None,
                     }, finding: None,
                 }],
@@ -15230,6 +15241,144 @@ mod tests {
 
     fn sidecar(path: &Path) -> ValidationWatermark {
         serde_json::from_slice(&std::fs::read(history_scope::watermark_path(path)).unwrap()).unwrap()
+    }
+
+    /// NQ #27 Phase 8 B2 (reviewer probe A): a long-lived handle (the
+    /// daemon's collector) opens at N collections; another handle appends M
+    /// more and a short-lived handle records a fresh sidecar; then the
+    /// collector expires. It promotes its validation of the history appended
+    /// since its open into its certification before carrying it, so the
+    /// carried sidecar covers the current frontier and the next ordinary open
+    /// is incremental with work independent of M.
+    #[test]
+    fn long_lived_handle_expiry_carries_the_current_frontier() {
+        let mut next_open_work = Vec::new();
+        for appended in [2usize, 8] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("long-lived.db");
+            {
+                let mut store = Store::initialize_with_capacity(&path, 604800,
+                    Some(16 * 1024 * 1024), Some(1024 * 1024), Some(1024 * 1024)).unwrap();
+                store
+                    .append_genesis(&GenesisInput {
+                        genesis_id: "genesis-long-lived".to_owned(),
+                        legacy_manifest_digest: None,
+                        created_at: TIME.to_owned(),
+                        detail: document(json!({"source": "test"})),
+                    })
+                    .unwrap();
+                let profile = append_fixture_descriptor(&mut store);
+                // Two aged collections (the expiry candidates), then the one
+                // that bounds the collector's open frontier (it survives).
+                for (suffix, received) in [("aged-a", TIME), ("aged-b", TIME), ("open", "2026-07-17T12:00:00.000Z")] {
+                    commit_ordinary_evaluated_received(&mut store, &profile, suffix, received);
+                }
+            }
+            Store::open(&path)
+                .unwrap()
+                .record_validation_watermark(SemanticCertification::NotEstablished, "fixture-engine-rules")
+                .unwrap()
+                .unwrap();
+            let mut collector = Store::open(&path).unwrap();
+            assert!(matches!(collector.open_validation(), OpenValidation::SinceWatermark(_)));
+            {
+                let mut other = Store::open(&path).unwrap();
+                let profile = fixture_descriptor_digest();
+                for index in 0..appended {
+                    commit_ordinary_evaluated_received(
+                        &mut other,
+                        &profile,
+                        &format!("later-{index}"),
+                        "2026-07-18T12:00:00.000Z",
+                    );
+                }
+            }
+            let fresh = Store::open(&path).unwrap();
+            fresh
+                .record_validation_watermark(SemanticCertification::NotEstablished, "fixture-engine-rules")
+                .unwrap()
+                .unwrap();
+            drop(fresh);
+            crate::start_sql_work_count();
+            drop(Store::open(&path).unwrap());
+            let baseline = crate::stop_sql_work_count().unwrap_or(0);
+            let before = sidecar(&path);
+            let result = collector
+                .expire_ordinary_before_promoting(
+                    "2026-07-17T00:00:00Z",
+                    "fixture-engine-rules",
+                    |_| Ok::<_, StoreError>(SemanticCertification::NotEstablished),
+                    None::<fn(&Store, &ExpiryCandidates) -> Result<(), StoreError>>,
+                )
+                .unwrap();
+            assert!(result.deleted_rows > 0, "{result:?}");
+            let carried = sidecar(&path);
+            assert_eq!(carried.retention, collector.retention_witness().unwrap());
+            assert_eq!(
+                carried.frontier.evaluation_sequence, before.frontier.evaluation_sequence,
+                "the carried sidecar covers the current frontier, not the collector's open"
+            );
+            let current = HistoryFrontier::capture_bounds(&collector.connection).unwrap();
+            for (table, frontier) in &carried.frontier.tables {
+                assert_eq!(frontier.max_rowid, current.max_rowid(table), "{table}");
+            }
+            drop(collector);
+            crate::start_sql_work_count();
+            let next = Store::open(&path).unwrap();
+            let work = crate::stop_sql_work_count().unwrap_or(0);
+            println!("B2 appended={appended} baseline_open_ticks={baseline} next_open_ticks={work}");
+            // Under a regressed carry (the collector's open frontier) this
+            // open revalidates every appended collection: about 3,000 more
+            // ticks at 2 and 10,000 more at 8 in this fixture.
+            assert!(
+                work <= baseline + 500,
+                "the next open does about the work of an open under the fresh sidecar ({work} vs {baseline})"
+            );
+            next_open_work.push(work);
+            assert!(
+                matches!(next.open_validation(), OpenValidation::SinceWatermark(_)),
+                "the next ordinary open is incremental"
+            );
+            drop(next);
+            let full = Store::open_validating_fully(&path).unwrap();
+            assert_eq!(full.prior_certification(), "compared", "the carried accumulators are exact");
+        }
+        // The remaining growth is the per-admission digest check every open
+        // performs (one admission per appended collection in this fixture),
+        // not revalidation of the appended history.
+        assert!(
+            next_open_work[1] - next_open_work[0] < 200 * 6,
+            "next-open work does not revalidate the history appended since the collector opened: {next_open_work:?}"
+        );
+    }
+
+    /// A handle never moves the shared sidecar's frontier backwards under the
+    /// same retention boundary: an older handle's record after a newer one is
+    /// refused (logged), and the newer sidecar stays.
+    #[test]
+    fn an_older_handle_never_regresses_the_shared_sidecar() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("regress.db");
+        certified_crash_fixture(&path);
+        let older = Store::open(&path).unwrap();
+        {
+            let mut other = Store::open(&path).unwrap();
+            let profile = fixture_descriptor_digest();
+            commit_ordinary_evaluated_received(&mut other, &profile, "newer", TIME);
+        }
+        let newer = Store::open(&path).unwrap();
+        newer
+            .record_validation_watermark(SemanticCertification::NotEstablished, "fixture-engine-rules")
+            .unwrap()
+            .unwrap();
+        drop(newer);
+        let shared = sidecar(&path);
+        let own = older
+            .record_validation_watermark(SemanticCertification::NotEstablished, "fixture-engine-rules")
+            .unwrap()
+            .expect("the older handle still holds its own certification");
+        assert!(own.frontier.evaluation_sequence < shared.frontier.evaluation_sequence);
+        assert_eq!(sidecar(&path), shared, "the shared sidecar was not moved backwards");
     }
 
     /// An expiry by a handle that verified the watermark at open carries it
@@ -15454,6 +15603,16 @@ mod tests {
         );
         assert!(store.expire_ordinary_before("invalid-time").is_err());
         assert_eq!(store.retention_generation().unwrap(), 0);
+    }
+
+    fn fixture_descriptor_digest() -> String {
+        document(json!({
+            "profile_id": "fixture.health",
+            "profile_version": "1",
+            "observation_kinds": ["fixture.state"]
+        }))
+        .digest()
+        .to_owned()
     }
 
     fn append_fixture_descriptor(store: &mut Store) -> String {
@@ -15952,6 +16111,17 @@ mod tests {
         profile_digest: &str,
         canonical_report: CanonicalDocument,
     ) -> ReportInput {
+        report_at(instance_id, suffix, profile_digest, canonical_report, TIME)
+    }
+
+    /// [`report`] observed, received and admitted at `time`.
+    fn report_at(
+        instance_id: &str,
+        suffix: &str,
+        profile_digest: &str,
+        canonical_report: CanonicalDocument,
+        time: &str,
+    ) -> ReportInput {
         let fixture_payload: Value =
             serde_json::from_slice(canonical_report.as_bytes()).expect("fixture payload JSON");
         let subject =
@@ -15974,7 +16144,7 @@ mod tests {
                     value: json!({}),
                 },
             },
-            observed_at: chrono::DateTime::parse_from_rfc3339(TIME)
+            observed_at: chrono::DateTime::parse_from_rfc3339(time)
                 .expect("fixture time")
                 .with_timezone(&Utc),
             status: nq_protocol::ReportStatus::Complete,
@@ -15988,7 +16158,7 @@ mod tests {
                 ordinal: 0,
                 kind: nq_protocol::ObservationKind::new("fixture.state").expect("observation kind"),
                 subject: subject.clone(),
-                observed_at: chrono::DateTime::parse_from_rfc3339(TIME)
+                observed_at: chrono::DateTime::parse_from_rfc3339(time)
                     .expect("fixture time")
                     .with_timezone(&Utc),
                 payload: fixture_payload,
@@ -16015,8 +16185,8 @@ mod tests {
             profile_id: "fixture.health".to_owned(),
             profile_version: "1".to_owned(),
             profile_digest: profile_digest.to_owned(),
-            observed_at: TIME.to_owned(),
-            received_at: TIME.to_owned(),
+            observed_at: time.to_owned(),
+            received_at: time.to_owned(),
             report_status: "complete".to_owned(),
             canonical_report,
             validated_report: document(json!({
@@ -16026,16 +16196,16 @@ mod tests {
                 "profile": {"id": "fixture.health", "version": 1},
                 "profile_digest": profile_digest,
                 "status": "complete",
-                "observed_at": TIME,
-                "received_at": TIME,
+                "observed_at": time,
+                "received_at": time,
             })),
             next_checkpoint: None,
-            admitted_at: TIME.to_owned(),
+            admitted_at: time.to_owned(),
             observations: vec![ObservationInput {
                 ordinal: 0,
                 kind: "fixture.state".to_owned(),
                 subject: document(json!(subject.to_string())),
-                observed_at: TIME.to_owned(),
+                observed_at: time.to_owned(),
                 payload: document(protocol_report.observations[0].payload.clone()),
                 coverage: vec![CoverageInput {
                     ordinal: 0,

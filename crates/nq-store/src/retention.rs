@@ -978,6 +978,56 @@ impl Store {
         F: FnOnce(&Self) -> Result<(), E>,
         G: FnOnce(&Self, &ExpiryCandidates) -> Result<(), E>,
     {
+        self.expire_ordinary_before_inner(
+            cutoff,
+            None,
+            |store: &Self| validate(store).map(|()| None),
+            validate_candidates,
+        )
+    }
+
+    /// [`Self::expire_ordinary_before_certified`] for a caller whose
+    /// snapshot validation covers every semantic plane beyond this handle's
+    /// certification under `engine_rules` and returns the resulting
+    /// certification. Before the expiry carries the handle's certification
+    /// forward, that validation is promoted into it: the store-level laws of
+    /// the rows beyond the certified frontier are validated in the same
+    /// snapshot and the certification is extended to the snapshot frontier
+    /// (as [`Self::record_validation_watermark`] extends an applied
+    /// watermark), so the carried watermark covers the current frontier
+    /// rather than the one this handle certified when it opened.
+    pub fn expire_ordinary_before_promoting<E, F, G>(
+        &mut self,
+        cutoff: &str,
+        engine_rules: &str,
+        validate: F,
+        validate_candidates: Option<G>,
+    ) -> Result<RetentionResult, E>
+    where
+        E: From<StoreError>,
+        F: FnOnce(&Self) -> Result<crate::SemanticCertification, E>,
+        G: FnOnce(&Self, &ExpiryCandidates) -> Result<(), E>,
+    {
+        self.expire_ordinary_before_inner(
+            cutoff,
+            Some(engine_rules),
+            |store: &Self| validate(store).map(Some),
+            validate_candidates,
+        )
+    }
+
+    fn expire_ordinary_before_inner<E, F, G>(
+        &mut self,
+        cutoff: &str,
+        engine_rules: Option<&str>,
+        validate: F,
+        validate_candidates: Option<G>,
+    ) -> Result<RetentionResult, E>
+    where
+        E: From<StoreError>,
+        F: FnOnce(&Self) -> Result<Option<crate::SemanticCertification>, E>,
+        G: FnOnce(&Self, &ExpiryCandidates) -> Result<(), E>,
+    {
         chrono::DateTime::parse_from_rfc3339(cutoff)
             .map_err(|e| E::from(StoreError::Invariant(format!("invalid expiry cutoff: {e}"))))?;
         self.require_current_schema().map_err(E::from)?;
@@ -993,14 +1043,42 @@ impl Store {
             .query_row("PRAGMA data_version", [], |r| r.get(0))
             .map_err(StoreError::from)
             .map_err(E::from)?;
-        let proof = self.with_read_snapshot(|store, bounds| {
-            validate(store)?;
+        let (proof, promoted) = self.with_read_snapshot(|store, bounds| {
+            let semantic = validate(store)?;
+            let promoted = match (semantic, engine_rules) {
+                (Some(semantic), Some(rules)) => {
+                    store.promoted_certification(bounds, semantic, rules).map_err(E::from)?
+                }
+                _ => None,
+            };
             Ok::<_, E>((
-                bounds.clone(),
-                store.retention_boundary().map_err(E::from)?,
-                data_version,
+                (
+                    bounds.clone(),
+                    store.retention_boundary().map_err(E::from)?,
+                    data_version,
+                ),
+                promoted.map(|watermark| (watermark, bounds.clone())),
             ))
         })?;
+        if let Some((watermark, bounds)) = promoted {
+            // The handle has now validated, by the same rules as an open,
+            // everything through the snapshot frontier: it certifies it.
+            let may_record = self.validation.may_record;
+            let prior = self.validation.prior.take();
+            let prior_superseded = self.validation.prior_superseded;
+            let open_retention = self.validation.open_retention.take();
+            self.validation = ValidationState {
+                opened: OpenValidation::SinceWatermark(Box::new(watermark.clone())),
+                open_frontier: Some(bounds.clone()),
+                store_validated: Some(bounds),
+                may_record,
+                prior,
+                prior_superseded,
+                open_retention,
+                certified: std::cell::RefCell::new(Some(Box::new(watermark))),
+                run_evaluations: std::cell::RefCell::new(None),
+            };
+        }
         let after: i64 = self
             .connection
             .query_row("PRAGMA data_version", [], |r| r.get(0))
@@ -1038,6 +1116,47 @@ impl Store {
     /// This Store-only entrypoint does not certify a consumer's typed semantics.
     pub fn expire_ordinary_before(&mut self, cutoff: &str) -> Result<RetentionResult, StoreError> {
         self.expire_ordinary_before_checked(cutoff, None, None)
+    }
+
+    /// This handle's certification extended to `bounds` (the frontier of
+    /// the read snapshot the caller just validated), when it has one to
+    /// carry under the current boundary and `engine_rules`: the store-level
+    /// laws of the rows beyond it are validated here, in the same snapshot,
+    /// and the accumulators are extended over them. `None` leaves the
+    /// certification as it is.
+    fn promoted_certification(
+        &self,
+        bounds: &HistoryFrontier,
+        semantic: crate::SemanticCertification,
+        engine_rules: &str,
+    ) -> Result<Option<crate::ValidationWatermark>, StoreError> {
+        let current = witness(&self.connection)?;
+        let Some(certified) = self.carriable_watermark(&current) else {
+            return Ok(None);
+        };
+        if certified.engine_rules != engine_rules
+            || certified.frontier.tables.iter().any(|(table, frontier)| {
+                frontier.max_rowid > bounds.max_rowid(table)
+            })
+        {
+            return Ok(None);
+        }
+        let Some(identity) = self.store_identity()? else {
+            return Ok(None);
+        };
+        if identity.retention != current {
+            return Ok(None);
+        }
+        self.validate_history_since(&certified.frontier)?;
+        let frontier =
+            HistoryFrontier::certify(&self.connection, Some(&certified.frontier), bounds, None)?;
+        Ok(Some(crate::history_scope::build_watermark(
+            &identity,
+            engine_rules,
+            frontier,
+            semantic,
+            crate::now_utc(),
+        )))
     }
 
     /// The watermark this handle may carry across an expiry: one it verified

@@ -212,7 +212,14 @@ boundary carries the watermark forward in the same handle: it subtracts the
 digests of the covered rows it deletes, replaces those of the rows it
 compacts, re-anchors a bound whose row it deleted, keeps each lineage's
 newest evaluation (always a protected island), and records the new boundary.
-The next open is therefore incremental. A process that stops between the
+Before carrying, the expiring handle promotes the validation it just
+performed (everything appended since its own certification, including rows
+other handles wrote) into its certification, so a long-lived handle such as
+the daemon's per-watcher collector carries the current frontier, not the one
+it certified when it opened. A sidecar write never moves the shared sidecar's
+frontier backwards under the same retention boundary: such a write is refused
+and logged, and the writer keeps its certification in memory. The next open
+is therefore incremental. A process that stops between the
 expiry commit and that write leaves the old watermark, which no longer
 applies: exactly one full validation follows, then opens are incremental
 again. Another long-lived handle adopts the carried watermark only after

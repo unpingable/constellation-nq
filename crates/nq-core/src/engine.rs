@@ -8861,12 +8861,21 @@ pub fn expire_ordinary_history(
     store: &mut Store,
     cutoff: &str,
 ) -> Result<nq_store::RetentionResult, EngineError> {
-    store.expire_ordinary_before_certified(
+    store.expire_ordinary_before_promoting(
         cutoff,
+        engine_validation_rules(),
         |snapshot| {
             #[cfg(test)]
             concurrent_writer_for_test(snapshot);
-            validate_semantic_history_since_open(snapshot)
+            validate_core_history_since_open(snapshot)?;
+            // The same validation an engine open performs beyond its
+            // certification; the store promotes it into the certification
+            // before carrying it across the expiry.
+            let state = match engine_semantic_state(snapshot) {
+                Some((frontier, state)) => validate_semantic_planes_since(snapshot, &frontier, &state)?,
+                None => validate_semantic_planes_in_full(snapshot)?,
+            };
+            Ok(nq_store::SemanticCertification::Established(state))
         },
         Some(validate_expiry_candidates),
     )
@@ -14425,11 +14434,11 @@ sys.stdout.write("\n")
     /// (kept open by every later collection) and one `unknown`-custody
     /// notification, all aged and expired (generation >= 1); then one aged
     /// candidate collection at the prefix and `target` collections in total,
-    /// none aged at the returned candidate cutoffs. Two candidates precede
+    /// none aged at the returned candidate cutoffs. Three candidates precede
     /// the growth, each retired alone by its own cutoff. Returns (first
-    /// cutoff, first candidate cutoff, second candidate cutoff, growth
+    /// cutoff, first, second and third candidate cutoffs, growth
     /// milliseconds).
-    fn s4_fixture(path: &Path, watcher: &WatcherConfig, target: usize) -> (String, String, String, f64) {
+    fn s4_fixture(path: &Path, watcher: &WatcherConfig, target: usize) -> (String, String, String, String, f64) {
         REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = Some(None));
         let mut store =
             Store::initialize_with_capacity(path, 604_800, Some(1024 * 1024 * 1024), Some(0), Some(0))
@@ -14510,7 +14519,7 @@ sys.stdout.write("\n")
         let first = expire_ordinary_history(&mut store, &first_cutoff).expect("first expiry");
         assert!(first.boundary.generation >= 1, "{first:?}");
         let mut candidate_cutoffs = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..3 {
             commit(&mut store, Utc::now() - Duration::seconds(1), 8.0);
             std::thread::sleep(std::time::Duration::from_millis(1100));
             candidate_cutoffs.push(timestamp(Utc::now()));
@@ -14523,9 +14532,10 @@ sys.stdout.write("\n")
         // event supersedes the latest one), so (d) below has no candidate.
         expire_ordinary_history(&mut store, &first_cutoff).expect("settling expiry");
         REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = None);
+        let third = candidate_cutoffs.pop().expect("third candidate");
         let second = candidate_cutoffs.pop().expect("second candidate");
         let first_candidate = candidate_cutoffs.pop().expect("first candidate");
-        (first_cutoff, first_candidate, second, grow_ms)
+        (first_cutoff, first_candidate, second, third, grow_ms)
     }
 
     /// NQ #27 S4 measurement (adapted from the audit cost specimen, which is
@@ -14539,9 +14549,17 @@ sys.stdout.write("\n")
     /// open right after that transition, (g) the open right after a second
     /// one-candidate expiry whose process stopped between COMMIT and the
     /// sidecar write (simulated by restoring the pre-expiry sidecar bytes),
-    /// and (h) the open after that, each with the SQL work counter. A final
+    /// and (h) the open after that; then (i) the expiry of a long-lived
+    /// collector engine opened before `S4_COLLECTOR_GROWTH` collections were
+    /// appended through other handles (a sweep engine recording a fresh
+    /// sidecar in between), and (j) the ordinary open after it, each with
+    /// the SQL work counter. A final
     /// released-island cycle must reduce the row count. Run with `--ignored
     /// --nocapture`; it prints the table and the acceptance verdicts.
+    /// Collections appended through other handles while the S4 long-lived
+    /// collector engine stays open.
+    const S4_COLLECTOR_GROWTH: usize = 20;
+
     #[test]
     #[ignore = "NQ #27 S4 measurement; minutes of runtime"]
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
@@ -14582,7 +14600,7 @@ sys.stdout.write("\n")
         for target in targets {
             let path = directory.path().join(format!("s4-{target}.db"));
             config.database_path = path.clone();
-            let (first_cutoff, candidate_cutoff, crash_cutoff, grow_ms) =
+            let (first_cutoff, candidate_cutoff, crash_cutoff, collector_cutoff, grow_ms) =
                 s4_fixture(&path, &watcher, target);
             let open_pair = |config: &NqConfig| {
                 let mut opened = None;
@@ -14641,17 +14659,61 @@ sys.stdout.write("\n")
             let g = (g_store.0 + g_engine.0, g_store.1 + g_engine.1);
             let (h_store, h_engine, recovered_mode) = open_pair(&config);
             let h = (h_store.0 + h_engine.0, h_store.1 + h_engine.1);
+            // Long-lived engine (Phase 8 B2): the daemon's collector opens
+            // once, other handles append `S4_COLLECTOR_GROWTH` collections and
+            // a sweep engine records a fresh sidecar; then the collector's
+            // quantum expiry runs. (i) is the expiry, (j) the next ordinary
+            // open, which must cost what (c) costs.
+            let mut collector = CollectionEngine::open(&config).expect("long-lived collector");
+            REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = Some(None));
+            {
+                let mut other = Store::open(&path).expect("other handle");
+                for index in 0..S4_COLLECTOR_GROWTH {
+                    let suffix = format!("s4-collector-{target}-{index}");
+                    commit_real_host_detector_report(
+                        &mut other,
+                        &watcher,
+                        &format!("report-{suffix}"),
+                        &suffix,
+                        Utc::now() - Duration::seconds(1),
+                        8.0,
+                        None,
+                    );
+                }
+            }
+            REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = None);
+            drop(CollectionEngine::open(&config).expect("sweep records a fresh sidecar"));
+            let fresh_sidecar: nq_store::ValidationWatermark =
+                serde_json::from_slice(&std::fs::read(&sidecar).expect("sidecar")).expect("decode");
+            let mut collected = None;
+            let i = measure(&mut || {
+                let store = collector.store_mut_for_test();
+                store.count_sql_work_on_this_handle();
+                collected = Some(
+                    expire_ordinary_history(store, &collector_cutoff).expect("collector expiry"),
+                );
+            });
+            let collected = collected.expect("collector result");
+            drop(collector);
+            let carried_sidecar: nq_store::ValidationWatermark =
+                serde_json::from_slice(&std::fs::read(&sidecar).expect("sidecar")).expect("decode");
+            let (j_store, j_engine, collector_mode) = open_pair(&config);
+            let j = (j_store.0 + j_engine.0, j_store.1 + j_engine.1);
             let retained = rows(&path);
             println!(
                 "S4C N={target} rows={retained} grow_ms={grow_ms:.0} \
                  a_ms={:.1} a_ticks={} b_ms={:.1} b_ticks={} c_ms={:.1} c_ticks={} \
                  d_ms={:.1} d_ticks={} d_deleted={} e_ms={:.1} e_ticks={} e_deleted={} gen={} \
                  f_ms={:.1} f_ticks={} g_ms={:.1} g_ticks={} h_ms={:.1} h_ticks={} crash_deleted={} \
-                 open=a:{first_mode}/c:{second_mode}/f:{transition_mode}/g:{crash_mode}/h:{recovered_mode}",
+                 i_ms={:.1} i_ticks={} i_deleted={} j_ms={:.1} j_ticks={} \
+                 collector_sidecar_eval_seq fresh={} carried={} \
+                 open=a:{first_mode}/c:{second_mode}/f:{transition_mode}/g:{crash_mode}/h:{recovered_mode}/j:{collector_mode}",
                 a.0, a.1, b.0, b.1, c.0, c.1, d.0, d.1, zero.deleted_rows, e.0, e.1, one.deleted_rows,
-                one.boundary.generation, f.0, f.1, g.0, g.1, h.0, h.1, crashed.deleted_rows
+                one.boundary.generation, f.0, f.1, g.0, g.1, h.0, h.1, crashed.deleted_rows,
+                i.0, i.1, collected.deleted_rows, j.0, j.1,
+                fresh_sidecar.frontier.evaluation_sequence, carried_sidecar.frontier.evaluation_sequence
             );
-            table.push((target, c, e, one.deleted_rows, zero.deleted_rows));
+            table.push((target, c, e, one.deleted_rows, zero.deleted_rows, j));
             last_path = Some((path, candidate_cutoff));
         }
         // Released-island cycle on the last fixture: resolve the open
@@ -14681,10 +14743,15 @@ sys.stdout.write("\n")
             let tick_ratio = last.1 .1 as f64 / first.1 .1.max(1) as f64;
             let slope = (last.2 .0 - first.2 .0) / (last.0 as f64 - first.0 as f64);
             let exact = table.iter().all(|row| row.3 > 0 && row.4 == 0);
+            // (j): after the long-lived collector's expiry the next ordinary
+            // open costs what a plain restart open (c) costs, at every N.
+            let collector = table
+                .iter()
+                .all(|row| row.5 .1 as f64 <= row.1 .1 as f64 * 1.10);
             println!(
                 "S4C acceptance: (c) wall N={}/N={} = {wall_ratio:.2} (<=1.50: {}); (c) ticks ratio = {tick_ratio:.3} (<=1.10: {}); \
                  (e) slope = {slope:.4} ms/collection (<=0.3: {}); (d) zero and (e) one candidate each round: {exact}; \
-                 released cycle reduces rows: {}",
+                 (j) ticks <= 1.10 x (c) ticks at every N: {collector}; released cycle reduces rows: {}",
                 last.0, first.0, wall_ratio <= 1.5, tick_ratio <= 1.10, slope <= 0.3, after_rows < before_rows
             );
         }
