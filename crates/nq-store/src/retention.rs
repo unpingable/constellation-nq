@@ -1130,6 +1130,7 @@ impl Store {
         chrono::DateTime::parse_from_rfc3339(cutoff)
             .map_err(|e| E::from(StoreError::Invariant(format!("invalid expiry cutoff: {e}"))))?;
         self.require_current_schema().map_err(E::from)?;
+        self.observe_retention_boundary().map_err(E::from)?;
         let current = validate_boundary_header(&self.connection).map_err(E::from)?;
         if !prefix_may_advance(&self.connection, cutoff, &current).map_err(E::from)? {
             return Ok(RetentionResult {
@@ -1167,6 +1168,7 @@ impl Store {
             let prior = self.validation.prior.take();
             let prior_superseded = self.validation.prior_superseded;
             let open_retention = self.validation.open_retention.take();
+            let observed_retention = self.validation.observed_retention.take();
             self.validation = ValidationState {
                 opened: OpenValidation::SinceWatermark(Box::new(watermark.clone())),
                 open_frontier: Some(bounds.clone()),
@@ -1175,6 +1177,7 @@ impl Store {
                 prior,
                 prior_superseded,
                 open_retention,
+                observed_retention,
                 certified: std::cell::RefCell::new(Some(Box::new(watermark))),
                 run_evaluations: std::cell::RefCell::new(None),
             };
@@ -1556,7 +1559,8 @@ impl Store {
                     may_record,
                     prior: None,
                     prior_superseded: false,
-                    open_retention: Some(after_witness),
+                    open_retention: Some(after_witness.clone()),
+                    observed_retention: Some(after_witness.clone()),
                     certified: std::cell::RefCell::new(Some(Box::new(watermark))),
                     run_evaluations: std::cell::RefCell::new(None),
                 };
@@ -1570,6 +1574,7 @@ impl Store {
                 self.validation = ValidationState {
                     open_frontier: Some(open),
                     store_validated: Some(validated),
+                    observed_retention: Some(after_witness),
                     ..ValidationState::default()
                 };
             }

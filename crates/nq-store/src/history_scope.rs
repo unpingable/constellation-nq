@@ -3,8 +3,17 @@
 //!
 //! Ordinary update/delete triggers abort, and the schema fingerprint proves
 //! those triggers exist on every open; only the guarded retention expiry
-//! deletes or compacts rows, and only at or below its declared floors. Rowids
-//! therefore grow monotonically in append order. A completed validation
+//! deletes or compacts rows, and only at or below its declared floors.
+//! Between expiries rowids grow in append order. An expiry can delete a
+//! table's highest rows, after which SQLite reuses those rowids for new rows
+//! (history tables are not AUTOINCREMENT), so a frontier recorded before an
+//! expiry is re-anchored (each bound to the highest surviving rowid at or
+//! below it) before it scopes validation again: inside the expiring handle's
+//! own transaction, and by any other handle when it first observes the new
+//! retention boundary. Rows reused before that observation lie beyond the
+//! observing handle's knowledge; they are re-proven by explicit full
+//! validation and by the carried watermark's own re-anchored bounds. A
+//! completed validation
 //! records, per table, the highest validated rowid, the row count, and an
 //! additive content accumulator: the 256-bit modular sum of one digest per
 //! covered row, each binding the table, the rowid and every column value.

@@ -1918,6 +1918,11 @@ struct ValidationState {
     /// carried forward by its own expiry). A watermark is recorded only while
     /// the store still has this boundary.
     open_retention: Option<RetentionWitness>,
+    /// The retention boundary this handle's frontiers were last anchored
+    /// under. Another handle's expiry may delete the highest rows of a table
+    /// whose rowids SQLite then reuses; when the boundary differs, the
+    /// frontiers are re-anchored before they scope any validation.
+    observed_retention: Option<RetentionWitness>,
     /// The watermark this handle verified at open or recorded itself: the
     /// only certification its incremental paths and its expiry rely on.
     certified: std::cell::RefCell<Option<Box<ValidationWatermark>>>,
@@ -1935,6 +1940,7 @@ impl Default for ValidationState {
             prior: None,
             prior_superseded: false,
             open_retention: None,
+            observed_retention: None,
             certified: std::cell::RefCell::new(None),
             run_evaluations: std::cell::RefCell::new(None),
         }
@@ -2433,9 +2439,41 @@ impl Store {
                 Some(identity) => identity.retention,
                 None => retention::witness(&self.connection)?,
             }),
+            observed_retention: None,
             certified: std::cell::RefCell::new(certified),
             run_evaluations: std::cell::RefCell::new(None),
         };
+        Ok(())
+    }
+
+    /// Re-anchor this handle's frontiers after another handle's expiry
+    /// changed the retention boundary: each bound moves to the highest
+    /// surviving rowid at or below it, so a rowid SQLite reuses after the
+    /// expiry deleted a table's highest rows is never inside a range this
+    /// handle treats as validated (from this observation on). Its own
+    /// expiries re-anchor inside their transaction.
+    pub(crate) fn observe_retention_boundary(&mut self) -> Result<(), StoreError> {
+        if self.validation.store_validated.is_none() && self.validation.open_frontier.is_none() {
+            return Ok(());
+        }
+        let current = retention::witness(&self.connection)?;
+        let anchored = self
+            .validation
+            .observed_retention
+            .as_ref()
+            .or(self.validation.open_retention.as_ref());
+        if anchored == Some(&current) {
+            return Ok(());
+        }
+        if let Some(frontier) = &self.validation.store_validated {
+            self.validation.store_validated =
+                Some(history_scope::reanchor_bounds(&self.connection, frontier)?);
+        }
+        if let Some(frontier) = &self.validation.open_frontier {
+            self.validation.open_frontier =
+                Some(history_scope::reanchor_bounds(&self.connection, frontier)?);
+        }
+        self.validation.observed_retention = Some(current);
         Ok(())
     }
 
@@ -3960,6 +3998,7 @@ impl Store {
                 "atomic admitted completion requires one admitted custody report".into(),
             )));
         }
+        self.observe_retention_boundary().map_err(E::from)?;
         let validated = self.validation.store_validated.clone();
         let scope = validated.as_ref().map_or(Scope::FULL, Scope::after);
         let transaction = self.shared_immediate_transaction().map_err(E::from)?;
@@ -4066,6 +4105,7 @@ impl Store {
         if let Some(artifact) = diagnostic_artifact {
             validate_run_only_diagnostic_artifact(collection, artifact)?;
         }
+        self.observe_retention_boundary()?;
         let validated = self.validation.store_validated.clone();
         let scope = validated.as_ref().map_or(Scope::FULL, Scope::after);
         let transaction = self.immediate_transaction()?;
@@ -6933,6 +6973,7 @@ impl Store {
             &HistoryFrontier,
         ) -> Result<(Vec<EvaluationCommitInput>, T), E>,
     {
+        self.observe_retention_boundary().map_err(E::from)?;
         let validated = self.validation.store_validated.clone();
         let scope = validated.as_ref().map_or(Scope::FULL, Scope::after);
         let transaction = self.shared_immediate_transaction().map_err(E::from)?;
@@ -15357,6 +15398,49 @@ mod tests {
             next_open_work[1] - next_open_work[0] < 200 * 6,
             "next-open work does not revalidate the history appended since the collector opened: {next_open_work:?}"
         );
+    }
+
+    /// NQ #27 Phase 8 m3: a handle that observes another handle's expiry
+    /// re-anchors its frontiers (each bound to the highest surviving rowid at
+    /// or below it) before they scope validation, so a rowid reused after the
+    /// expiry deleted a table's highest rows is not inside its validated
+    /// range; its later commits validate and succeed.
+    #[test]
+    fn foreign_expiry_reanchors_a_long_lived_handles_frontier() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("reanchor.db");
+        certified_crash_fixture(&path);
+        let mut long_lived = Store::open(&path).unwrap();
+        let before = long_lived.store_validated_frontier().cloned().expect("validated frontier");
+        {
+            let mut other = Store::open(&path).unwrap();
+            let result = other.expire_ordinary_before("2026-07-17T00:00:00Z").unwrap();
+            assert!(result.deleted_rows > 0);
+        }
+        let expected: Vec<(String, Option<i64>)> = before
+            .tables
+            .iter()
+            .map(|(table, frontier)| {
+                let bound = frontier.max_rowid.map(|bound| {
+                    long_lived
+                        .connection
+                        .query_row(&format!("SELECT MAX(rowid) FROM {table} WHERE rowid <= ?1"), [bound], |r| r.get::<_, Option<i64>>(0))
+                        .unwrap()
+                });
+                (table.clone(), bound.flatten())
+            })
+            .collect();
+        // (This fixture's expiry keeps every table's newest row, the latest
+        // collection being protected; the rule is asserted as stated.)
+        long_lived.observe_retention_boundary().unwrap();
+        let after = long_lived.store_validated_frontier().cloned().unwrap();
+        for (table, bound) in &expected {
+            assert_eq!(after.max_rowid(table), *bound, "{table}");
+        }
+        let profile = fixture_descriptor_digest();
+        commit_ordinary_evaluated_received(&mut long_lived, &profile, "after-foreign-expiry", "2026-07-18T12:00:00.000Z");
+        drop(long_lived);
+        drop(Store::open_validating_fully(&path).unwrap());
     }
 
     /// A handle never moves the shared sidecar's frontier backwards under the
