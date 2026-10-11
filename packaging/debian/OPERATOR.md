@@ -11,7 +11,7 @@ owner-review candidate; BC1 is not tagged or published. Component source alone
 does not install the composed product or grant authority.
 
 Use `nq --version` and `nq --build-info` for native identity, and `dpkg-query -W
-nq-ng` for package identity. Native version0.2.5 and a Debian packaging revision
+nq-ng` for package identity. Native version0.2.6 and a Debian packaging revision
 are distinct. Checksums in the candidate identify exact installed bytes.
 
 See [package operation](OPERATIONS.md) and the installed examples directory.

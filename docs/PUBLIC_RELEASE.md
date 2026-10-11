@@ -1,5 +1,17 @@
 # Constellation NQ source and integration guide
 
+## NQ 0.2.6 bounded-history retention candidate
+
+The source tree is version 0.2.6, an unreleased candidate: bounded history
+retention with declared protected holes (schema v14 → v15), typed store
+refusals, incremental validation carried across retention generations, batched
+expiry, and archive and consumer declarations of the retention boundary, as
+recorded in the NQ #27 repair campaign. The integrated candidate passed the full
+workspace suite and an independent review with nothing blocking; it is
+qualified for supervised operation only. The seven-day unattended qualification
+and production recovery (a controlled generation rollover, not an in-place
+migration) are separate, unstarted steps.
+
 ## NQ 0.2.5 combined source candidate
 
 The neutral combined candidate adds the accepted boot-bound `nq.systemd_unit/v3`
