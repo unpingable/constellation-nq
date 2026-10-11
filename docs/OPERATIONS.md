@@ -970,8 +970,10 @@ retained acquisitions; on the 208-acquisition production store copy,
 `qualify`, `export`, and `inspect` took 0.03 s and a replay 0.10 s, against
 93 s, 92 s, and 60 s for NQ 0.2.0 on the same copy.
 
-`nqd` startup still validates the store and provider-intake history in full;
-`backup`, `restore`, `admin archive`, and archive verification keep their
+`nqd` startup validates the store and the typed provider-intake and
+diagnostic history beyond its certified validation watermark when one applies,
+and in full otherwise (the log line `startup history validated` names which);
+`nq admin validate --full` is the explicit deep pass. `backup`, `restore`, `admin archive`, and archive verification keep their
 exhaustive validation.
 
 ## Backup

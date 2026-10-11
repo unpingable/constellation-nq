@@ -45,13 +45,15 @@ pub async fn run(options: Nqd) -> Result<()> {
     let mut store = open_configured_store(&config).context(
         "database is absent or has an incompatible schema; run `nq init` or `nq admin upgrade`",
     )?;
-    store.validate()?;
-    // Refuse typed provider-history substitution before the daemon mutates
-    // status history or binds any listener. Store validation authenticates
-    // canonical bytes and relational links; this core pass additionally
-    // proves request/raw/native-outcome semantic correspondence.
-    nq_core::engine::validate_provider_intake_history(&store)
+    // The open validated the store laws: beyond its certified watermark when
+    // one applies, in full otherwise. Refuse typed provider-history
+    // substitution before the daemon mutates status history or binds any
+    // listener: this core pass additionally proves request/raw/native-outcome
+    // semantic correspondence, beyond the same certification (in full
+    // without one). `nq admin validate --full` remains the deep pass.
+    let startup = nq_core::engine::validate_at_startup(&store)
         .context("provider-intake history failed typed startup verification")?;
+    info!(validation = ?startup, "startup history validated");
     validate_catalog(&config)?;
     let horizon = chrono::TimeDelta::try_seconds(i64::try_from(config.retention.horizon_seconds)?)
         .context("retention horizon exceeds duration range")?;

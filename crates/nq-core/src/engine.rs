@@ -8594,6 +8594,37 @@ fn validate_engine_open_history(store: &Store) -> Result<Option<ReplayCursor>, E
     }
 }
 
+/// How [`validate_at_startup`] validated history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartupValidation {
+    /// The open applied a certified watermark; only rows beyond it were
+    /// validated (store laws by the open, provider-intake and diagnostic
+    /// history here).
+    SinceWatermark,
+    /// No applicable watermark: the open validated every row, and so does
+    /// the provider-intake and diagnostic pass here.
+    Full,
+}
+
+/// Daemon startup validation of a store opened with [`Store::open`] (or
+/// `open_with_capacity`): the open already validated the store laws, in full
+/// or beyond its certified watermark; this adds the typed provider-intake and
+/// diagnostic-artifact history the certification does not cover (all of it
+/// without one). Explicit deep verification remains `nq admin validate
+/// --full`.
+///
+/// # Errors
+///
+/// As [`validate_core_history_since_open`].
+pub fn validate_at_startup(store: &Store) -> Result<StartupValidation, EngineError> {
+    validate_core_history_since_open(store)?;
+    Ok(if store.applied_watermark().is_some() && engine_core_frontier(store).is_some() {
+        StartupValidation::SinceWatermark
+    } else {
+        StartupValidation::Full
+    })
+}
+
 /// Provider-intake and diagnostic-artifact history not covered by the
 /// store's validation watermark (all of it when the store opened in full or
 /// the watermark was certified under other engine rules).
@@ -14909,6 +14940,43 @@ sys.stdout.write("\n")
         expire_ordinary_history(&mut store, &candidate).expect("the next expiry");
         drop(store);
         drop(Store::open_validating_fully(&path).expect("full open after the next expiry"));
+    }
+
+    /// NQ #27 Phase 8 m5: daemon startup validates incrementally on a store
+    /// with a certified watermark (its work does not grow with history) and
+    /// in full otherwise.
+    #[test]
+    fn daemon_startup_validates_incrementally_under_a_watermark() {
+        let mut work = Vec::new();
+        for collections in [3usize, 9] {
+            let directory = tempfile::tempdir().expect("fixture directory");
+            let path = directory.path().join("startup.db");
+            let loads = vec![1.0; collections];
+            // One admission for every collection, as a configured binding
+            // has (each open checks every admission's context digest).
+            REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = Some(None));
+            let (mut store, _) = holes_fixture(&path, &loads, "startup");
+            REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = None);
+            store
+                .append_genesis(&nq_store::GenesisInput {
+                    genesis_id: "genesis-startup".to_owned(),
+                    legacy_manifest_digest: None,
+                    created_at: timestamp(Utc::now()),
+                    detail: canonical(&json!({"source": "test"})).expect("detail"),
+                })
+                .expect("sole genesis");
+            drop(store);
+            let unwatermarked = Store::open(&path).expect("open without a watermark");
+            assert_eq!(validate_at_startup(&unwatermarked).expect("startup"), StartupValidation::Full);
+            drop(unwatermarked);
+            drop(CollectionEngine::open(&holes_engine_config(&path)).expect("engine records a watermark"));
+            nq_store::start_sql_work_count();
+            let store = Store::open(&path).expect("open under the watermark");
+            let mode = validate_at_startup(&store).expect("startup");
+            work.push(nq_store::stop_sql_work_count().unwrap_or(0));
+            assert_eq!(mode, StartupValidation::SinceWatermark);
+        }
+        assert_eq!(work[0], work[1], "startup work under a watermark does not grow with history: {work:?}");
     }
 
     /// One report a finding cites (for the source-expired reader check).
