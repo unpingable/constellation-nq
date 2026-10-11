@@ -120,6 +120,13 @@ always attempts expiry, and a capacity refusal by the admission preflight
 allows one immediate attempt between quanta. `nq doctor` prints the quantum
 and the earliest next attempt derived from the last committed expiry
 (`expiry_schedule`).
+An attempt expires in batches of at most 64 aged collections beyond the
+existing islands, each batch its own guarded transaction (one generation),
+releasing the operation lock between batches so a concurrent writer waits for
+at most one batch. Batches continue for up to 20 seconds; whatever remains is
+deferred, and the collection path continues it at its next collection rather
+than at the next quantum. A refusal of a later batch keeps the batches already
+committed and defers the rest.
 Eligibility uses local arrival/admission and completed-run times. Provider
 sample time is not permission to discard a freshly received report.
 

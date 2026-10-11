@@ -15307,6 +15307,7 @@ mod tests {
                 .expire_ordinary_before_promoting(
                     "2026-07-17T00:00:00Z",
                     "fixture-engine-rules",
+                    None,
                     |_| Ok::<_, StoreError>(SemanticCertification::NotEstablished),
                     None::<fn(&Store, &ExpiryCandidates) -> Result<(), StoreError>>,
                 )

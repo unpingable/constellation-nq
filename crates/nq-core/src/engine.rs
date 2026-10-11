@@ -1757,6 +1757,9 @@ pub struct CollectionEngine {
     /// Whether the one immediate attempt allowed by a capacity refusal was
     /// used since the last scheduled attempt.
     capacity_bypass_spent: bool,
+    /// The last attempt spent its budget with candidates remaining: the next
+    /// collection continues it without waiting for the quantum.
+    expiry_continuation: bool,
 }
 
 /// How often the collection path attempts expiry: one 168th of the horizon
@@ -2330,6 +2333,7 @@ impl CollectionEngine {
             replay,
             retention_attempt: None,
             last_expiry_attempt: None,
+            expiry_continuation: false,
             capacity_bypass_spent: false,
         })
     }
@@ -2398,6 +2402,7 @@ impl CollectionEngine {
             replay,
             retention_attempt: None,
             last_expiry_attempt: None,
+            expiry_continuation: false,
             capacity_bypass_spent: false,
         };
         engine.revoke_binding(watcher)
@@ -2430,6 +2435,7 @@ impl CollectionEngine {
             replay,
             retention_attempt: None,
             last_expiry_attempt: None,
+            expiry_continuation: false,
             capacity_bypass_spent: false,
         })
     }
@@ -2893,7 +2899,7 @@ impl CollectionEngine {
         // the capacity preflight would refuse the admission.
         let quantum = expiry_quantum(self.config.retention.horizon_seconds);
         let elapsed = self.last_expiry_attempt.map(|at| at.elapsed());
-        let due = elapsed.is_none_or(|elapsed| elapsed >= quantum);
+        let due = self.expiry_continuation || elapsed.is_none_or(|elapsed| elapsed >= quantum);
         let capacity_bypass =
             !due && !self.capacity_bypass_spent && self.capacity_preflight_refuses();
         let attempt = if due || capacity_bypass {
@@ -2910,6 +2916,12 @@ impl CollectionEngine {
                     .as_secs(),
             }
         };
+        if due || capacity_bypass {
+            self.expiry_continuation = matches!(
+                &attempt,
+                RetentionAttempt::Completed(expired) if expired.candidates_remaining
+            );
+        }
         if let RetentionAttempt::Completed(expired) = &attempt
             && expired.deleted_rows > 0
         {
@@ -8845,6 +8857,21 @@ fn replay_heads(state: &nq_store::SemanticState) -> Result<HistoryHeads, EngineE
     Ok(heads)
 }
 
+/// Candidate runs (collections) one expiry batch selects beyond the
+/// existing islands. Each batch is its own guarded transaction and the
+/// operation lock is released between batches, so another writer waits at
+/// most one batch (the other writers' bounded wait is 5 s). At the measured
+/// in-lock cost of about 27 ms per candidate in a debug build, 64 candidates
+/// hold the lock about 1.7 s; the production hourly batch of about 660
+/// collections becomes 11 batches.
+pub const EXPIRY_BATCH_RUNS: usize = 64;
+
+/// Wall-clock budget of one expiry attempt: batches continue while
+/// candidates remain and the budget is not spent; the rest is deferred to
+/// the next attempt, which the collection path then makes at its next
+/// collection instead of waiting for the next quantum.
+pub const EXPIRY_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Retire ordinary history only after typed semantic validation of every
 /// row the expiry relies on or retires: the history this handle's own
 /// certification does not cover (all of it when it has none) is validated in
@@ -8861,9 +8888,57 @@ pub fn expire_ordinary_history(
     store: &mut Store,
     cutoff: &str,
 ) -> Result<nq_store::RetentionResult, EngineError> {
+    expire_ordinary_history_within(store, cutoff, EXPIRY_BATCH_RUNS, EXPIRY_ATTEMPT_BUDGET)
+}
+
+/// [`expire_ordinary_history`] in batches of `batch_runs` candidate runs
+/// within `budget`. The result aggregates the committed batches: the last
+/// boundary, the rows deleted or compacted, and whether candidates remain
+/// (the budget ran out, or a later batch was refused after earlier batches
+/// committed; a refusal of the first batch is returned as the error).
+pub fn expire_ordinary_history_within(
+    store: &mut Store,
+    cutoff: &str,
+    batch_runs: usize,
+    budget: std::time::Duration,
+) -> Result<nq_store::RetentionResult, EngineError> {
+    let started = std::time::Instant::now();
+    let mut total: Option<nq_store::RetentionResult> = None;
+    loop {
+        let batch = match expire_ordinary_batch(store, cutoff, batch_runs) {
+            Ok(batch) => batch,
+            Err(EngineError::Store(error)) if error.is_refusal() && total.is_some() => {
+                let mut total = total.expect("an earlier batch committed");
+                total.candidates_remaining = true;
+                return Ok(total);
+            }
+            Err(error) => return Err(error),
+        };
+        let more = batch.candidates_remaining && batch.deleted_rows > 0;
+        total = Some(match total {
+            None => batch,
+            Some(previous) => nq_store::RetentionResult {
+                boundary: batch.boundary,
+                deleted_rows: previous.deleted_rows + batch.deleted_rows,
+                candidates_remaining: batch.candidates_remaining,
+            },
+        });
+        if !more || started.elapsed() >= budget {
+            return Ok(total.expect("at least one batch ran"));
+        }
+    }
+}
+
+/// One expiry batch (see [`EXPIRY_BATCH_RUNS`]).
+fn expire_ordinary_batch(
+    store: &mut Store,
+    cutoff: &str,
+    batch_runs: usize,
+) -> Result<nq_store::RetentionResult, EngineError> {
     store.expire_ordinary_before_promoting(
         cutoff,
         engine_validation_rules(),
+        Some(batch_runs),
         |snapshot| {
             #[cfg(test)]
             concurrent_writer_for_test(snapshot);
@@ -13756,6 +13831,181 @@ sys.stdout.write("\n")
         );
         assert!(engine.collect(&watcher).expect("due collect").is_success());
         assert!(matches!(engine.last_retention_attempt(), Some(RetentionAttempt::Completed(_))));
+        // An attempt that spent its budget with candidates remaining is
+        // continued by the next collection, inside the quantum; once nothing
+        // remains, the quantum applies again.
+        engine.expiry_continuation = true;
+        assert!(engine.collect(&watcher).expect("continuation collect").is_success());
+        assert!(
+            matches!(engine.last_retention_attempt(), Some(RetentionAttempt::Completed(_))),
+            "a pending continuation is attempted within the quantum: {:?}",
+            engine.last_retention_attempt()
+        );
+        assert!(!engine.expiry_continuation, "nothing remained");
+        assert!(engine.collect(&watcher).is_ok());
+        assert!(matches!(engine.last_retention_attempt(), Some(RetentionAttempt::Deferred { .. })));
+    }
+
+    /// Phase 8 M1 fixture (reviewer probe B pattern): `candidates` aged
+    /// collections (alternating open and resolve) and three young ones.
+    /// Returns the engine config and the expiry cutoff.
+    fn lock_hold_fixture(path: &Path, candidates: usize) -> (NqConfig, String) {
+        let config = holes_engine_config(path);
+        let watcher = config.watchers[0].clone();
+        REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = Some(None));
+        let mut store =
+            Store::initialize_with_capacity(path, 604_800, Some(64 * 1024 * 1024), Some(0), Some(0))
+                .expect("store");
+        store
+            .append_genesis(&nq_store::GenesisInput {
+                genesis_id: "genesis-lock-hold".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: timestamp(Utc::now()),
+                detail: canonical(&json!({"source": "test"})).expect("detail"),
+            })
+            .expect("genesis");
+        for index in 0..candidates {
+            let load = if index % 2 == 0 { 8.0 } else { 1.0 };
+            commit_real_host_detector_report(
+                &mut store,
+                &watcher,
+                &format!("report-k-{index}"),
+                &format!("k-{index}"),
+                Utc::now() - Duration::seconds(1),
+                load,
+                None,
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let cutoff = timestamp(Utc::now());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        for index in 0..3 {
+            commit_real_host_detector_report(
+                &mut store,
+                &watcher,
+                &format!("report-young-{index}"),
+                &format!("young-{index}"),
+                Utc::now() - Duration::seconds(1),
+                1.0,
+                None,
+            );
+        }
+        REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = None);
+        (config, cutoff)
+    }
+
+    /// Runs `expire` on an engine over `path` while another handle commits a
+    /// status event every 100 ms. Returns (expiry ms, the result, and each
+    /// concurrent write's wait in ms with its outcome).
+    #[allow(clippy::type_complexity)]
+    fn expiry_against_a_concurrent_writer(
+        config: &NqConfig,
+        expire: &(dyn Fn(&mut Store) -> Result<nq_store::RetentionResult, EngineError> + Sync),
+    ) -> (u128, nq_store::RetentionResult, Vec<(u128, Result<(), String>)>) {
+        let mut engine = CollectionEngine::open(config).expect("engine");
+        let mut other = Store::open(&config.database_path).expect("other handle");
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                let mut writes = Vec::new();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    let started = std::time::Instant::now();
+                    let result = record_component_status(&mut other, "daemon", "lock-hold-writer", "healthy", "probe", &json!({}));
+                    writes.push((started.elapsed().as_millis(), result.map_err(|error| error.to_string())));
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                writes
+            });
+            let started = std::time::Instant::now();
+            let result = expire(engine.store_mut_for_test()).expect("expiry");
+            let elapsed = started.elapsed().as_millis();
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+            (elapsed, result, writer.join().expect("writer"))
+        })
+    }
+
+    /// NQ #27 Phase 8 M1: expiry runs in candidate batches, each its own
+    /// guarded transaction, releasing the operation lock between batches; a
+    /// concurrent writer is never refused; an attempt whose budget is spent
+    /// reports the remaining candidates and a continuation finishes them.
+    #[test]
+    fn expiry_batches_release_the_operation_lock_between_batches() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("batches.db");
+        let (config, cutoff) = lock_hold_fixture(&path, 48);
+        // A zero budget runs exactly one batch and reports what remains.
+        let mut store = Store::open(&path).expect("store");
+        let first = expire_ordinary_history_within(&mut store, &cutoff, 8, std::time::Duration::ZERO)
+            .expect("first batch");
+        assert!(first.deleted_rows > 0 && first.candidates_remaining, "{first:?}");
+        assert_eq!(first.boundary.generation, 1);
+        drop(store);
+        let (expiry_ms, result, writes) = expiry_against_a_concurrent_writer(&config, &|store| {
+            expire_ordinary_history_within(store, &cutoff, 8, std::time::Duration::from_secs(600))
+        });
+        println!("M1 batches expiry_ms={expiry_ms} generation={} writes={writes:?}", result.boundary.generation);
+        assert!(!result.candidates_remaining, "{result:?}");
+        assert!(result.boundary.generation >= 6, "48 candidates in batches of 8: {result:?}");
+        assert!(writes.iter().all(|(_, outcome)| outcome.is_ok()), "{writes:?}");
+        let store = Store::open(&path).expect("reopen");
+        let aged: i64 = rusqlite::Connection::open(&path)
+            .expect("probe")
+            .query_row("SELECT COUNT(*) FROM admitted_reports WHERE report_id LIKE 'report-k-%' AND source_expired=0", [], |r| r.get(0))
+            .expect("aged reports");
+        assert!(aged <= 2, "every aged collection retired or compacted except protected ones: {aged}");
+        store.validate().expect("store laws hold");
+        validate_semantic_history(&store).expect("typed history validates");
+        drop(store);
+        drop(Store::open_validating_fully(&path).expect("full validation"));
+    }
+
+    /// NQ #27 Phase 8 M1 measurement at the production hourly batch
+    /// (`NQ_M1_K`, default 660 candidate collections): the expiry's wall time
+    /// and the concurrent writer's waits and outcomes, unbatched (one
+    /// transaction, the pre-repair behaviour) and batched
+    /// ([`EXPIRY_BATCH_RUNS`]). One fixture is built and copied. Run with
+    /// `--ignored --nocapture`.
+    #[test]
+    #[ignore = "NQ #27 M1 measurement; tens of minutes of fixture growth"]
+    fn expiry_lock_hold_at_the_production_batch() {
+        let candidates: usize =
+            std::env::var("NQ_M1_K").ok().map_or(660, |value| value.parse().expect("NQ_M1_K"));
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let built = directory.path().join("built.db");
+        let grow = std::time::Instant::now();
+        let (config, cutoff) = lock_hold_fixture(&built, candidates);
+        println!("M1 K={candidates} grow_ms={}", grow.elapsed().as_millis());
+        for (label, batch) in [("unbatched", usize::MAX), ("batched", EXPIRY_BATCH_RUNS)] {
+            let path = directory.path().join(format!("{label}.db"));
+            for suffix in ["", "-wal", "-shm", ".validation-watermark.json"] {
+                let from = std::path::PathBuf::from(format!("{}{suffix}", built.display()));
+                if from.exists() {
+                    std::fs::copy(&from, format!("{}{suffix}", path.display())).expect("copy fixture");
+                }
+            }
+            let mut copy = config.clone();
+            copy.database_path = path.clone();
+            nq_store::start_sql_work_count();
+            let (expiry_ms, result, writes) = expiry_against_a_concurrent_writer(&copy, &|store| {
+                store.count_sql_work_on_this_handle();
+                expire_ordinary_history_within(store, &cutoff, batch, std::time::Duration::from_secs(3600))
+            });
+            let ticks = nq_store::stop_sql_work_count().unwrap_or(0);
+            let longest = writes.iter().map(|(ms, _)| *ms).max().unwrap_or(0);
+            let refused = writes.iter().filter(|(_, outcome)| outcome.is_err()).count();
+            println!(
+                "M1 {label} K={candidates} expiry_ms={expiry_ms} ticks={ticks} generation={} deleted={} remaining={} \
+                 writes={} longest_write_wait_ms={longest} refused={refused}",
+                result.boundary.generation,
+                result.deleted_rows,
+                result.candidates_remaining,
+                writes.len()
+            );
+            for (index, (ms, outcome)) in writes.iter().enumerate().filter(|(_, (ms, outcome))| *ms > 500 || outcome.is_err()) {
+                println!("M1 {label} write {index}: {ms} ms {outcome:?}");
+            }
+        }
     }
 
     #[test]

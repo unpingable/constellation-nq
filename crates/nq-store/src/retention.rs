@@ -17,6 +17,9 @@ pub struct RetentionBoundary {
 pub struct RetentionResult {
     pub boundary: RetentionBoundary,
     pub deleted_rows: usize,
+    /// A batch-limited expiry selected its limit of candidate runs, so more
+    /// aged history may remain eligible for the next batch.
+    pub candidates_remaining: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LineageFloor {
@@ -644,6 +647,7 @@ struct ExpiryPlan {
     status_floor: i64,
     affected_runs: i64,
     affected_evaluations: i64,
+    candidates_remaining: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -651,6 +655,7 @@ fn plan_expiry(
     tx: &Connection,
     cutoff: &str,
     before: &RetentionBoundary,
+    max_candidate_runs: Option<usize>,
 ) -> Result<ExpiryPlan, StoreError> {
     tx.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS expiry_runs(run_id TEXT PRIMARY KEY); DELETE FROM expiry_runs;
@@ -662,6 +667,19 @@ fn plan_expiry(
     // Aged, completed runs. Anchor runs (a compact report names them) are
     // already retired and never candidates again.
     tx.execute("INSERT INTO expiry_runs SELECT run_id FROM watcher_runs w WHERE julianday(finished_at)<julianday(?1) AND NOT EXISTS(SELECT 1 FROM raw_submissions r WHERE r.run_id=w.run_id AND (julianday(r.received_at)>=julianday(?1) OR julianday(r.received_at) IS NULL)) AND NOT EXISTS(SELECT 1 FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE r.run_id=w.run_id AND (julianday(a.received_at)>=julianday(?1) OR julianday(a.admitted_at)>=julianday(?1) OR julianday(a.received_at) IS NULL OR julianday(a.admitted_at) IS NULL)) AND NOT EXISTS(SELECT 1 FROM local_watcher_provider_intakes l JOIN provider_intake_attempts p ON p.intake_id=l.intake_id WHERE l.run_id=w.run_id AND (julianday(p.received_at)>=julianday(?1) OR julianday(p.received_at) IS NULL)) AND NOT EXISTS(SELECT 1 FROM raw_submissions s WHERE s.run_id=w.run_id AND s.source_expired=1)", [cutoff])?;
+    // A batch keeps every existing island (re-examined each time, O(islands))
+    // and only the oldest `max_candidate_runs` aged runs beyond the floors,
+    // in append order; floors then advance over that prefix only. Runs at or
+    // below the status floor are existing islands (an expired run's status
+    // event is deleted with it).
+    let mut candidates_remaining = false;
+    if let Some(limit) = max_candidate_runs {
+        let trimmed = tx.execute(
+            "DELETE FROM expiry_runs WHERE run_id IN (SELECT x.run_id FROM expiry_runs x JOIN watcher_runs w ON w.run_id=x.run_id WHERE NOT EXISTS(SELECT 1 FROM status_events s WHERE s.run_id=x.run_id AND s.status_sequence<=?1) ORDER BY w.rowid LIMIT -1 OFFSET ?2)",
+            params![before.status_floor, i64::try_from(limit).unwrap_or(i64::MAX)],
+        )?;
+        candidates_remaining = trimmed > 0;
+    }
     // Floors stop only at young rows or rows of non-candidate runs; protected
     // dependencies no longer stop them (declared holes). Rows already at or
     // below a floor are islands or compact records and never lower it.
@@ -730,6 +748,7 @@ fn plan_expiry(
         status_floor: sf,
         affected_runs,
         affected_evaluations,
+        candidates_remaining,
     })
 }
 
@@ -981,6 +1000,7 @@ impl Store {
         self.expire_ordinary_before_inner(
             cutoff,
             None,
+            None,
             |store: &Self| validate(store).map(|()| None),
             validate_candidates,
         )
@@ -996,10 +1016,17 @@ impl Store {
     /// (as [`Self::record_validation_watermark`] extends an applied
     /// watermark), so the carried watermark covers the current frontier
     /// rather than the one this handle certified when it opened.
+    ///
+    /// With `max_candidate_runs`, the expiry is one batch: it selects at most
+    /// that many aged runs beyond the floors (oldest first) besides the
+    /// existing islands, so the guarded transaction's work is bounded, and
+    /// reports `candidates_remaining` when it left aged runs for a later
+    /// batch.
     pub fn expire_ordinary_before_promoting<E, F, G>(
         &mut self,
         cutoff: &str,
         engine_rules: &str,
+        max_candidate_runs: Option<usize>,
         validate: F,
         validate_candidates: Option<G>,
     ) -> Result<RetentionResult, E>
@@ -1011,6 +1038,7 @@ impl Store {
         self.expire_ordinary_before_inner(
             cutoff,
             Some(engine_rules),
+            max_candidate_runs,
             |store: &Self| validate(store).map(Some),
             validate_candidates,
         )
@@ -1020,6 +1048,7 @@ impl Store {
         &mut self,
         cutoff: &str,
         engine_rules: Option<&str>,
+        max_candidate_runs: Option<usize>,
         validate: F,
         validate_candidates: Option<G>,
     ) -> Result<RetentionResult, E>
@@ -1036,6 +1065,7 @@ impl Store {
             return Ok(RetentionResult {
                 boundary: current,
                 deleted_rows: 0,
+                candidates_remaining: false,
             });
         }
         let data_version: i64 = self
@@ -1103,9 +1133,9 @@ impl Store {
                 })
             };
             if supplied {
-                self.expire_ordinary_before_checked(cutoff, Some(&proof), Some(&mut wrapper))
+                self.expire_ordinary_before_checked(cutoff, Some(&proof), Some(&mut wrapper), max_candidate_runs)
             } else {
-                self.expire_ordinary_before_checked(cutoff, Some(&proof), None)
+                self.expire_ordinary_before_checked(cutoff, Some(&proof), None, max_candidate_runs)
             }
         };
         result.map_err(|error| failure.take().unwrap_or_else(|| E::from(error)))
@@ -1115,7 +1145,7 @@ impl Store {
     /// The caller supplies its explicitly configured arrival-time cutoff.
     /// This Store-only entrypoint does not certify a consumer's typed semantics.
     pub fn expire_ordinary_before(&mut self, cutoff: &str) -> Result<RetentionResult, StoreError> {
-        self.expire_ordinary_before_checked(cutoff, None, None)
+        self.expire_ordinary_before_checked(cutoff, None, None, None)
     }
 
     /// This handle's certification extended to `bounds` (the frontier of
@@ -1183,6 +1213,7 @@ impl Store {
         cutoff: &str,
         proof: Option<&(HistoryFrontier, RetentionBoundary, i64)>,
         validate_candidates: Option<CandidateValidator<'_>>,
+        max_candidate_runs: Option<usize>,
     ) -> Result<RetentionResult, StoreError> {
         chrono::DateTime::parse_from_rfc3339(cutoff)
             .map_err(|e| StoreError::Invariant(format!("invalid expiry cutoff: {e}")))?;
@@ -1192,6 +1223,7 @@ impl Store {
             return Ok(RetentionResult {
                 boundary: current,
                 deleted_rows: 0,
+                candidates_remaining: false,
             });
         }
         // A durable expiry marker and its deletions commit together. FULL is
@@ -1206,6 +1238,7 @@ impl Store {
             return Ok(RetentionResult {
                 boundary: current,
                 deleted_rows: 0,
+                candidates_remaining: false,
             });
         }
         if let Some((validated, validated_boundary, data_version)) = proof {
@@ -1240,7 +1273,7 @@ impl Store {
             }
         }
         let before = boundary(&tx)?;
-        let plan = plan_expiry(&tx, cutoff, &before)?;
+        let plan = plan_expiry(&tx, cutoff, &before, max_candidate_runs)?;
         let (ef, rf, inf, sf) = (plan.evaluation_floor, plan.report_floor, plan.intake_floor, plan.status_floor);
         let floors_moved = (ef, rf, inf, sf)
             != (
@@ -1254,6 +1287,7 @@ impl Store {
             return Ok(RetentionResult {
                 boundary: before,
                 deleted_rows: 0,
+                candidates_remaining: false,
             });
         }
         if let Some(validate_candidates) = validate_candidates {
@@ -1450,6 +1484,7 @@ impl Store {
         Ok(RetentionResult {
             boundary: next,
             deleted_rows: deleted,
+            candidates_remaining: plan.candidates_remaining,
         })
     }
 }
