@@ -238,7 +238,8 @@ build, slope between 20 and 60 retired collections;
 | --- | --- |
 | No finding | ≈2.46 KB (≈2.56 KB in the 0e167fe residue probe; 4.5 KB in the test before the repair below) |
 | Finding open, compacted by in-place update (0e167fe) | ≈17.8 KB in the test; ≈22 KB in the residue probe (one-second horizon) |
-| Finding open, compacted by delete and re-insert (current) | ≈6.9-7.0 KB |
+| Finding open, compacted by delete and re-insert (current), test fixture | ≈6.9-7.0 KB |
+| Finding open, current code, shipped `nq` with a real helper (f5b78a9 residue probe) | **≈11.9 KB**: the anchor run row of a real helper run is ≈5.5 KB and is kept in full |
 
 Compaction, the anchor runs and the retired intake commitments are rewritten
 by deleting and re-inserting the row with the same rowid and key columns, in
@@ -246,17 +247,20 @@ the same guarded transaction (foreign keys deferred to the commit and checked
 explicitly before it). SQLite never rebalances a page when an update shrinks a
 row, so an in-place compaction left each compact row holding the page it filled
 when it was full. A compact or retired row can be inserted only inside an
-expiry transaction and only in its compact form.
+expiry transaction and only in its compact form. The anchor run is re-inserted
+byte-identical, so its page footprint is the full run row's; compacting the
+anchor run's execution record as well is a follow-up that would bring the
+file-level figure near the payload floor.
 
-At 660 collections per hour across all watchers that is ≈39 MB/day of
+At 660 collections per hour across all watchers that is ≈40 MB/day of
 permanent residue without a finding. A finding belongs to one instance, so an
 open finding adds its residue only on that watcher's collections (≈66/h with
-ten watchers, ≈11 MB/day per open finding) plus its freshness-sweep
-evaluations (a compact evaluation, event and evidence row each, no run); if
-every watcher had an open finding the total would be ≈110 MB/day. On the
-8 GiB profile (≈1.67 GiB above a 4.11 GiB window) that headroom lasts ≈46 days
-of ordinary residue, or ≈16 days with a finding open on every watcher, after
-which admission refuses. The seven-day horizon bounds the window, not the residue. `nq doctor`
+ten watchers, ≈19 MB/day per open finding at the measured ≈11.9 KB) plus its
+freshness-sweep evaluations (a compact evaluation, event and evidence row each,
+no run); if every watcher had an open finding the total would be ≈188 MB/day.
+On the 8 GiB profile (≈1.67 GiB above a 4.11 GiB window) that headroom lasts
+≈42 days of ordinary residue, or ≈9 days with a finding open on every watcher,
+after which admission refuses. The seven-day horizon bounds the window, not the residue. `nq doctor`
 reports the residue rows (`retention.residue`: compact evaluations, reports and
 raw submissions, anchor runs, retired intake commitments, finding events and
 evidence) next to the envelope occupancy.
