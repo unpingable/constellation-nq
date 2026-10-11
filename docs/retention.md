@@ -154,12 +154,24 @@ Roots that keep an island, and when they release it:
 | Root | Holds while | After release |
 | --- | --- | --- |
 | Unresolved finding | the finding's latest event is not `explicitly_absent`; only the current episode's opening event and its latest event keep full closures | the events stay; their evaluations and cited reports become compact |
-| Notification custody | any delivery for the finding event is pending; a delivery intent is terminal at `accepted`, `refused` or `failed`; a legacy outbox at `delivered`, `failed`, or exhausted retries | as above |
+| Notification custody (only notifications bound to a finding event; see below) | any delivery for the finding event is pending; a delivery intent is terminal at `accepted`, `refused` or `failed`; a legacy outbox at `delivered`, `failed`, or exhausted retries | as above |
 | Notification outcome `unknown` | always: no later outcome can be recorded, so the hold is permanent for that occurrence | — |
 | Saved-check claim | a claim without a terminal outcome | compact |
 | Diagnostic origin, successor acquisition | always (consumer lifetime unknown) | — |
 | Latest report per instance, latest acknowledged checkpoint per checkpoint contract, current status target, newest evaluation of each evaluation lineage | while it is the latest | an ordinary candidate |
 | Reports named by a surviving full evaluation | while that evaluation survives | an ordinary candidate |
+
+The notification-custody hold engages only for a notification whose outbox
+row is bound to a finding event (`finding_event_id`). No shipped path binds
+one today: `nq notification submit` and `deliver-local` accept intents from an
+external evaluator (Nightshift, an operator, a site script) whose
+`stable_event_id` is that evaluator's identity, not an NQ finding event, and
+NQ emits no intents of its own. Those notifications are retained and never
+deleted, but they hold no history. `nq doctor` reports
+`custody_bound_notifications` and `custody_unbound_notifications`. Custody
+bound to a finding event whose closure an earlier expiry already compacted
+keeps the finding event (finding rows are never deleted) but cannot restore
+its released sources, so it holds nothing more.
 
 Finding, notification, saved-check, diagnostic and successor rows are never
 deleted. A resolved finding therefore keeps its own consequential history and

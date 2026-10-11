@@ -14848,6 +14848,69 @@ sys.stdout.write("\n")
         drop(Store::open_validating_fully(&path).expect("full validation recomputes it"));
     }
 
+    /// NQ #27 Phase 8 m1 (reviewer probe C): a delivery intent naming a
+    /// finding event whose closure an earlier expiry compacted does not make
+    /// that closure live again: full validation, ordinary opens (as nqd
+    /// startup performs) and the next expiry keep working, and the event
+    /// itself is kept.
+    #[test]
+    fn late_custody_for_a_compacted_event_holds_nothing() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("late-custody.db");
+        let config = holes_engine_config(&path);
+        let watcher = config.watchers[0].clone();
+        let (_first, candidate, _crash, _collector, _) = s4_fixture(&path, &watcher, 12);
+        let (event, compact): (String, i64) = rusqlite::Connection::open(&path)
+            .expect("probe")
+            .query_row(
+                "SELECT f.event_id, e.source_expired FROM finding_events f JOIN evaluation_runs e ON e.evaluation_id=f.evaluation_id WHERE f.event_kind='resolved' ORDER BY f.event_revision LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("resolved event");
+        assert_eq!(compact, 1, "the resolved event's closure was compacted");
+        drop(Store::open_validating_fully(&path).expect("full open before late custody"));
+        let mut store = Store::open(&path).expect("open");
+        store
+            .retain_notification_delivery(
+                &nq_store::NotificationInput {
+                    notification_id: "late".into(),
+                    idempotency_key: "key-late".into(),
+                    finding_event_id: Some(event.clone()),
+                    destination_kind: "fixture".into(),
+                    payload: canonical(&json!({"fixture": "late"})).expect("payload"),
+                    available_at: timestamp(Utc::now()),
+                    max_attempts: 3,
+                    created_at: timestamp(Utc::now()),
+                },
+                &nq_store::NotificationDeliveryIntentInput {
+                    notification_id: "late".into(),
+                    stable_event_id: event.clone(),
+                    attention_kind: "operator_assertion".into(),
+                    attention_receipt_digest: None,
+                    attention_policy_id: "fixture-policy".into(),
+                    attention_policy_digest: nq_protocol::sha256_bytes(b"policy").as_str().to_owned(),
+                    transition_id: "fixture-transition".into(),
+                    route_reference: "fixture-route".into(),
+                    destination_identity: "fixture-destination-late".into(),
+                    content_digest: nq_protocol::sha256_bytes(b"content").as_str().to_owned(),
+                    intent: canonical(&json!({"fixture": "late-intent"})).expect("intent"),
+                    created_at: timestamp(Utc::now()),
+                },
+            )
+            .expect("late delivery retained");
+        let report = store.retention_report().expect("report");
+        assert_eq!(report.custody_bound_notifications, 2, "{report:?}");
+        drop(store);
+        drop(Store::open_validating_fully(&path).expect("full open after late custody"));
+        let mut store = Store::open(&path).expect("ordinary open after late custody");
+        store.validate().expect("nqd startup validation");
+        validate_provider_intake_history(&store).expect("nqd startup intake validation");
+        expire_ordinary_history(&mut store, &candidate).expect("the next expiry");
+        drop(store);
+        drop(Store::open_validating_fully(&path).expect("full open after the next expiry"));
+    }
+
     /// One report a finding cites (for the source-expired reader check).
     fn after_events_report(path: &Path) -> String {
         rusqlite::Connection::open(path)

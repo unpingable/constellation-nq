@@ -655,10 +655,14 @@ pub(crate) fn released_recitation_sql(f: &str, v: &str) -> String {
 
 /// Finding events `e` whose closure must stay complete: the latest event and
 /// the current episode's opening event of an unresolved finding, and any event
-/// whose notification custody has not ended.
+/// whose notification custody has not ended, unless its closure was already
+/// compacted before that custody began. Such custody keeps the finding event
+/// itself (finding rows are never deleted) but cannot restore the released
+/// sources, so it holds nothing more and never makes a compacted closure
+/// "live" (which validation would then reject as under-retention).
 pub(crate) fn live_finding_event_sql(e: &str) -> String {
     format!(
-        "(EXISTS(SELECT 1 FROM finding_current c JOIN finding_events h ON h.event_id=c.latest_event_id WHERE c.finding_id={e}.finding_id AND h.condition_state<>'explicitly_absent' AND (h.event_id={e}.event_id OR {e}.event_revision=(SELECT MAX(x.event_revision) FROM finding_events x WHERE x.finding_id={e}.finding_id AND x.event_kind IN ('opened','reopened')))) OR EXISTS(SELECT 1 FROM notification_outbox o WHERE o.finding_event_id={e}.event_id AND NOT {CUSTODY_TERMINAL}))"
+        "(EXISTS(SELECT 1 FROM finding_current c JOIN finding_events h ON h.event_id=c.latest_event_id WHERE c.finding_id={e}.finding_id AND h.condition_state<>'explicitly_absent' AND (h.event_id={e}.event_id OR {e}.event_revision=(SELECT MAX(x.event_revision) FROM finding_events x WHERE x.finding_id={e}.finding_id AND x.event_kind IN ('opened','reopened')))) OR (EXISTS(SELECT 1 FROM notification_outbox o WHERE o.finding_event_id={e}.event_id AND NOT {CUSTODY_TERMINAL}) AND NOT EXISTS(SELECT 1 FROM evaluation_runs custody_e WHERE custody_e.evaluation_id={e}.evaluation_id AND custody_e.source_expired=1)))"
     )
 }
 
@@ -803,6 +807,12 @@ pub struct RetentionReport {
     pub retired_intake_commitments: i64,
     pub custody_pending_events: i64,
     pub custody_unknown_events: i64,
+    /// Notifications bound to a finding event (`finding_event_id`): only
+    /// these engage the notification-custody hold.
+    pub custody_bound_notifications: i64,
+    /// Notifications with no finding event (every intent submitted by the
+    /// shipped notification commands): they never hold history.
+    pub custody_unbound_notifications: i64,
     pub oldest_unexpired_run_finished_at: Option<String>,
     /// Rows that survive expiry permanently (see docs/retention.md,
     /// "Permanent residue"). They are charged to the byte budget.
@@ -879,6 +889,10 @@ impl Store {
         );
         report.custody_pending_events = count(&custody)?;
         report.custody_unknown_events = count("SELECT COUNT(DISTINCT o.finding_event_id) FROM notification_outbox o JOIN notification_delivery_events d ON d.notification_id=o.notification_id WHERE o.finding_event_id IS NOT NULL AND d.outcome='unknown'")?;
+        report.custody_bound_notifications =
+            count("SELECT COUNT(*) FROM notification_outbox WHERE finding_event_id IS NOT NULL")?;
+        report.custody_unbound_notifications =
+            count("SELECT COUNT(*) FROM notification_outbox WHERE finding_event_id IS NULL")?;
         report.oldest_unexpired_run_finished_at = c.query_row(
             "SELECT MIN(w.finished_at) FROM watcher_runs w JOIN status_events s ON s.run_id=w.run_id WHERE s.status_sequence>?1",
             [b.status_floor],
