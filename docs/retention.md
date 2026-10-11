@@ -123,7 +123,12 @@ and the earliest next attempt derived from the last committed expiry
 An attempt expires in batches of at most 64 aged collections beyond the
 existing islands, each batch its own guarded transaction (one generation),
 releasing the operation lock between batches so a concurrent writer waits for
-at most one batch. Batches continue for up to 20 seconds; whatever remains is
+at most one batch. One batch's locked work still grows with the retained
+window (the full foreign-key check, the floor union and the run scan, about
+405 SQLite ticks per retained collection in the S4 harness), and it has not
+been measured at the production window in a release build, so a writer's
+5-second wait bound is not yet established at that scale. Batches continue
+for up to 20 seconds; whatever remains is
 deferred, and the collection path continues it at its next collection rather
 than at the next quantum. A later batch refused by a concurrent commit is
 retried up to three times within the budget; if it stays refused, the batches
@@ -243,11 +248,15 @@ row, so an in-place compaction left each compact row holding the page it filled
 when it was full. A compact or retired row can be inserted only inside an
 expiry transaction and only in its compact form.
 
-At 660 collections per hour that is ≈39 MB/day of permanent residue without a
-finding and ≈110 MB/day while one finding stays open. On the 8 GiB profile
-(≈1.67 GiB above a 4.11 GiB window) that headroom lasts ≈46 days of ordinary
-residue, or ≈16 days of one continuously open finding, after which admission
-refuses. The seven-day horizon bounds the window, not the residue. `nq doctor`
+At 660 collections per hour across all watchers that is ≈39 MB/day of
+permanent residue without a finding. A finding belongs to one instance, so an
+open finding adds its residue only on that watcher's collections (≈66/h with
+ten watchers, ≈11 MB/day per open finding) plus its freshness-sweep
+evaluations (a compact evaluation, event and evidence row each, no run); if
+every watcher had an open finding the total would be ≈110 MB/day. On the
+8 GiB profile (≈1.67 GiB above a 4.11 GiB window) that headroom lasts ≈46 days
+of ordinary residue, or ≈16 days with a finding open on every watcher, after
+which admission refuses. The seven-day horizon bounds the window, not the residue. `nq doctor`
 reports the residue rows (`retention.residue`: compact evaluations, reports and
 raw submissions, anchor runs, retired intake commitments, finding events and
 evidence) next to the envelope occupancy.
