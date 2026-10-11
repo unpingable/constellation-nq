@@ -27,7 +27,7 @@ pub mod capacity;
 mod history_scope;
 mod retention;
 pub use retention::{
-    CapacityReport, ExpiryCandidates, RetentionBoundary, RetentionReport, RetentionResult,
+    CapacityReport, ExpiryCandidates, ResidueCounts, RetentionBoundary, RetentionReport, RetentionResult,
 };
 
 pub use history_scope::{

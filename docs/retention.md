@@ -180,6 +180,59 @@ custody, and the persisted envelope against current occupancy. When the next
 ordinary write would be refused, the `database` field reads
 `capacity_refusing` instead of `healthy`.
 
+### Permanent residue
+
+Expiry does not return a store to the size of its window. Some rows survive
+every retired collection permanently, are never reclaimed (not even after the
+finding they serve resolves), and are charged to the byte budget:
+
+- every retired collection leaves its provider-intake identity commitment;
+- a collection that a finding event names (every collection while a finding
+  is open writes an `updated` event) also leaves a compact evaluation, a
+  compact report, a compact raw submission and an anchor run, besides the
+  finding event and its evidence rows, which are never deleted.
+
+Payload per retired collection under an open finding (sum of column lengths,
+excluding indexes and page overhead; Phase 8 review, 60 retired collections):
+
+| Row | Payload bytes |
+| --- | --- |
+| Compact evaluation | 430 |
+| Compact report | 432 |
+| Compact raw submission | 139 |
+| Anchor run | 1,191 |
+| Retired intake commitment | 1,709 |
+| Finding event | 976 |
+| Finding evidence | 168 |
+| **Total** | **≈4,959** (≈1.7 KB without a finding: the commitment) |
+
+Measured at file level (`(page_count - freelist_count) x page_size`, debug
+build, slope between 20 and 60 retired collections;
+`retired_collection_residue_stays_near_its_payload_at_file_level`):
+
+| Case | Per retired collection |
+| --- | --- |
+| No finding | ≈2.46 KB (≈2.56 KB in the 0e167fe residue probe; 4.5 KB in the test before the repair below) |
+| Finding open, compacted by in-place update (0e167fe) | ≈17.8 KB in the test; ≈22 KB in the residue probe (one-second horizon) |
+| Finding open, compacted by delete and re-insert (current) | ≈6.9-7.0 KB |
+
+Compaction, the anchor runs and the retired intake commitments are rewritten
+by deleting and re-inserting the row with the same rowid and key columns, in
+the same guarded transaction (foreign keys deferred to the commit and checked
+explicitly before it). SQLite never rebalances a page when an update shrinks a
+row, so an in-place compaction left each compact row holding the page it filled
+when it was full. A compact or retired row can be inserted only inside an
+expiry transaction and only in its compact form.
+
+At 660 collections per hour that is ≈39 MB/day of permanent residue without a
+finding and ≈110 MB/day while one finding stays open. On the 8 GiB profile
+(≈1.67 GiB above a 4.11 GiB window) that headroom lasts ≈46 days of ordinary
+residue, or ≈16 days of one continuously open finding, after which admission
+refuses. The seven-day horizon bounds the window, not the residue. `nq doctor`
+reports the residue rows (`retention.residue`: compact evaluations, reports and
+raw submissions, anchor runs, retired intake commitments, finding events and
+evidence) next to the envelope occupancy.
+
 The durable expiry boundary and its deletions and compactions commit together
 in a FULL transaction. Validation proves every row below a floor is a declared
 island or compact record; any other row is an undeclared retained row and

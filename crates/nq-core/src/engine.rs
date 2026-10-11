@@ -13846,6 +13846,131 @@ sys.stdout.write("\n")
         assert!(matches!(engine.last_retention_attempt(), Some(RetentionAttempt::Deferred { .. })));
     }
 
+    /// File-level bytes in use after one expiry of `retired` aged
+    /// collections at `load` (8.0 keeps a finding open, 1.0 has none), with
+    /// three young collections at the same load (`incremental`: also expire
+    /// all but the two newest after every collection, as a one-second horizon
+    /// does): (page_count - freelist) x
+    /// page_size, and the compact/anchor row counts.
+    fn residue_after_expiry(path: &Path, retired: usize, load: f64, incremental: bool) -> (i64, i64) {
+        let config = holes_engine_config(path);
+        let watcher = config.watchers[0].clone();
+        REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = Some(None));
+        let mut store =
+            Store::initialize_with_capacity(path, 604_800, Some(64 * 1024 * 1024), Some(0), Some(0))
+                .expect("store");
+        store
+            .append_genesis(&nq_store::GenesisInput {
+                genesis_id: "genesis-residue".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: timestamp(Utc::now()),
+                detail: canonical(&json!({"source": "test"})).expect("detail"),
+            })
+            .expect("genesis");
+        for index in 0..retired {
+            commit_real_host_detector_report(
+                &mut store,
+                &watcher,
+                &format!("report-r-{index}"),
+                &format!("r-{index}"),
+                Utc::now() - Duration::seconds(1),
+                load,
+                None,
+            );
+            if incremental && index >= 2 {
+                // Expire everything but the two newest collections.
+                let cutoff: String = rusqlite::Connection::open(path)
+                    .expect("probe")
+                    .query_row("SELECT received_at FROM raw_submissions ORDER BY rowid DESC LIMIT 1 OFFSET 1", [], |r| r.get(0))
+                    .expect("cutoff");
+                expire_ordinary_history(&mut store, &cutoff).expect("incremental expiry");
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let cutoff = timestamp(Utc::now());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        for index in 0..3 {
+            commit_real_host_detector_report(
+                &mut store,
+                &watcher,
+                &format!("report-ry-{index}"),
+                &format!("ry-{index}"),
+                Utc::now() - Duration::seconds(1),
+                load,
+                None,
+            );
+        }
+        REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = None);
+        let result = expire_ordinary_history(&mut store, &cutoff).expect("expiry");
+        assert!(result.deleted_rows > 0 && !result.candidates_remaining, "{result:?}");
+        drop(store);
+        let connection = rusqlite::Connection::open(path).expect("probe");
+        let pragma = |name: &str| -> i64 {
+            connection.query_row(&format!("PRAGMA {name}"), [], |r| r.get(0)).expect("pragma")
+        };
+        let used = (pragma("page_count") - pragma("freelist_count")) * pragma("page_size");
+        let compact: i64 = connection
+            .query_row("SELECT COUNT(*) FROM evaluation_runs WHERE source_expired=1", [], |r| r.get(0))
+            .expect("compact");
+        (used, compact)
+    }
+
+    /// NQ #27 residue at file level (Phase 8 M3, residue probe 2026-10-11):
+    /// the permanent bytes each retired collection leaves, as the slope
+    /// between 20 and 60 retired collections, under an open finding (compact
+    /// evaluation, report and raw submission, anchor run, finding event and
+    /// evidence, intake commitment) and without one (intake commitment only).
+    /// Compaction rewrites the compact rows (and the anchor runs and retired
+    /// intake commitments) by delete and re-insert so their pages are
+    /// released; an in-place shrinking update left each compact row holding
+    /// the page it occupied when full (about 22 KB per collection at 0e167fe).
+    #[test]
+    fn retired_collection_residue_stays_near_its_payload_at_file_level() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let mut slopes = Vec::new();
+        for (label, load, incremental) in [
+            ("open_finding", 8.0, false),
+            ("open_finding_expired_per_collection", 8.0, true),
+            ("ordinary", 1.0, false),
+        ] {
+            let (low, low_compact) = residue_after_expiry(
+                &directory.path().join(format!("{label}-20.db")),
+                20,
+                load,
+                incremental,
+            );
+            let (high, high_compact) = residue_after_expiry(
+                &directory.path().join(format!("{label}-60.db")),
+                60,
+                load,
+                incremental,
+            );
+            let slope = (high - low) / 40;
+            println!(
+                "RESIDUE {label}: used bytes {low} (20 retired, {low_compact} compact) -> {high} (60 retired, \
+                 {high_compact} compact): {slope} B per retired collection"
+            );
+            slopes.push(slope);
+        }
+        // Payload floor under an open finding: 4,959 B (Phase 8 review M3).
+        // Measured at this commit (debug, crow): 6,963 B (one expiry) and
+        // 6,860 B (expired per collection) under an open finding, 2,457 B
+        // without one; 17,817 B and 4,505 B with in-place compaction.
+        for slope in &slopes[..2] {
+            assert!(
+                *slope <= 8 * 1024,
+                "residue under an open finding is {slope} B per retired collection at file level \
+                 (payload floor 4,959 B; measured 6,963 B after the repair, 17,817 B before)"
+            );
+        }
+        assert!(
+            slopes[2] <= 3 * 1024,
+            "ordinary residue is {} B per retired collection at file level (measured 2,457 B after \
+             the repair, 4,505 B before)",
+            slopes[2]
+        );
+    }
+
     /// Phase 8 M1 fixture (reviewer probe B pattern): `candidates` aged
     /// collections (alternating open and resolve) and three young ones.
     /// Returns the engine config and the expiry cutoff.

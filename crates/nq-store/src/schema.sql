@@ -886,3 +886,11 @@ CREATE INDEX evaluation_watermarks_by_report ON evaluation_watermarks(instance_i
 CREATE INDEX finding_evidence_by_report ON finding_evidence(report_id);
 
 CREATE INDEX finding_events_by_evaluation ON finding_events(evaluation_id);
+
+CREATE TRIGGER compact_evaluation_runs_insert BEFORE INSERT ON evaluation_runs WHEN NEW.source_expired<>0 AND NOT (COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0)=1 AND NEW.detail_json=CAST('{}' AS BLOB)) BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+
+CREATE TRIGGER compact_admitted_reports_insert BEFORE INSERT ON admitted_reports WHEN NEW.source_expired<>0 AND NOT (COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0)=1 AND NEW.canonical_json=CAST('{}' AS BLOB) AND NEW.validated_report_json=CAST('{}' AS BLOB) AND NEW.next_checkpoint_json IS NULL) BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+
+CREATE TRIGGER compact_raw_submissions_insert BEFORE INSERT ON raw_submissions WHEN NEW.source_expired<>0 AND NOT (COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0)=1 AND length(NEW.raw_bytes)=0) BEGIN SELECT RAISE(ABORT, 'append-only table'); END;
+
+CREATE TRIGGER retired_provider_intake_attempts_insert BEFORE INSERT ON provider_intake_attempts WHEN NEW.history_expired<>0 AND NOT (COALESCE((SELECT delete_enabled FROM retention_state WHERE singleton=1),0)=1 AND NEW.retired_identity_digest IS NOT NULL AND length(NEW.raw_bytes)=0) BEGIN SELECT RAISE(ABORT, 'append-only table'); END;

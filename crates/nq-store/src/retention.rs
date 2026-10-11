@@ -775,6 +775,23 @@ pub struct RetentionReport {
     pub custody_pending_events: i64,
     pub custody_unknown_events: i64,
     pub oldest_unexpired_run_finished_at: Option<String>,
+    /// Rows that survive expiry permanently (see docs/retention.md,
+    /// "Permanent residue"). They are charged to the byte budget.
+    pub residue: ResidueCounts,
+}
+
+/// Permanent residue rows: compact source records, anchor runs, retired
+/// intake commitments, and the finding rows that name them. None is ever
+/// reclaimed, including after the finding resolves.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ResidueCounts {
+    pub compact_evaluations: i64,
+    pub compact_reports: i64,
+    pub compact_raw_submissions: i64,
+    pub anchor_runs: i64,
+    pub retired_intake_commitments: i64,
+    pub finding_events: i64,
+    pub finding_evidence: i64,
 }
 
 /// Operator-facing capacity state: the persisted envelope against current
@@ -838,13 +855,23 @@ impl Store {
             [b.status_floor],
             |r| r.get(0),
         )?;
+        report.residue.retired_intake_commitments = report.retired_intake_commitments;
+        report.residue.finding_events = count("SELECT COUNT(*) FROM finding_events")?;
+        report.residue.finding_evidence = count("SELECT COUNT(*) FROM finding_evidence")?;
         if b.generation == 0 || !holes_schema(c)? {
             return Ok(report);
         }
+        report.residue.compact_raw_submissions =
+            count("SELECT COUNT(*) FROM raw_submissions WHERE source_expired=1")?;
+        report.residue.anchor_runs = count(
+            "SELECT COUNT(*) FROM watcher_runs w WHERE EXISTS(SELECT 1 FROM raw_submissions r WHERE r.run_id=w.run_id AND r.source_expired=1)",
+        )?;
         report.compact_evaluations =
             count("SELECT COUNT(*) FROM evaluation_runs WHERE source_expired=1")?;
         report.compact_reports =
             count("SELECT COUNT(*) FROM admitted_reports WHERE source_expired=1")?;
+        report.residue.compact_evaluations = report.compact_evaluations;
+        report.residue.compact_reports = report.compact_reports;
         report.island_evaluations = count(
             "SELECT COUNT(*) FROM evaluation_runs WHERE evaluation_sequence<=?1 AND source_expired=0",
         )?;
@@ -1341,6 +1368,11 @@ impl Store {
             "UPDATE retention_state SET delete_enabled=1 WHERE singleton=1",
             [],
         )?;
+        // Compaction deletes and re-inserts compact rows that finding,
+        // evidence and anchor rows reference; the references are checked at
+        // the end of the transaction (and by the explicit foreign-key check
+        // below) instead of between the two statements.
+        tx.execute_batch("PRAGMA defer_foreign_keys=ON")?;
         let mut deleted = 0usize;
         // Evaluations at or below the floor that are neither islands nor
         // compact decision records retire with their watermarks and refusals.
@@ -1349,23 +1381,31 @@ impl Store {
             ("refusals", Mutation::Delete("evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition<>'island') OR run_id IN (SELECT run_id FROM expiry_dead_runs) OR submission_id IN (SELECT submission_id FROM raw_submissions WHERE run_id IN (SELECT run_id FROM expiry_dead_runs))")),
             ("evaluation_watermarks", Mutation::Delete("evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition<>'island')")),
             ("evaluation_runs", Mutation::Delete("evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='delete')")),
-            ("evaluation_runs", Mutation::Update("source_expired=1, detail_json=CAST('{}' AS BLOB)", "evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='compact')")),
+            ("evaluation_runs", Mutation::Repack(Some("source_expired=1, detail_json=CAST('{}' AS BLOB)"), "evaluation_id IN (SELECT evaluation_id FROM expiry_evaluations WHERE disposition='compact')")),
             ("observation_coverage", Mutation::Delete("report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))")),
             ("observations", Mutation::Delete("report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))")),
             ("report_coverage", Mutation::Delete("report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))")),
             ("report_errors", Mutation::Delete("report_id IN (SELECT a.report_id FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE r.run_id IN (SELECT run_id FROM expiry_dead_runs))")),
             ("admitted_reports", Mutation::Delete("submission_id IN (SELECT submission_id FROM raw_submissions WHERE run_id IN (SELECT run_id FROM expiry_dead_runs)) AND report_id NOT IN (SELECT report_id FROM expiry_compact_reports)")),
-            ("admitted_reports", Mutation::Update("source_expired=1, canonical_json=CAST('{}' AS BLOB), validated_report_json=CAST('{}' AS BLOB), next_checkpoint_json=NULL", "report_id IN (SELECT report_id FROM expiry_compact_reports)")),
+            ("admitted_reports", Mutation::Repack(Some("source_expired=1, canonical_json=CAST('{}' AS BLOB), validated_report_json=CAST('{}' AS BLOB), next_checkpoint_json=NULL"), "report_id IN (SELECT report_id FROM expiry_compact_reports)")),
             ("provider_intake_acknowledgments", Mutation::Delete("run_id IN (SELECT run_id FROM expiry_dead_runs)")),
             ("local_watcher_provider_intakes", Mutation::Delete("run_id IN (SELECT run_id FROM expiry_dead_runs)")),
             ("legacy_v3_watcher_run_intake_gaps", Mutation::Delete("run_id IN (SELECT run_id FROM expiry_dead_runs)")),
             ("raw_submissions", Mutation::Delete("run_id IN (SELECT run_id FROM expiry_dead_runs) AND submission_id NOT IN (SELECT a.submission_id FROM admitted_reports a JOIN expiry_compact_reports c ON c.report_id=a.report_id)")),
-            ("raw_submissions", Mutation::Update("source_expired=1, raw_bytes=X''", "submission_id IN (SELECT a.submission_id FROM admitted_reports a JOIN expiry_compact_reports c ON c.report_id=a.report_id)")),
+            ("raw_submissions", Mutation::Repack(Some("source_expired=1, raw_bytes=X''"), "submission_id IN (SELECT a.submission_id FROM admitted_reports a JOIN expiry_compact_reports c ON c.report_id=a.report_id)")),
             ("status_events", Mutation::Delete("run_id IN (SELECT run_id FROM expiry_dead_runs)")),
             ("watcher_runs", Mutation::Delete("run_id IN (SELECT run_id FROM expiry_dead_runs WHERE anchor=0)")),
         ] {
             deleted += mutation.apply(&tx, table, delta.as_mut())?;
         }
+        // Anchor runs are kept unchanged (not counted as deleted or
+        // compacted); re-inserting them after their neighbours' deletion
+        // packs them into fewer pages.
+        Mutation::Repack(None, "run_id IN (SELECT run_id FROM expiry_dead_runs WHERE anchor=1)").apply(
+            &tx,
+            "watcher_runs",
+            delta.as_mut(),
+        )?;
         let retire_ids:Vec<String>=tx.prepare("SELECT intake_id FROM provider_intake_attempts WHERE history_expired=0 AND intake_sequence<=?1 AND intake_id IN (SELECT intake_id FROM expiry_links)")?.query_map([inf],|r|r.get(0))?.collect::<Result<_,_>>()?;
         for id in &retire_ids {
             let (run,submission,report,digest):(String,Option<String>,Option<String>,Option<String>)=tx.query_row("SELECT run_id,submission_id,report_id,semantic_digest FROM expiry_links WHERE intake_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
@@ -1393,6 +1433,17 @@ impl Store {
                 delta.added("provider_intake_attempts", &new_rows);
             }
         }
+        // Retired intake commitments shrank in place; re-insert them so the
+        // pages their full bodies occupied are released.
+        tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS expiry_retired_intakes(intake_id TEXT PRIMARY KEY); DELETE FROM expiry_retired_intakes;")?;
+        for id in &retire_ids {
+            tx.execute("INSERT INTO expiry_retired_intakes VALUES(?1)", [id])?;
+        }
+        Mutation::Repack(None, "intake_id IN (SELECT intake_id FROM expiry_retired_intakes)").apply(
+            &tx,
+            "provider_intake_attempts",
+            delta.as_mut(),
+        )?;
         tx.execute("UPDATE retention_state SET generation=?1,evaluation_floor=?2,report_floor=?3,intake_floor=?4,status_floor=?5,cutoff=?6,lineage_floors_json=?7,delete_enabled=0 WHERE singleton=1",params![next.generation,ef,rf,inf,sf,cutoff,document.as_bytes()])?;
         // The resulting boundary is validated in full except for retired
         // commitments: with a scoped validation, only those retired by this
@@ -1610,7 +1661,47 @@ fn carry_semantic(
 /// One expiry mutation over a history table (alias-free predicate).
 enum Mutation {
     Delete(&'static str),
+    /// Rewrite the selected rows in place (kept for reference; compaction
+    /// uses [`Mutation::Repack`]).
+    #[allow(dead_code)]
     Update(&'static str, &'static str),
+    /// Rewrite the selected rows as delete and re-insert with the same rowid
+    /// and key columns, applying the optional `SET` to the re-inserted form.
+    /// SQLite never rebalances a leaf page when an update shrinks a row, so
+    /// a compact row rewritten in place keeps the page it occupied when full
+    /// (and in an append-only table that page is never reused); deleting
+    /// the rows first lets their pages merge or free, and the re-inserted
+    /// compact rows pack densely. The watermark delta treats it exactly as
+    /// an update (covered row digests before and after).
+    Repack(Option<&'static str>, &'static str),
+}
+
+/// Delete and re-insert the rows of `table` matching `predicate`, with
+/// `set` applied to the re-inserted form. Returns the rows rewritten.
+fn repack(tx: &Connection, table: &str, set: Option<&str>, predicate: &str) -> Result<usize, StoreError> {
+    let columns: Vec<String> = tx
+        .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    let list = columns.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(",");
+    tx.execute_batch("DROP TABLE IF EXISTS temp.expiry_repack")?;
+    tx.execute(
+        &format!("CREATE TEMP TABLE expiry_repack AS SELECT rowid AS repack_rowid, {list} FROM main.{table} WHERE {predicate}"),
+        [],
+    )?;
+    if let Some(set) = set {
+        tx.execute(&format!("UPDATE temp.expiry_repack SET {set}"), [])?;
+    }
+    tx.execute(
+        &format!("DELETE FROM main.{table} WHERE rowid IN (SELECT repack_rowid FROM temp.expiry_repack)"),
+        [],
+    )?;
+    let inserted = tx.execute(
+        &format!("INSERT INTO main.{table}(rowid,{list}) SELECT repack_rowid,{list} FROM temp.expiry_repack ORDER BY repack_rowid"),
+        [],
+    )?;
+    tx.execute_batch("DROP TABLE temp.expiry_repack")?;
+    Ok(inserted)
 }
 
 impl Mutation {
@@ -1627,6 +1718,15 @@ impl Mutation {
                 let removed = delta.covered_rows(tx, table, predicate)?;
                 let changed = tx.execute(&format!("DELETE FROM {table} WHERE {predicate}"), [])?;
                 delta.removed(table, &removed);
+                Ok(changed)
+            }
+            (Self::Repack(set, predicate), None) => repack(tx, table, *set, predicate),
+            (Self::Repack(set, predicate), Some(delta)) => {
+                let before = delta.covered_rows(tx, table, predicate)?;
+                let changed = repack(tx, table, *set, predicate)?;
+                let after = delta.covered_rows(tx, table, predicate)?;
+                delta.removed(table, &before);
+                delta.added(table, &after);
                 Ok(changed)
             }
             (Self::Update(set, predicate), Some(delta)) => {

@@ -388,6 +388,11 @@ fn resolved_finding_closure_is_reclaimed_and_every_reader_declares_the_gap() {
         retention["compact_evaluations"].as_i64().unwrap() >= 4,
         "{doctor}"
     );
+    let residue = &retention["residue"];
+    assert_eq!(residue["compact_evaluations"], retention["compact_evaluations"], "{doctor}");
+    assert!(residue["compact_raw_submissions"].as_i64().unwrap() >= 1, "{doctor}");
+    assert!(residue["anchor_runs"].as_i64().unwrap() >= 1, "{doctor}");
+    assert!(residue["finding_events"].as_i64().unwrap() >= 4, "{doctor}");
     assert!(
         doctor["expiry_schedule"]["quantum_seconds"]
             .as_u64()

@@ -2266,6 +2266,9 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
             .map(|at| at.to_rfc3339()),
         "startup": "always attempts",
         "capacity_bypass": "one immediate attempt when the capacity preflight refuses",
+        "batch_runs": nq_core::engine::EXPIRY_BATCH_RUNS,
+        "attempt_budget_seconds": nq_core::engine::EXPIRY_ATTEMPT_BUDGET.as_secs(),
+        "continuation": "an attempt that spends its budget with candidates remaining is continued by the next collection",
     });
     let database = if capacity.preflight == "admit" {
         "healthy"
