@@ -149,7 +149,16 @@ Roots that keep an island, and when they release it:
 
 Finding, notification, saved-check, diagnostic and successor rows are never
 deleted. A resolved finding therefore keeps its own consequential history and
-no longer pins any other history. A lineage whose newest evaluation is old
+no longer pins any other history. When a released finding's detector later
+cannot evaluate (stale, partial or missing testimony), its `updated` event
+keeps the resolved condition and re-cites the released evidence by identity:
+the citation names the retained decision, the compact report is not
+re-verified, and the finding read model marks that evidence
+`"source_expired": true`. Such a re-citation does not make the finding live
+again and protects nothing. A live event may cite a compact report only in
+that way (evidence first cited at or before the finding's latest resolution);
+any other compact citation by a live event is under-retention and fails
+validation. A lineage whose newest evaluation is old
 keeps reporting that evaluation in status rather than disappearing. Islands
 and compact records are charged to the byte budget. If protected dependencies
 exhaust it, admission refuses rather than discarding them. The store also

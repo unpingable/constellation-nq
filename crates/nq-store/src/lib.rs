@@ -5011,6 +5011,12 @@ pub struct AdmittedReportRow {
 pub struct EvidenceSnapshot {
     pub watermarks: Vec<EvaluationWatermark>,
     pub reports: Vec<AdmittedReportRow>,
+    /// Source-expired (compact) reports of these instances that the latest
+    /// event of some finding cites. They are never detector evidence: an
+    /// evaluation that keeps a finding's evidence re-cites them by identity
+    /// (the retained decision), without their bytes. `canonical_json` is the
+    /// compact record's empty body.
+    pub expired_citations: Vec<AdmittedReportRow>,
 }
 
 /// One row from the stable `nq.finding_snapshot.v3` public read model.
@@ -5214,6 +5220,8 @@ pub struct FindingEvidenceHistoryRow {
     pub report_received_at: String,
     pub observation_exists: bool,
     pub observation_observed_at: Option<String>,
+    /// The cited report survives only as a compact source-expired record.
+    pub report_source_expired: bool,
 }
 
 /// Exact admitted report projections and the number of evaluations durably
@@ -9820,6 +9828,7 @@ fn evidence_snapshot_from_connection(
     instances.extend(instance_ids.iter().cloned());
     let mut watermarks = Vec::with_capacity(instances.len());
     let mut reports = Vec::new();
+    let mut expired_citations = Vec::new();
     for instance_id in instances {
         let max_report_sequence: i64 = connection.query_row(
             "SELECT COALESCE(MAX(report_sequence), 0)
@@ -9869,10 +9878,42 @@ fn evidence_snapshot_from_connection(
             })
         })?;
         reports.extend(rows.collect::<Result<Vec<_>, _>>()?);
+        if retention::holes_schema(connection)? {
+            let mut statement = connection.prepare(
+                "SELECT DISTINCT report.report_sequence, report.report_id, report.instance_id,
+                        report.profile_id, report.profile_version, report.profile_digest,
+                        report.observed_at, report.received_at, report.report_status,
+                        report.canonical_json, report.semantic_digest
+                 FROM finding_current AS current
+                 JOIN finding_evidence AS evidence ON evidence.event_id = current.latest_event_id
+                 JOIN admitted_reports AS report
+                   ON report.report_id = evidence.report_id
+                  AND report.semantic_digest = evidence.report_semantic_digest
+                 WHERE report.instance_id = ?1 AND report.source_expired = 1
+                 ORDER BY report.report_sequence",
+            )?;
+            let rows = statement.query_map([&instance_id], |row| {
+                Ok(AdmittedReportRow {
+                    report_sequence: row.get(0)?,
+                    report_id: row.get(1)?,
+                    instance_id: row.get(2)?,
+                    profile_id: row.get(3)?,
+                    profile_version: row.get(4)?,
+                    profile_digest: row.get(5)?,
+                    observed_at: row.get(6)?,
+                    received_at: row.get(7)?,
+                    report_status: row.get(8)?,
+                    canonical_json: row.get(9)?,
+                    semantic_digest: row.get(10)?,
+                })
+            })?;
+            expired_citations.extend(rows.collect::<Result<Vec<_>, _>>()?);
+        }
     }
     Ok(EvidenceSnapshot {
         watermarks,
         reports,
+        expired_citations,
     })
 }
 
@@ -12353,7 +12394,12 @@ fn finding_evidence_history(
     connection: &Connection,
     event_id: &str,
 ) -> Result<Vec<FindingEvidenceHistoryRow>, StoreError> {
-    let mut evidence = connection.prepare(
+    let source_expired = if retention::holes_schema(connection)? {
+        "report.source_expired"
+    } else {
+        "0"
+    };
+    let mut evidence = connection.prepare(&format!(
         "SELECT evidence.ordinal, evidence.report_id,
                 evidence.report_semantic_digest, evidence.observation_ordinal,
                 evidence.observed_at, evidence.received_at, report.instance_id,
@@ -12368,14 +12414,15 @@ fn finding_evidence_history(
                 (SELECT observation.observed_at
                  FROM observations AS observation
                  WHERE observation.report_id = evidence.report_id
-                   AND observation.ordinal = evidence.observation_ordinal)
+                   AND observation.ordinal = evidence.observation_ordinal),
+                {source_expired}
          FROM finding_evidence AS evidence
          JOIN admitted_reports AS report
            ON report.report_id = evidence.report_id
           AND report.semantic_digest = evidence.report_semantic_digest
          WHERE evidence.event_id = ?1
-         ORDER BY evidence.ordinal",
-    )?;
+         ORDER BY evidence.ordinal"
+    ))?;
     evidence
         .query_map([event_id], |evidence| {
             Ok(FindingEvidenceHistoryRow {
@@ -12391,6 +12438,7 @@ fn finding_evidence_history(
                 report_received_at: evidence.get(9)?,
                 observation_exists: evidence.get(10)?,
                 observation_observed_at: evidence.get(11)?,
+                report_source_expired: evidence.get(12)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()
@@ -14322,6 +14370,44 @@ fn insert_finding_event(
                 "finding evidence {} is newer than the evaluation watermark",
                 evidence.report_id
             )));
+        }
+        // A source-expired report survives only as its compact identity. It
+        // may be cited only by re-citing, unchanged, the evidence of the
+        // finding's current event (the retained decision): its observations
+        // are gone and are not re-verified.
+        let source_expired: bool = retention::holes_schema(transaction)?
+            && transaction.query_row(
+                "SELECT source_expired FROM admitted_reports WHERE report_id = ?1",
+                [&evidence.report_id],
+                |row| row.get(0),
+            )?;
+        if source_expired {
+            let recited: bool = transaction.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM finding_current AS current
+                    JOIN finding_evidence AS prior ON prior.event_id = current.latest_event_id
+                    WHERE current.finding_id = ?1 AND prior.report_id = ?2
+                      AND prior.report_semantic_digest = ?3
+                      AND prior.observation_ordinal IS ?4
+                      AND prior.observed_at = ?5 AND prior.received_at = ?6
+                 )",
+                params![
+                    finding.finding_id,
+                    evidence.report_id,
+                    evidence.report_semantic_digest,
+                    evidence.observation_ordinal,
+                    evidence.observed_at,
+                    evidence.received_at,
+                ],
+                |row| row.get(0),
+            )?;
+            if !recited {
+                return Err(StoreError::Invariant(format!(
+                    "finding evidence {} is a source-expired report that the finding's current event does not cite",
+                    evidence.report_id
+                )));
+            }
+            continue;
         }
         if let Some(observation_ordinal) = evidence.observation_ordinal {
             let exists: bool = transaction.query_row(

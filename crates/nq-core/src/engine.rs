@@ -6041,6 +6041,7 @@ fn prepare_instance_evaluations(
             evaluated_at,
             current,
             &matching_rows,
+            &snapshot.expired_citations,
         )?;
         prepared.push(PreparedEvaluation {
             envelope,
@@ -7990,6 +7991,7 @@ fn build_finding_event(
     evaluated_at: DateTime<Utc>,
     current: Option<&nq_store::FindingSnapshotRow>,
     rows: &[nq_store::AdmittedReportRow],
+    expired_citations: &[nq_store::AdmittedReportRow],
 ) -> Result<Option<FindingEventInput>, EngineError> {
     if current.is_none() && result.state != DetectorState::Present {
         return Ok(None);
@@ -8015,7 +8017,7 @@ fn build_finding_event(
     let visibility = visibility_for(result, profile, evaluated_at, rows);
     let evidence = if result.evidence.is_empty() {
         current
-            .map(|finding| retained_finding_evidence(finding, rows))
+            .map(|finding| retained_finding_evidence(finding, rows, expired_citations))
             .transpose()?
             .unwrap_or_default()
     } else {
@@ -8058,7 +8060,11 @@ fn build_finding_event(
     };
     let newest = evidence
         .iter()
-        .filter_map(|evidence| rows.iter().find(|row| row.report_id == evidence.report_id))
+        .filter_map(|evidence| {
+            rows.iter()
+                .chain(expired_citations)
+                .find(|row| row.report_id == evidence.report_id)
+        })
         .max_by_key(|row| row.report_sequence);
     Ok(Some(FindingEventInput {
         event_id: Uuid::new_v4().to_string(),
@@ -8121,9 +8127,15 @@ fn build_finding_event(
     }))
 }
 
+/// The current finding's evidence, kept unchanged by an evaluation that
+/// supplies none (a detector that cannot evaluate). A cited report may survive
+/// only as a compact source-expired record when the finding's closure was
+/// released: the citation is then the retained decision's identity, not
+/// re-verified bytes, and is accepted by identity (`expired_citations`).
 fn retained_finding_evidence(
     finding: &nq_store::FindingSnapshotRow,
     rows: &[nq_store::AdmittedReportRow],
+    expired_citations: &[nq_store::AdmittedReportRow],
 ) -> Result<Vec<FindingEvidenceInput>, EngineError> {
     let references: Vec<PublicEvidenceReference> = serde_json::from_str(&finding.evidence_json)
         .map_err(|error| {
@@ -8133,7 +8145,7 @@ fn retained_finding_evidence(
         .into_iter()
         .enumerate()
         .map(|(ordinal, reference)| {
-            if !rows.iter().any(|row| {
+            if !rows.iter().chain(expired_citations).any(|row| {
                 row.report_id == reference.report_id
                     && row.semantic_digest == reference.semantic_digest
             }) {
@@ -11386,10 +11398,22 @@ fn validate_evaluation_watermarks_and_evidence(
             .observation_observed_at
             .as_deref()
             .unwrap_or(finding.report_observed_at.as_str());
+        // A source-expired citation is admissible only as the exact retained
+        // evidence of an empty result (checked above against the prior
+        // event): its observation no longer exists to re-verify.
+        let recorded_decision = finding.report_source_expired && result.evidence.is_empty();
+        if finding.report_source_expired && !recorded_decision {
+            return Err(EngineError::Invariant(format!(
+                "evaluation {} cites source-expired report {} as fresh evidence",
+                row.evaluation_id, finding.report_id
+            )));
+        }
         if finding.ordinal != expected_ordinal
-            || parse_timestamp(&finding.observed_at).ok() != parse_timestamp(exact_observed_at).ok()
+            || (!recorded_decision
+                && parse_timestamp(&finding.observed_at).ok()
+                    != parse_timestamp(exact_observed_at).ok())
             || finding.received_at != finding.report_received_at
-            || !finding.observation_exists
+            || (!recorded_decision && !finding.observation_exists)
             || watermark
                 .is_none_or(|watermark| finding.report_sequence > watermark.max_report_sequence)
             || finding.report_instance_id != relevant_watermark.instance_id
@@ -14234,6 +14258,161 @@ sys.stdout.write("\n")
         assert_eq!(report.islands_by_root.get("released_pending"), Some(&0));
     }
 
+    /// NQ #27 Phase 8 B1 fixture: a finding opened (load 8) and resolved
+    /// (load 1), then a later absent collection whose testimony is
+    /// `newest_observed` old, all aged and expired, so the resolving event's
+    /// closure is released and compacted. Returns the store, the config and
+    /// the resolving event's cited report.
+    fn released_resolution_fixture(path: &Path, newest_observed: DateTime<Utc>) -> (Store, NqConfig, String) {
+        let config = holes_engine_config(path);
+        let mut store =
+            Store::initialize_with_capacity(path, 604_800, Some(64 * 1024 * 1024), Some(0), Some(0))
+                .expect("bounded store");
+        store
+            .append_genesis(&nq_store::GenesisInput {
+                genesis_id: "genesis-released".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: timestamp(Utc::now()),
+                detail: canonical(&json!({"source": "test"})).expect("detail"),
+            })
+            .expect("sole genesis");
+        let watcher = &config.watchers[0];
+        let base = Utc::now() - Duration::seconds(30);
+        for (index, (observed, load)) in
+            [(base, 8.0), (base + Duration::milliseconds(10), 1.0), (newest_observed, 1.0)].into_iter().enumerate()
+        {
+            commit_real_host_detector_report(
+                &mut store,
+                watcher,
+                &format!("report-released-{index}"),
+                &format!("released-{index}"),
+                observed,
+                load,
+                None,
+            );
+        }
+        assert_eq!(
+            finding_dispositions(path).iter().map(|(_, kind, _, _)| kind.as_str()).collect::<Vec<_>>(),
+            vec!["opened", "resolved"],
+            "the newest collection was current and absent when committed"
+        );
+        let expired = holes_expire(&mut store);
+        assert!(expired.boundary.generation >= 1, "{expired:?}");
+        let cited: (String, i64) = rusqlite::Connection::open(path)
+            .expect("probe")
+            .query_row(
+                "SELECT v.report_id, a.source_expired FROM finding_events f JOIN finding_evidence v ON v.event_id=f.event_id JOIN admitted_reports a ON a.report_id=v.report_id WHERE f.event_kind='resolved'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("resolved evidence");
+        assert_eq!(cited.1, 1, "the resolving event's cited report is compact");
+        (store, config, cited.0)
+    }
+
+    /// After a released resolution, the lineage's next evaluation cannot
+    /// evaluate: it records an `updated` event that keeps the resolved
+    /// condition and re-cites the compact evidence by identity. The finding
+    /// stays released (no island or pin returns) and every validation holds.
+    fn assert_released_cannot_evaluate_recorded(store: &mut Store, path: &Path, cited: &str) {
+        let events = finding_dispositions(path);
+        assert_eq!(
+            events.iter().map(|(_, kind, _, _)| kind.as_str()).collect::<Vec<_>>(),
+            vec!["opened", "resolved", "updated"],
+            "{events:?}"
+        );
+        let (condition, visibility, evidence): (String, String, String) = rusqlite::Connection::open(path)
+            .expect("probe")
+            .query_row(
+                "SELECT f.condition_state, f.visibility_state, (SELECT group_concat(v.report_id) FROM finding_evidence v WHERE v.event_id=f.event_id) FROM finding_events f WHERE f.event_kind='updated'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("updated event");
+        assert_eq!((condition.as_str(), visibility.as_str()), ("explicitly_absent", "stale"));
+        assert_eq!(evidence, cited, "the event re-cites the retained decision's evidence");
+        let findings = list_findings(store).expect("findings");
+        assert_eq!(findings.len(), 1);
+        assert!(
+            findings[0].evidence.iter().all(|evidence| evidence.source_expired),
+            "the finding read model declares the expired source"
+        );
+        store.validate().expect("store laws hold");
+        validate_semantic_history(store).expect("typed history validates the re-citation");
+        let report = store.retention_report().expect("retention report");
+        assert_eq!(report.islands_by_root.get("unresolved_finding"), Some(&0));
+        assert_eq!(report.islands_by_root.get("released_pending"), Some(&0));
+        let before = store.retention_boundary().expect("boundary");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let next = expire_ordinary_history(store, &timestamp(Utc::now())).expect("next expiry");
+        assert!(next.boundary.generation >= before.generation);
+        let compact: i64 = rusqlite::Connection::open(path)
+            .expect("probe")
+            .query_row("SELECT source_expired FROM admitted_reports WHERE report_id=?1", [cited], |r| r.get(0))
+            .expect("cited report");
+        assert_eq!(compact, 1, "the released evidence is not restored or pinned");
+        drop(Store::open_validating_fully(path).expect("full validation after the next expiry"));
+    }
+
+    /// NQ #27 Phase 8 B1, freshness-sweep path: `evaluate_instance` on a
+    /// lineage whose resolution was released and compacted, when the newest
+    /// testimony has aged past the detector's reliance.
+    #[test]
+    fn released_resolution_cannot_evaluate_on_the_sweep_path() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("released-sweep.db");
+        let reliance = i64::try_from(nq_profiles::host::MODULE.descriptor().freshness.reliance_seconds)
+            .expect("reliance");
+        // Current when committed; past its reliance a few seconds later.
+        let newest = Utc::now() - Duration::seconds(reliance - 5);
+        let (store, config, cited) = released_resolution_fixture(&path, newest);
+        drop(store);
+        let stale_at = newest + Duration::seconds(reliance + 2);
+        if let Ok(wait) = (stale_at - Utc::now()).to_std() {
+            std::thread::sleep(wait);
+        }
+        let mut engine = reopen_with_test_identity(&config).expect("engine");
+        let watcher = config.watchers[0].clone();
+        let profile = resolve(&watcher).expect("profile");
+        let evaluated = engine
+            .evaluate_instance(&watcher, profile, None)
+            .expect("a released finding's cannot-evaluate is recorded");
+        assert_eq!(evaluated.len(), 1);
+        assert_eq!(evaluated[0].result.state, DetectorState::CannotEvaluate);
+        assert_released_cannot_evaluate_recorded(engine.store_mut_for_test(), &path, &cited);
+    }
+
+    /// NQ #27 Phase 8 B1, collect path: a collection whose admitted report is
+    /// stale testimony commits (the admitted report is kept) on a lineage
+    /// whose resolution was released and compacted.
+    #[test]
+    fn released_resolution_cannot_evaluate_on_the_collect_path() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("released-collect.db");
+        let (mut store, config, cited) =
+            released_resolution_fixture(&path, Utc::now() - Duration::seconds(20));
+        let reliance = i64::try_from(nq_profiles::host::MODULE.descriptor().freshness.reliance_seconds)
+            .expect("reliance");
+        commit_real_host_detector_report_received(
+            &mut store,
+            &config.watchers[0],
+            "report-released-stale",
+            "released-stale",
+            Utc::now() - Duration::seconds(reliance + 100),
+            // Received after the expiry cutoff (an older receipt is refused
+            // as below the retired identity boundary).
+            Utc::now(),
+            1.0,
+            None,
+        );
+        let kept: bool = rusqlite::Connection::open(&path)
+            .expect("probe")
+            .query_row("SELECT EXISTS(SELECT 1 FROM admitted_reports WHERE report_id='report-released-stale')", [], |r| r.get(0))
+            .expect("admitted report");
+        assert!(kept, "the admitted report is kept");
+        assert_released_cannot_evaluate_recorded(&mut store, &path, &cited);
+    }
+
     /// One report a finding cites (for the source-expired reader check).
     fn after_events_report(path: &Path) -> String {
         rusqlite::Connection::open(path)
@@ -14521,10 +14700,34 @@ sys.stdout.write("\n")
         load_1m: f64,
         next_checkpoint: Option<Value>,
     ) -> (DetectorReport, String, CollectionInput) {
+        commit_real_host_detector_report_received(
+            store,
+            watcher,
+            report_id,
+            suffix,
+            observed_at,
+            observed_at + Duration::seconds(1),
+            load_1m,
+            next_checkpoint,
+        )
+    }
+
+    /// [`commit_real_host_detector_report`] with an explicit receipt time
+    /// (testimony observed long before it was received is stale on arrival).
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    fn commit_real_host_detector_report_received(
+        store: &mut Store,
+        watcher: &WatcherConfig,
+        report_id: &str,
+        suffix: &str,
+        observed_at: DateTime<Utc>,
+        received_at: DateTime<Utc>,
+        load_1m: f64,
+        next_checkpoint: Option<Value>,
+    ) -> (DetectorReport, String, CollectionInput) {
         let profile: &'static dyn ProfileModule = &nq_profiles::host::MODULE;
         let descriptor = profile.descriptor();
         let profile_digest = descriptor.digest().expect("compiled host digest");
-        let received_at = observed_at + Duration::seconds(1);
         let report = nq_protocol::EvidenceReport {
             schema: nq_protocol::EVIDENCE_REPORT_SCHEMA.to_owned(),
             profile: ProfileBinding {
@@ -16312,6 +16515,7 @@ sys.stdout.write("\n")
             fixture.observed_at,
             changed_current,
             std::slice::from_ref(&new_report),
+            &[],
         )
         .expect("changed lineage finding is well formed")
         .expect("present condition opens a distinct finding lineage");
@@ -16327,6 +16531,7 @@ sys.stdout.write("\n")
             None,
             fixture.observed_at,
             changed_current,
+            &[],
             &[],
         )
         .expect("changed lineage evaluation is well formed");
@@ -16472,6 +16677,7 @@ sys.stdout.write("\n")
             fixture.observed_at,
             Some(&current),
             &owned,
+            &[],
         )
         .expect("owned-boundary finding update")
         .expect("existing finding is updated");
@@ -16548,6 +16754,7 @@ sys.stdout.write("\n")
             observed_at + Duration::seconds(2),
             None,
             &rows,
+            &[],
         )
         .expect("exact evidence occurrence resolves")
         .expect("present condition opens a finding");
@@ -16566,6 +16773,7 @@ sys.stdout.write("\n")
             observed_at + Duration::seconds(2),
             None,
             &rows,
+            &[],
         )
         .expect_err("report ID, durable sequence, and semantic digest must agree");
         assert!(error.to_string().contains("unknown report occurrence"));

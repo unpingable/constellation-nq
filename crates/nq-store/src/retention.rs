@@ -379,7 +379,13 @@ fn validate_retained_below_floors_filtered(
     } else {
         "finding_events"
     };
-    if let Some(id) = first(&format!("SELECT f.event_id FROM {live_events} f WHERE {live} AND (EXISTS(SELECT 1 FROM evaluation_runs e WHERE e.evaluation_id=f.evaluation_id AND e.source_expired=1) OR EXISTS(SELECT 1 FROM finding_evidence v JOIN admitted_reports a ON a.report_id=v.report_id WHERE v.event_id=f.event_id AND a.source_expired=1)) LIMIT 1"))? {
+    // A live event may cite a compact report only as a re-citation of
+    // evidence first cited at or before the finding's latest resolution
+    // before it: that evidence was released with the resolved episode, and
+    // a later event that supplies no evidence of its own (cannot evaluate)
+    // keeps it by identity. Evidence of a continuously unresolved episode is
+    // always protected, so any other compact citation is under-retention.
+    if let Some(id) = first(&format!("SELECT f.event_id FROM {live_events} f WHERE {live} AND (EXISTS(SELECT 1 FROM evaluation_runs e WHERE e.evaluation_id=f.evaluation_id AND e.source_expired=1) OR EXISTS(SELECT 1 FROM finding_evidence v JOIN admitted_reports a ON a.report_id=v.report_id WHERE v.event_id=f.event_id AND a.source_expired=1 AND NOT {})) LIMIT 1", released_recitation_sql("f", "v")))? {
         return Err(StoreError::Integrity(format!(
             "live protected closure compacted: finding event {id}"
         )));
@@ -605,6 +611,15 @@ pub(crate) fn non_anchor_run_condition(
 /// accepted, refused or failed outcome, or a legacy outbox reached delivered,
 /// failed, or exhausted its retryable attempts. `unknown` and pending keep it.
 const CUSTODY_TERMINAL: &str = "((EXISTS(SELECT 1 FROM notification_delivery_intents i WHERE i.notification_id=o.notification_id) AND EXISTS(SELECT 1 FROM notification_delivery_events d WHERE d.notification_id=o.notification_id AND d.outcome IN ('accepted','refused','failed'))) OR (NOT EXISTS(SELECT 1 FROM notification_delivery_intents i WHERE i.notification_id=o.notification_id) AND (COALESCE((SELECT a.outcome FROM notification_attempts a WHERE a.notification_id=o.notification_id ORDER BY a.attempt_number DESC LIMIT 1),'') IN ('delivered','failed') OR (COALESCE((SELECT a.outcome FROM notification_attempts a WHERE a.notification_id=o.notification_id ORDER BY a.attempt_number DESC LIMIT 1),'')='retryable' AND (SELECT COUNT(*) FROM notification_attempts a WHERE a.notification_id=o.notification_id)>=o.max_attempts))))";
+
+/// Evidence row `v` of finding event `f` re-cites a report that an earlier
+/// event of the same finding cited at or before the finding's latest
+/// resolution preceding `f` (evidence released with a resolved episode).
+pub(crate) fn released_recitation_sql(f: &str, v: &str) -> String {
+    format!(
+        "EXISTS(SELECT 1 FROM finding_events rx JOIN finding_evidence rv ON rv.event_id=rx.event_id WHERE rx.finding_id={f}.finding_id AND rx.event_revision<{f}.event_revision AND rv.report_id={v}.report_id AND rv.report_semantic_digest={v}.report_semantic_digest AND EXISTS(SELECT 1 FROM finding_events rz WHERE rz.finding_id={f}.finding_id AND rz.event_kind='resolved' AND rz.event_revision>=rx.event_revision AND rz.event_revision<{f}.event_revision))"
+    )
+}
 
 /// Finding events `e` whose closure must stay complete: the latest event and
 /// the current episode's opening event of an unresolved finding, and any event
