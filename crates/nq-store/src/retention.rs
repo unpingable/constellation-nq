@@ -640,9 +640,12 @@ pub(crate) fn non_anchor_run_condition(
 }
 
 /// Notification custody for outbox row `o` has ended: a delivery intent has an
-/// accepted, refused or failed outcome, or a legacy outbox reached delivered,
-/// failed, or exhausted its retryable attempts. `unknown` and pending keep it.
-const CUSTODY_TERMINAL: &str = "((EXISTS(SELECT 1 FROM notification_delivery_intents i WHERE i.notification_id=o.notification_id) AND EXISTS(SELECT 1 FROM notification_delivery_events d WHERE d.notification_id=o.notification_id AND d.outcome IN ('accepted','refused','failed'))) OR (NOT EXISTS(SELECT 1 FROM notification_delivery_intents i WHERE i.notification_id=o.notification_id) AND (COALESCE((SELECT a.outcome FROM notification_attempts a WHERE a.notification_id=o.notification_id ORDER BY a.attempt_number DESC LIMIT 1),'') IN ('delivered','failed') OR (COALESCE((SELECT a.outcome FROM notification_attempts a WHERE a.notification_id=o.notification_id ORDER BY a.attempt_number DESC LIMIT 1),'')='retryable' AND (SELECT COUNT(*) FROM notification_attempts a WHERE a.notification_id=o.notification_id)>=o.max_attempts))))";
+/// accepted, refused or failed outcome, or a legacy outbox (no intent) is
+/// terminal exactly as `public_notification_status_v1` reports it: an attempt
+/// delivered, or its attempts reached `max_attempts`. A legacy `failed`
+/// attempt below `max_attempts` reads as pending there and keeps custody
+/// here. `unknown` and pending keep it.
+const CUSTODY_TERMINAL: &str = "((EXISTS(SELECT 1 FROM notification_delivery_intents i WHERE i.notification_id=o.notification_id) AND EXISTS(SELECT 1 FROM notification_delivery_events d WHERE d.notification_id=o.notification_id AND d.outcome IN ('accepted','refused','failed'))) OR (NOT EXISTS(SELECT 1 FROM notification_delivery_intents i WHERE i.notification_id=o.notification_id) AND (EXISTS(SELECT 1 FROM notification_attempts a WHERE a.notification_id=o.notification_id AND a.outcome='delivered') OR (SELECT COUNT(*) FROM notification_attempts a WHERE a.notification_id=o.notification_id)>=o.max_attempts)))";
 
 /// Evidence row `v` of finding event `f` re-cites a report that an earlier
 /// event of the same finding cited at or before the finding's latest

@@ -154,7 +154,7 @@ Roots that keep an island, and when they release it:
 | Root | Holds while | After release |
 | --- | --- | --- |
 | Unresolved finding | the finding's latest event is not `explicitly_absent`; only the current episode's opening event and its latest event keep full closures | the events stay; their evaluations and cited reports become compact |
-| Notification custody (only notifications bound to a finding event; see below) | any delivery for the finding event is pending; a delivery intent is terminal at `accepted`, `refused` or `failed`; a legacy outbox at `delivered`, `failed`, or exhausted retries | as above |
+| Notification custody (only notifications bound to a finding event; see below) | any delivery for the finding event is pending; a delivery intent is terminal at `accepted`, `refused` or `failed`; a legacy outbox (no intent) when an attempt is `delivered` or its attempts reach `max_attempts`, exactly as `public_notification_status_v1` reports it (a `failed` attempt below `max_attempts` reads `pending` there and keeps custody) | as above |
 | Notification outcome `unknown` | always: no later outcome can be recorded, so the hold is permanent for that occurrence | — |
 | Saved-check claim | a claim without a terminal outcome | compact |
 | Diagnostic origin, successor acquisition | always (consumer lifetime unknown) | — |
@@ -301,15 +301,21 @@ and logged, and the writer keeps its certification in memory. The next open
 is therefore incremental. A process that stops between the
 expiry commit and that write leaves the old watermark, which no longer
 applies: exactly one full validation follows, then opens are incremental
-again. Another long-lived handle adopts the carried watermark only after
+again. "Open" here is the library open (`Store::open` and an engine open);
+`nqd` startup is incremental under the same conditions, and
+`nq admin validate --full` is always full. Another long-lived handle adopts the carried watermark only after
 proving it (same store, rules and boundary, intact commitment, bounding rows
 present). Any inconsistency withdraws the shortcut, never trusts it: a
 watermark whose commitment does not match refuses the open, one certified
 under another boundary or inapplicable rules leads to full validation, and a
 covered row changed since certification fails `nq admin validate --full`,
-which recomputes every accumulator. The accumulator is advisory: it detects
-accidental change and substitution of covered rows against a watermark that
-was not itself rewritten, not deliberate forgery of both.
+which recomputes every accumulator. The accumulator is advisory and unkeyed:
+it detects accidental change of covered rows (a random change matches with
+probability about 2^-256) and binds each row to its table and rowid. It is an
+additive sum, so it does not resist rows chosen deliberately to collide, and
+anyone able to rewrite rows can rewrite the sidecar too; full validation
+re-checks every row by type regardless, so only the `prior_certification:
+compared` claim rests on it.
 
 `nq admin validate --full` always validates every row. It compares the
 previous certification only when it holds under the same retention boundary
