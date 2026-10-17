@@ -240,6 +240,118 @@ max_file_bytes = 67108864
     config
 }
 
+#[test]
+fn watcher_inspect_verifies_admission_without_store_or_collection() {
+    let nq = env!("CARGO_BIN_EXE_nq");
+    let directory = tempfile::tempdir().expect("temporary test directory");
+    let root = directory.path();
+    let database = root.join("live.db");
+    let mode = root.join("mode");
+    fs::write(&mode, "").unwrap();
+    let config = write_host_diagnostic_config_with_mode(root, &database, Some(&mode));
+    success(run(nq, &config, &["init"]));
+    let admitted = success(run(
+        nq,
+        &config,
+        &["watcher", "admit", "host-diagnostic.primary"],
+    ));
+    let lock = root.join("host-diagnostic-admissions/host-diagnostic.primary.json");
+    let lock_before = fs::read(&lock).unwrap();
+    let database_before = sha256_file(&database);
+    let missing_database = root.join("must-not-be-created.db");
+    let original_config = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        original_config.replace(
+            database.to_str().unwrap(),
+            missing_database.to_str().unwrap(),
+        ),
+    )
+    .unwrap();
+    // A collection would now fail in the fixture helper. A store open would
+    // fail or create the absent database. Inspection must do neither.
+    fs::remove_file(mode).unwrap();
+    let inspected = success(run(
+        nq,
+        &config,
+        &["watcher", "inspect", "host-diagnostic.primary"],
+    ));
+    assert_eq!(inspected["schema"], "nq.watcher_inspection.v1");
+    assert_eq!(inspected["binding_digest"], admitted["binding_digest"]);
+    assert_eq!(inspected["admission_id"], admitted["admission_id"]);
+    assert_eq!(inspected["instance_id"], "host-diagnostic.primary");
+    assert!(!missing_database.exists());
+    assert_eq!(sha256_file(&database), database_before);
+    assert_eq!(fs::read(lock).unwrap(), lock_before);
+    assert!(inspected.get("healthy").is_none());
+    let golden: Value =
+        serde_json::from_slice(include_bytes!("fixtures/watcher-inspection-v1.json")).unwrap();
+    let mut normalized = inspected;
+    for key in [
+        "admission_id",
+        "binding_digest",
+        "config_digest",
+        "admitted_at",
+        "observed_at",
+    ] {
+        normalized[key] = golden[key].clone();
+    }
+    normalized["profile"]["digest"] = golden["profile"]["digest"].clone();
+    assert_eq!(normalized, golden);
+}
+
+#[test]
+fn watcher_inspect_refuses_missing_malformed_and_drifted_admissions() {
+    let nq = env!("CARGO_BIN_EXE_nq");
+    let directory = tempfile::tempdir().expect("temporary test directory");
+    let root = directory.path();
+    let config = write_host_diagnostic_config(root, &root.join("live.db"));
+    assert!(
+        !run(
+            nq,
+            &config,
+            &["watcher", "inspect", "host-diagnostic.primary"]
+        )
+        .status
+        .success()
+    );
+    success(run(nq, &config, &["init"]));
+    success(run(
+        nq,
+        &config,
+        &["watcher", "admit", "host-diagnostic.primary"],
+    ));
+    let lock = root.join("host-diagnostic-admissions/host-diagnostic.primary.json");
+    let original = fs::read(&lock).unwrap();
+    fs::write(&lock, b"{}\n").unwrap();
+    assert!(
+        !run(
+            nq,
+            &config,
+            &["watcher", "inspect", "host-diagnostic.primary"]
+        )
+        .status
+        .success()
+    );
+    fs::write(&lock, original).unwrap();
+    fs::write(
+        root.join("host-diagnostic-helper.py"),
+        b"print('changed helper')\n",
+    )
+    .unwrap();
+    let error = failure(run(
+        nq,
+        &config,
+        &["watcher", "inspect", "host-diagnostic.primary"],
+    ));
+    assert!(error.contains("drift"), "{error}");
+    assert!(
+        !run(nq, &config, &["watcher", "inspect", "unknown"])
+            .status
+            .success()
+    );
+}
+
 #[allow(clippy::too_many_lines)] // Keep the hostile same-run commitment rewrite one auditable transaction.
 fn reseal_local_v2_artifact(
     database: &Path,

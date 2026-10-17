@@ -70,6 +70,24 @@ The packaged defaults are:
 | Private supervised-helper runtime directory | `/run/nq/helpers/` |
 | Loopback console (opt-in; off by default) | `http://127.0.0.1:8787/` when enabled |
 
+`nq --config FILE --json watcher inspect INSTANCE` verifies a current admission
+without opening the NQ database, running a helper, collecting evidence, changing
+the lock or creating directories. It reuses admission's config, profile,
+protocol/corpus, capability and execution-identity checks, and refuses a lock
+replacement during inspection. Success is `nq.watcher_inspection.v1`, including
+the exact admission and binding identities and observation time. Missing,
+malformed, unsupported or drifted inputs are non-successful; no current service
+health or fresh collection is inferred. The shared golden vector is
+`crates/nq-app/tests/fixtures/watcher-inspection-v1.json`.
+
+This read is a point-in-time check, not a held lease or an authorization grant.
+Formalization consideration: existing admission verification supplies the
+binding rules; CLI tests establish that the read works with an absent database,
+does not invoke the helper, preserves lock/store bytes, and refuses missing,
+malformed or drifted bindings. The producer/consumer vector fixes the new read
+shape. These bounded tests suffice for the additive command; they do not prove
+future currentness, multi-writer exclusion or service recovery.
+
 `nqd` runs as `nq:nq` and immediately execs the installed `nq daemon`, so the process that evaluates a watcher is the same `nq` executable that admitted it (admission binds the evaluator's exact bytes); packaged watchers default to the separate
 `nq-helper:nq-helper` identity. Configuration may name another local account
 or decimal UID, but it must resolve through the account database to an exact

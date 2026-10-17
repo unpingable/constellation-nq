@@ -266,6 +266,8 @@ pub enum ProtocolCommand {
 /// Watcher admission operations.
 #[derive(Debug, Subcommand)]
 pub enum WatcherCommand {
+    /// Read and verify one current admission without opening the store or collecting.
+    Inspect(InstanceArg),
     /// Execute a bounded dry request without creating admission state.
     Test(InstanceArg),
     /// Conformance-test, dry-collect, and atomically activate a new lock.
@@ -1672,6 +1674,9 @@ async fn watcher_command(
     json_output: bool,
 ) -> Result<()> {
     match command {
+        WatcherCommand::Inspect(instance) => {
+            inspect_watcher(config_path, &instance.instance_id, json_output)
+        }
         WatcherCommand::Test(instance) => {
             run_watcher_action(config_path, &instance.instance_id, "test", json_output).await
         }
@@ -1688,6 +1693,45 @@ async fn watcher_command(
             revoke(config_path, &instance.instance_id, json_output).await
         }
     }
+}
+
+fn inspect_watcher(config_path: &Path, instance_id: &str, json_output: bool) -> Result<()> {
+    let config = NqConfig::load(config_path)?;
+    validate_compiled_profiles(&config)?;
+    let watcher = config
+        .watcher(instance_id)
+        .with_context(|| format!("unknown instance {instance_id}"))?;
+    let lock_path = config.admissions_dir.join(format!("{instance_id}.json"));
+    let manager = nq_core::AdmissionManager;
+    let lock = manager.load(&lock_path)?;
+    let profile = nq_profiles::resolve_profile(&watcher.profile.id, watcher.profile.version)
+        .context("configured profile is not compiled")?;
+    let profile_digest = profile.descriptor().digest()?;
+    let verified = manager.verify(
+        watcher,
+        &lock,
+        profile_digest.as_str(),
+        nq_protocol::HELPER_PROTOCOL_VERSION,
+    )?;
+    let current = manager.load(&lock_path)?;
+    if manager.binding_digest(&current)? != verified.binding_digest {
+        bail!("admission changed during inspection");
+    }
+    print_value(
+        &json!({
+            "schema": "nq.watcher_inspection.v1",
+            "instance_id": instance_id,
+            "admission_id": lock.admission_id,
+            "binding_digest": verified.binding_digest,
+            "config_digest": lock.config_digest,
+            "profile": lock.profile,
+            "protocol_version": lock.protocol_version,
+            "admitted_at": verified.admitted_at,
+            "observed_at": chrono::Utc::now(),
+            "scope": "current admission verification only; no collection or service health claim"
+        }),
+        json_output,
+    )
 }
 
 async fn collect_command(config_path: &Path, instance_id: &str, json_output: bool) -> Result<()> {
