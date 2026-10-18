@@ -113,7 +113,20 @@ archive reads do not consult WAL or create sidecars.
 
 ## Inspect the effective bounds
 
-`nq --config /etc/nq/nq.toml --json doctor` reports the existing persisted
+`nq --config /etc/nq/nq.toml --json admin capacity` inspects schema identity,
+exact schema shape, at most 16 KiB of persisted capacity metadata and filesystem/
+process limits without scanning or certifying operational history. Its
+`nq.capacity_inspection.v1` output explicitly says
+`history_validation: "not_performed"` and
+`preflight_scope: "capacity_only_not_a_write_admission"`. It emits no healthy
+verdict and cannot create a writable Store handle. A capacity refusal produces
+the report and a nonzero exit. Unsupported schema or missing observation refuses
+inspection; it does not create or initialize a store. The SQLite read transaction
+keeps schema/envelope/page counters in one snapshot, with a five-second busy
+wait; filesystem/process observations can change afterwards. This is no write
+reservation or global liveness bound.
+
+`nq --config /etc/nq/nq.toml --json doctor` also reports the existing persisted
 `capacity` envelope: `requested_byte_ceiling`, `aggregate_bytes`, `main_bytes`,
 `wal_bytes`, `max_pages`, occupancy/reserve and the current `preflight` result.
 The aggregate allowance covers main, WAL and the documented sidecar/headroom
@@ -136,7 +149,9 @@ Formalization consideration (Codex, 2026-10-18): this is a read projection of
 existing admission and refusal semantics. A local store fixture inspects under
 a lower process limit and verifies refusal, distinct limits, separate main/WAL
 allowances and unchanged stored envelope/main bytes. Existing arithmetic and
-per-file main/WAL tests cover derivation. Practical tests and prose suffice for
+per-file main/WAL tests cover derivation. A noncanonical-history fixture proves
+capacity inspection is distinct from full history validation; a foreign
+application identity refuses inspection. Practical tests and prose suffice for
 this additive diagnostic change; no new capacity/liveness or workload-duration
 guarantee is claimed, and the inspecting process is not proof of daemon state.
 

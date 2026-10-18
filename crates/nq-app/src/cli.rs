@@ -365,6 +365,8 @@ pub struct RestoreArgs {
 /// Administrative maintenance.
 #[derive(Debug, Subcommand)]
 pub enum AdminCommand {
+    /// Read schema identity and capacity without validating operational history.
+    Capacity,
     /// Validate the store. `--full` re-validates every history row, ignoring
     /// any validation watermark, and records a new watermark on success.
     Validate {
@@ -2796,6 +2798,25 @@ fn record_full_validation(
 #[allow(clippy::too_many_lines)]
 fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -> Result<()> {
     match command {
+        AdminCommand::Capacity => {
+            let config = NqConfig::load(config_path)?;
+            let capacity = Store::inspect_capacity(&config.database_path)?;
+            let admitted_now = capacity.preflight == "admit";
+            print_value(
+                &json!({
+                    "schema": "nq.capacity_inspection.v1",
+                    "database": config.database_path,
+                    "history_validation": "not_performed",
+                    "preflight_scope": "capacity_only_not_a_write_admission",
+                    "capacity": capacity,
+                }),
+                json_output,
+            )?;
+            if !admitted_now {
+                bail!("capacity preflight refuses this inspecting process");
+            }
+            Ok(())
+        }
         AdminCommand::Validate { full } => {
             if !full {
                 bail!("only `nq admin validate --full` is supported");

@@ -1129,19 +1129,79 @@ mod tests {
     }
 
     #[test]
-    fn capacity_report_refuses_missing_admission_limit_instead_of_claiming_unlimited() {
-        let (_root, _path, store) = tiny_store();
-        let mut document: serde_json::Value = serde_json::from_slice(
-            store.retention_capacity_document().unwrap().as_bytes(),
-        ).unwrap();
-        document["observed"].as_object_mut().unwrap().remove("file_limit_bytes");
-        let incomplete = crate::CanonicalDocument::from_serializable(&document).unwrap();
+    fn capacity_inspection_is_schema_checked_without_claiming_history_integrity() {
+        let (_root, path, store) = tiny_store();
+        // Valid SQL/JSON but noncanonical history: ordinary verified open refuses.
         store.connection.execute(
-            "UPDATE retention_state SET capacity_json=?1 WHERE singleton=1",
-            [incomplete.as_bytes()],
+            "INSERT INTO status_events(status_event_id,component_kind,component_id,state,code,detail_json,observed_at) VALUES('unverified-history','daemon','fixture','unknown','fixture',?1,'2026-10-09T00:00:00Z')",
+            [b"{ \"fixture\": true }".as_slice()],
         ).unwrap();
-        let error = store.capacity_report().unwrap_err();
-        assert!(error.to_string().contains("admission file-limit observation unavailable"));
+        let before = store.retention_capacity_document().unwrap();
+        drop(store);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(crate::Store::open_read_only(&path).is_err());
+        let report = crate::Store::inspect_capacity(&path).unwrap();
+        assert_eq!(report.preflight, "admit");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let connection = Connection::open(&path).unwrap();
+        let recorded: Vec<u8> = connection
+            .query_row(
+                "SELECT capacity_json FROM retention_state WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, before.as_bytes());
+        let oversized = crate::CanonicalDocument::from_serializable(
+            &serde_json::json!({"padding": "x".repeat(16_384)}),
+        )
+        .unwrap();
+        connection
+            .execute(
+                "UPDATE retention_state SET capacity_json=?1 WHERE singleton=1",
+                [oversized.as_bytes()],
+            )
+            .unwrap();
+        assert!(
+            crate::Store::inspect_capacity(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("metadata exceeds 16 KiB")
+        );
+        connection
+            .execute_batch("PRAGMA application_id=123")
+            .unwrap();
+        assert!(matches!(
+            crate::Store::inspect_capacity(&path),
+            Err(StoreError::ApplicationIdMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn capacity_report_refuses_missing_admission_limit_instead_of_claiming_unlimited() {
+        let (_root, path, store) = tiny_store();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(store.retention_capacity_document().unwrap().as_bytes())
+                .unwrap();
+        document["observed"]
+            .as_object_mut()
+            .unwrap()
+            .remove("file_limit_bytes");
+        let incomplete = crate::CanonicalDocument::from_serializable(&document).unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE retention_state SET capacity_json=?1 WHERE singleton=1",
+                [incomplete.as_bytes()],
+            )
+            .unwrap();
+        drop(store);
+        let error = crate::Store::inspect_capacity(&path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("admission file-limit observation unavailable")
+        );
     }
 
     #[test]

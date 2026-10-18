@@ -2202,6 +2202,43 @@ impl Store {
         Ok(store)
     }
 
+    /// Inspect only schema identity/shape and capacity, without validating history.
+    /// Returns no Store handle and grants no permission to write. Read-only SQLite
+    /// access may rebuild SHM after bootstrap allocation admission.
+    pub fn inspect_capacity(path: impl AsRef<Path>) -> Result<CapacityReport, StoreError> {
+        let path = path.as_ref();
+        if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
+            return Err(StoreError::NotInitialized(path.to_path_buf()));
+        }
+        capacity::bootstrap_preflight(path)?;
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        connection.pragma_update(None, "query_only", "ON")?;
+        connection.execute_batch("BEGIN DEFERRED")?;
+        let store = Self {
+            connection,
+            path: Some(path.to_path_buf()),
+            schema_mode: StoreSchemaMode::Current,
+            validation: ValidationState::default(),
+            capacity: None,
+        };
+        store.validate_identity()?;
+        store.validate_shape()?;
+        let metadata_bytes: i64 = store.connection.query_row(
+            "SELECT length(capacity_json) FROM retention_state WHERE singleton=1",
+            [], |row| row.get(0),
+        )?;
+        if !(0..=16_384).contains(&metadata_bytes) {
+            return Err(StoreError::Invariant(
+                "capacity inspection metadata exceeds 16 KiB".into(),
+            ));
+        }
+        store.capacity_report()
+    }
+
     /// Open a sealed archive database through SQLite's immutable URI mode.
     /// SQLite neither consults nor creates journal/WAL sidecars for this handle.
     pub fn open_immutable(path: impl AsRef<Path>) -> Result<Self, StoreError> {
