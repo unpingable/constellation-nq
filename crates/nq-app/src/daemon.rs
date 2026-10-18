@@ -1,12 +1,13 @@
 //! Resident scheduler, local API, and helper supervisor entry point.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use nq_core::config::{NqConfig, WatcherConfig};
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -143,15 +144,21 @@ pub async fn run(options: Nqd) -> Result<()> {
     }
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // SQLite's operation guard is still authoritative across processes. Queue
+    // this daemon's own full operations fairly instead of making its workers
+    // repeatedly consume that guard's bounded contention wait against peers.
+    let writer = Arc::new(Mutex::new(()));
     for watcher in config.watchers.clone() {
         let config = config.clone();
         let shutdown = shutdown_rx.clone();
-        services.spawn(async move { schedule_instance(config, watcher, shutdown).await });
+        let writer = writer.clone();
+        services.spawn(async move { schedule_instance(config, watcher, shutdown, writer).await });
     }
     for watcher in config.watchers.clone() {
         let config = config.clone();
         let shutdown = shutdown_rx.clone();
-        services.spawn(async move { sweep_freshness(config, watcher, shutdown).await });
+        let writer = writer.clone();
+        services.spawn(async move { sweep_freshness(config, watcher, shutdown, writer).await });
     }
 
     info!(instances = config.watchers.len(), "nqd started");
@@ -215,9 +222,11 @@ fn open_configured_store(config: &NqConfig) -> Result<nq_store::Store> {
 
 async fn collect_once(config: NqConfig) -> Result<()> {
     let mut tasks = JoinSet::new();
+    let writer = Arc::new(Mutex::new(()));
     for watcher in config.watchers.clone() {
         let config = config.clone();
-        tasks.spawn(async move { collect_one(config, watcher).await });
+        let writer = writer.clone();
+        tasks.spawn(async move { collect_one(config, watcher, writer).await });
     }
     let mut failures = 0;
     while let Some(result) = tasks.join_next().await {
@@ -257,6 +266,7 @@ async fn schedule_instance(
     config: NqConfig,
     watcher: WatcherConfig,
     mut shutdown: watch::Receiver<bool>,
+    writer: Arc<Mutex<()>>,
 ) -> Result<()> {
     let jitter_cap = watcher.schedule.jitter_seconds;
     let jitter = if jitter_cap == 0 {
@@ -274,15 +284,17 @@ async fn schedule_instance(
         }
     }
 
-    let mut engine =
-        tokio::task::spawn_blocking(move || nq_core::CollectionEngine::open(&config)).await??;
+    let mut engine = store_operation(writer.clone(), move || {
+        nq_core::CollectionEngine::open(&config)
+    })
+    .await??;
     let mut backoff = watcher.schedule.retry_backoff_seconds;
     loop {
         if *shutdown.borrow() {
             return Ok(());
         }
         let collection_watcher = watcher.clone();
-        let (returned_engine, outcome) = tokio::task::spawn_blocking(move || {
+        let (returned_engine, outcome) = store_operation(writer.clone(), move || {
             let outcome = engine.collect(&collection_watcher);
             (engine, outcome)
         })
@@ -404,8 +416,9 @@ async fn wait_with_binding_watch(
 async fn collect_one(
     config: NqConfig,
     watcher: WatcherConfig,
+    writer: Arc<Mutex<()>>,
 ) -> Result<nq_core::CollectionOutcome> {
-    Ok(tokio::task::spawn_blocking(move || {
+    Ok(store_operation(writer, move || {
         let mut engine = nq_core::CollectionEngine::open(&config)?;
         engine.collect(&watcher)
     })
@@ -416,6 +429,7 @@ async fn sweep_freshness(
     config: NqConfig,
     watcher: WatcherConfig,
     mut shutdown: watch::Receiver<bool>,
+    writer: Arc<Mutex<()>>,
 ) -> Result<()> {
     let profile = nq_profiles::resolve_profile(&watcher.profile.id, watcher.profile.version)
         .context("freshness sweep profile is not compiled")?;
@@ -431,7 +445,7 @@ async fn sweep_freshness(
         }
         let sweep_config = config.clone();
         let sweep_watcher = watcher.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let result = store_operation(writer.clone(), move || {
             let mut engine = nq_core::CollectionEngine::open(&sweep_config)?;
             engine.freshness_sweep(&sweep_watcher)
         })
@@ -445,6 +459,20 @@ async fn sweep_freshness(
             Err(error) => warn!(instance = %watcher.instance_id, %error, "freshness sweep failed"),
         }
     }
+}
+
+/// Keep the permit inside the blocking operation: cancelling its async waiter
+/// must not admit a second writer while the first operation is still running.
+async fn store_operation<T: Send + 'static>(
+    writer: Arc<Mutex<()>>,
+    operation: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    let permit = writer.lock_owned().await;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        operation()
+    })
+    .await
 }
 
 fn validate_catalog(config: &NqConfig) -> Result<()> {
@@ -467,6 +495,66 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_waiter_keeps_running_store_operation_serialized() {
+        let writer = Arc::new(Mutex::new(()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_writer = writer.clone();
+        let first = tokio::spawn(async move {
+            store_operation(first_writer, move || {
+                started_tx.send(()).expect("announce first operation");
+                release_rx.recv().expect("release first operation");
+            })
+            .await
+        });
+        started_rx.await.expect("first operation started");
+        first.abort();
+        let _ = first.await;
+
+        let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
+        let (second_tx, mut second_rx) = tokio::sync::oneshot::channel();
+        let second = tokio::spawn(async move {
+            queued_tx.send(()).expect("announce queued operation");
+            store_operation(writer, move || {
+                second_tx.send(()).expect("announce second operation");
+                42
+            })
+            .await
+        });
+        queued_rx.await.expect("second operation queued");
+        let still_waiting = tokio::time::timeout(Duration::from_millis(50), &mut second_rx)
+            .await
+            .is_err();
+        // Release before asserting, including when the negative control fails.
+        release_tx
+            .send(())
+            .expect("release original blocking operation");
+        assert!(
+            still_waiting,
+            "cancelling a waiter released a running writer"
+        );
+        assert_eq!(
+            second
+                .await
+                .expect("second task")
+                .expect("second operation"),
+            42
+        );
+    }
+
+    #[tokio::test]
+    async fn refused_operation_releases_queue_for_the_next_operation() {
+        let writer = Arc::new(Mutex::new(()));
+        assert_eq!(
+            store_operation(writer.clone(), || Err::<(), _>("refused"))
+                .await
+                .unwrap(),
+            Err("refused")
+        );
+        assert_eq!(store_operation(writer, || 7).await.unwrap(), 7);
+    }
 
     #[test]
     fn daemon_cli_is_well_formed() {
@@ -547,7 +635,11 @@ mod tests {
             .split("[Service]")
             .next()
             .expect("unit section precedes service section");
-        assert!(unit_section.lines().any(|line| line == "StartLimitIntervalSec=300"));
+        assert!(
+            unit_section
+                .lines()
+                .any(|line| line == "StartLimitIntervalSec=300")
+        );
         assert!(unit_section.lines().any(|line| line == "StartLimitBurst=5"));
         assert!(UNIT.lines().any(|line| line == "Restart=on-failure"));
     }

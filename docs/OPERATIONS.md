@@ -1300,3 +1300,32 @@ certification and SQLite transaction protocols are unchanged. No general
 concurrent-writer liveness, lossless storage, alternate-backend guarantee or
 new incident Store semantics is claimed. Source/report context: cartography
 #90 and NQ #27. Operational observation and qualification remain separate.
+
+### Resident store-writer queue
+
+The resident daemon and its `--once` mode queue engine opening, complete
+collection operations and freshness sweeps through one fair in-process writer
+permit. Watcher schedules and configured helper deadlines remain separate;
+slow helpers can delay another queued operation. The store's existing
+cross-process operation guard, capacity checks and checkpoint refusals remain
+authoritative. External CLI writers are not covered by the daemon queue.
+
+This closes a second concrete source of ops contention: seven collection
+workers and seven freshness workers were competing with one another for a
+five-second store guard and backing off after refusal, allowing previously
+collected evidence to expire. The metadata-only watermark correction above
+remains independently necessary. Queueing does not manufacture observations,
+extend reliance windows or turn an unknown evaluation into healthy state.
+
+Formalization consideration (decision owner: unpingable; implementation: Codex;
+source context: parent `12e039fc44ff07fb4cdd79d351d5d3d8c6ce7b7f`, NQ #27 and
+cartography #90): the bounded proposition is mutual exclusion of the daemon's
+own queued blocking operations, including when their async waiter is cancelled.
+The owned permit lives inside the blocking closure until it ends. A deterministic
+cancellation test holds one operation across waiter cancellation and checks that
+the successor stays queued; a refused operation also releases the queue. Existing
+process, evaluator-identity and cross-process serialization tests remain the
+contract checks. These practical tests and the mutex's ownership structure are
+sufficient for this local scheduling correction. This is not a proof that every
+configured schedule meets freshness deadlines, that external readers cannot
+refuse checkpoints, or that an arbitrary Store implementation supports recovery.
