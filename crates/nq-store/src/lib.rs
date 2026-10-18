@@ -2594,7 +2594,16 @@ impl Store {
         ) else {
             return Ok(None);
         };
-        let _guard = self.write_guard()?;
+        // This publishes a separately budgeted sidecar, not a SQLite
+        // transaction. Keep writer serialization and the admitted policy,
+        // but do not require readers to release the database's WAL.
+        // persist_watermark performs the existing sidecar capacity preflight.
+        let _guard = self.serialization_guard().map_err(|error| match error {
+            error @ StoreError::Refused(Refusal::Contention(_)) => {
+                StoreError::WatermarkWrite(error.to_string())
+            }
+            other => other,
+        })?;
         let Some(identity) = self.store_identity()? else {
             return Ok(None);
         };
@@ -4863,7 +4872,7 @@ impl Store {
         Ok(())
     }
 
-    fn write_guard(&self) -> Result<Option<capacity::OperationGuard>, StoreError> {
+    fn serialization_guard(&self) -> Result<Option<capacity::OperationGuard>, StoreError> {
         let Some(path) = &self.path else {
             return Ok(None);
         };
@@ -4881,8 +4890,18 @@ impl Store {
                 "persisted capacity policy changed since handle admission".into(),
             ));
         }
-        capacity::checkpoint_before_write(&self.connection, path, envelope)?;
         Ok(Some(guard))
+    }
+
+    fn write_guard(&self) -> Result<Option<capacity::OperationGuard>, StoreError> {
+        let guard = self.serialization_guard()?;
+        if let Some(path) = &self.path {
+            let envelope = self.capacity.as_ref().ok_or_else(|| {
+                StoreError::Invariant("writable operation requires persisted capacity envelope".into())
+            })?;
+            capacity::checkpoint_before_write(&self.connection, path, envelope)?;
+        }
+        Ok(guard)
     }
 
     fn immediate_transaction(&mut self) -> Result<capacity::GuardedTransaction<'_>, StoreError> {
@@ -15288,6 +15307,59 @@ mod tests {
 
     fn sidecar(path: &Path) -> ValidationWatermark {
         serde_json::from_slice(&std::fs::read(history_scope::watermark_path(path)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn watermark_publication_with_a_reader_preserves_database_and_writer_refusal() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("metadata-publication.db");
+        certified_crash_fixture(&path);
+        let mut writer = Store::open(&path).unwrap();
+        let status = StatusEventInput {
+            status_event_id: "metadata-publication".into(),
+            component_kind: "daemon".into(),
+            component_id: "fixture".into(),
+            state: "healthy".into(),
+            code: "observed".into(),
+            detail: document(json!({})),
+            observed_at: TIME.into(),
+        };
+        writer.record_status(&status).unwrap();
+        drop(writer);
+        let store = Store::open(&path).unwrap();
+        store
+            .connection
+            .busy_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+        let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM status_events", [], |row| row.get(0))
+            .unwrap();
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let before_main = std::fs::read(&path).unwrap();
+        let before_wal = std::fs::read(&wal).unwrap();
+        assert!(!before_wal.is_empty());
+        let recorded = store
+            .record_validation_watermark(
+                SemanticCertification::NotEstablished,
+                "fixture-engine-rules",
+            )
+            .expect("publishing a sidecar must not require a SQLite write checkpoint")
+            .expect("a validated writable handle records its frontier");
+        assert_eq!(std::fs::read(&path).unwrap(), before_main);
+        assert_eq!(std::fs::read(&wal).unwrap(), before_wal);
+        assert_eq!(sidecar(&path).commitment_digest, recorded.commitment_digest);
+        let error = store
+            .checkpoint_wal()
+            .expect_err("actual SQLite write admission still refuses a held reader");
+        assert!(
+            matches!(error, StoreError::Refused(Refusal::Contention(_))),
+            "{error}"
+        );
+        reader.execute_batch("ROLLBACK").unwrap();
+        drop(reader);
+        store.checkpoint_wal().unwrap();
     }
 
     /// NQ #27 Phase 8 B2 (reviewer probe A): a long-lived handle (the

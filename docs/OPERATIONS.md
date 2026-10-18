@@ -1269,3 +1269,34 @@ scripts/test_release_reproducibility.sh \
 scripts/test_release_failure_atomicity.sh \
   0.2.4 amd64 target/release profiles
 ```
+
+### Validation watermark publication during concurrent reads
+
+A validation watermark is a separate, bounded metadata file. Publishing it
+uses the common cooperating-writer lock and checks the persisted operating
+policy, retention identity, certified frontier and non-regression rules. Its
+existing sidecar capacity preflight remains mandatory. Publication does not
+write SQLite and therefore does not require a WAL truncation. Normal SQLite
+transactions and explicit checkpoints retain their existing mandatory bounded
+checkpoint, including refusal while a reader prevents truncation.
+
+The earlier implementation used the full SQLite write guard for this metadata
+operation. An unrelated held reader could prevent a validated engine open from
+recording its watermark and consequently prevent freshness work. Writer-lock
+contention during optional metadata publication is now reported as a watermark
+write failure; engine opening already reports that case without pretending the
+new watermark was persisted. Identity, validation and operating-policy errors
+still refuse. This does not bypass validation or certify unknown history.
+
+Formalization consideration (decision owner: unpingable; implementation: Codex):
+the bounded proposition is that serialized metadata publication preserves
+SQLite main/WAL bytes and leaves database-write admission unchanged. The new
+held-reader regression fails on source `05dacf2`, then passes with the fix,
+including byte equality and the still-refused explicit checkpoint. Existing
+store and core tests cover retention boundaries, concurrent writers, foreign
+watermarks, changed covered history and capacity failures. Tests and prose
+suffice for this guard separation because the underlying serialization,
+certification and SQLite transaction protocols are unchanged. No general
+concurrent-writer liveness, lossless storage, alternate-backend guarantee or
+new incident Store semantics is claimed. Source/report context: cartography
+#90 and NQ #27. Operational observation and qualification remain separate.
