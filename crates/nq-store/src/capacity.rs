@@ -1129,6 +1129,65 @@ mod tests {
     }
 
     #[test]
+    fn capacity_report_distinguishes_admission_from_lower_inspection_limit() {
+        let (_root, path, store) = tiny_store();
+        let before = store.retention_capacity_document().unwrap();
+        let envelope: OperatingEnvelope = serde_json::from_slice(before.as_bytes()).unwrap();
+        assert!(envelope.main_bytes > 1024 * 1024);
+        drop(store);
+        let bytes = std::fs::read(&path).unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "capacity::tests::lower_limit_capacity_report_helper",
+                "--ignored",
+            ])
+            .env("NQ_CAPACITY_REPORT_FIXTURE", &path)
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let reopened = crate::Store::open_read_only(&path).unwrap();
+        assert_eq!(reopened.retention_capacity_document().unwrap(), before);
+    }
+
+    #[test]
+    #[ignore = "isolated process file-limit fixture"]
+    fn lower_limit_capacity_report_helper() {
+        let Ok(path) = std::env::var("NQ_CAPACITY_REPORT_FIXTURE") else {
+            return;
+        };
+        nix::sys::resource::setrlimit(Resource::RLIMIT_FSIZE, 1024 * 1024, 1024 * 1024).unwrap();
+        let store = crate::Store::open_read_only(Path::new(&path)).unwrap();
+        let envelope: OperatingEnvelope =
+            serde_json::from_slice(store.retention_capacity_document().unwrap().as_bytes())
+                .unwrap();
+        let report = store.capacity_report().unwrap();
+        assert_eq!(report.requested_byte_ceiling, Some(8 * 1024 * 1024));
+        assert_eq!(
+            report.admission_file_limit_bytes,
+            envelope.observed.file_limit_bytes
+        );
+        assert_ne!(report.admission_file_limit_bytes, Some(1024 * 1024));
+        assert_eq!(report.inspection_file_limit_bytes, Some(1024 * 1024));
+        assert_eq!(report.wal_bytes, envelope.wal_bytes);
+        assert!(report.wal_bytes > report.main_bytes);
+        assert!(report.aggregate_bytes > report.main_bytes + report.wal_bytes);
+        assert!(
+            report
+                .preflight
+                .contains("current per-file limit is below persisted envelope")
+        );
+        let value = serde_json::to_value(report).unwrap();
+        assert_eq!(value["inspection_file_limit_bytes"], 1024 * 1024);
+        assert!(value.get("admission_file_limit_bytes").is_some());
+    }
+
+    #[test]
     fn arithmetic_overflow_refuses() {
         let mut observed = observation(u64::MAX);
         observed.occupied_bytes = 1;

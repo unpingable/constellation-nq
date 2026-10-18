@@ -840,9 +840,17 @@ pub struct ResidueCounts {
 /// occupancy, and whether an ordinary write would be admitted now.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct CapacityReport {
+    /// Configured aggregate request; None means automatic admission.
+    pub requested_byte_ceiling: Option<u64>,
+    /// Per-file limit observed at admission; None means unlimited.
+    pub admission_file_limit_bytes: Option<u64>,
+    /// Limit of this inspecting process, not necessarily the running daemon.
+    /// None means unlimited, not an unavailable observation.
+    pub inspection_file_limit_bytes: Option<u64>,
     pub aggregate_bytes: u64,
     pub occupied_bytes: u64,
     pub main_bytes: u64,
+    pub wal_bytes: u64,
     pub max_pages: u64,
     pub page_count: i64,
     pub freelist_pages: i64,
@@ -958,9 +966,13 @@ impl Store {
         let freelist_pages: i64 =
             self.connection.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
         Ok(CapacityReport {
+            requested_byte_ceiling: envelope.policy.byte_ceiling,
+            admission_file_limit_bytes: envelope.observed.file_limit_bytes,
+            inspection_file_limit_bytes: observed.file_limit_bytes,
             aggregate_bytes: envelope.aggregate_bytes,
             occupied_bytes: observed.occupied_bytes,
             main_bytes: envelope.main_bytes,
+            wal_bytes: envelope.wal_bytes,
             max_pages: envelope.max_pages,
             page_count,
             freelist_pages,

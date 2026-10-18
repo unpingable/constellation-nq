@@ -111,6 +111,33 @@ Rollback recovery is admitted against the journal's original main extent and
 rewrite headroom before SQLite performs its own replay. Immutable sealed
 archive reads do not consult WAL or create sidecars.
 
+## Inspect the effective bounds
+
+`nq --config /etc/nq/nq.toml --json doctor` reports the existing persisted
+`capacity` envelope: `requested_byte_ceiling`, `aggregate_bytes`, `main_bytes`,
+`wal_bytes`, `max_pages`, occupancy/reserve and the current `preflight` result.
+The aggregate allowance covers main, WAL and the documented sidecar/headroom
+allowances. It is not one file's size limit; taking the smaller of aggregate
+and `LimitFSIZE` would misstate the admitted footprint.
+
+`admission_file_limit_bytes` is the original initializing process observation.
+`inspection_file_limit_bytes` is the current doctor process limit. JSON null
+means a measured unlimited limit in these two fields, not missing evidence.
+An ordinary login's limit does not establish a daemon's limit: inspect the
+effective unit/drop-ins and `/proc/<MainPID>/limits` as well, or use the existing
+helper sandbox with the same admitted limits. A lower caller limit yields an
+explicit `preflight` refusal, not a resized envelope or a healthy database.
+Inspection does not change capacity policy, schema or retention state; ordinary
+read-only SQLite access can still rebuild SHM as described above.
+
+Formalization consideration (Codex, 2026-10-18): this is a read projection of
+existing admission and refusal semantics. A local store fixture inspects under
+a lower process limit and verifies refusal, distinct limits, separate main/WAL
+allowances and unchanged stored envelope/main bytes. Existing arithmetic and
+per-file main/WAL tests cover derivation. Practical tests and prose suffice for
+this additive diagnostic change; no new capacity/liveness or workload-duration
+guarantee is claimed, and the inspecting process is not proof of daemon state.
+
 ## Expiry, declared protected holes, and refusal
 
 Ordinary collection performs dependency-aware expiry before collecting, at
