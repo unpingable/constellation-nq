@@ -955,9 +955,16 @@ impl Store {
     /// Persisted envelope against current occupancy, and whether an ordinary
     /// write would be admitted now. Read-only.
     pub fn capacity_report(&self) -> Result<CapacityReport, StoreError> {
-        let envelope: crate::capacity::OperatingEnvelope =
-            serde_json::from_slice(self.retention_capacity_document()?.as_bytes())
-                .map_err(|error| StoreError::Invariant(format!("persisted capacity envelope invalid: {error}")))?;
+        let recorded = self.retention_capacity_document()?;
+        let value: serde_json::Value = serde_json::from_slice(recorded.as_bytes())
+            .map_err(|error| StoreError::Invariant(format!("persisted capacity envelope invalid: {error}")))?;
+        if value.pointer("/observed/file_limit_bytes").is_none() {
+            return Err(StoreError::Invariant(
+                "persisted admission file-limit observation unavailable".into(),
+            ));
+        }
+        let envelope: crate::capacity::OperatingEnvelope = serde_json::from_value(value)
+            .map_err(|error| StoreError::Invariant(format!("persisted capacity envelope invalid: {error}")))?;
         let path = self
             .path()
             .ok_or_else(|| StoreError::Invariant("capacity report requires a file-backed store".into()))?;

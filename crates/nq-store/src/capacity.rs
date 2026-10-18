@@ -1129,6 +1129,22 @@ mod tests {
     }
 
     #[test]
+    fn capacity_report_refuses_missing_admission_limit_instead_of_claiming_unlimited() {
+        let (_root, _path, store) = tiny_store();
+        let mut document: serde_json::Value = serde_json::from_slice(
+            store.retention_capacity_document().unwrap().as_bytes(),
+        ).unwrap();
+        document["observed"].as_object_mut().unwrap().remove("file_limit_bytes");
+        let incomplete = crate::CanonicalDocument::from_serializable(&document).unwrap();
+        store.connection.execute(
+            "UPDATE retention_state SET capacity_json=?1 WHERE singleton=1",
+            [incomplete.as_bytes()],
+        ).unwrap();
+        let error = store.capacity_report().unwrap_err();
+        assert!(error.to_string().contains("admission file-limit observation unavailable"));
+    }
+
+    #[test]
     fn capacity_report_distinguishes_admission_from_lower_inspection_limit() {
         let (_root, path, store) = tiny_store();
         let before = store.retention_capacity_document().unwrap();

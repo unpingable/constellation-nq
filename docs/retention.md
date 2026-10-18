@@ -123,6 +123,8 @@ and `LimitFSIZE` would misstate the admitted footprint.
 `admission_file_limit_bytes` is the original initializing process observation.
 `inspection_file_limit_bytes` is the current doctor process limit. JSON null
 means a measured unlimited limit in these two fields, not missing evidence.
+An absent admission-limit observation refuses the report as unavailable; it is
+never filled in as unlimited.
 An ordinary login's limit does not establish a daemon's limit: inspect the
 effective unit/drop-ins and `/proc/<MainPID>/limits` as well, or use the existing
 helper sandbox with the same admitted limits. A lower caller limit yields an
