@@ -98,8 +98,12 @@ logical size and allocated blocks.
 
 Cooperating store operations serialize through the database operation lock.
 Before an ordinary write NQ checks the current envelope and attempts a
-TRUNCATE checkpoint. A held reader can prevent it; the write is refused rather
-than allowing another transaction to accumulate an unbounded WAL. Lock wait
+TRUNCATE checkpoint. A held reader can prevent it; the write then proceeds
+only under a page ceiling lowered by the frames the WAL file already holds, so
+the WAL cannot pass its envelope allowance, and is refused when even that
+ceiling is below the current database size (see
+[Writes while a reader holds the WAL](OPERATIONS.md#writes-while-a-reader-holds-the-wal)).
+Lock wait
 and SQLite busy handling are bounded. SQLite page limits, disabled cache spill,
 and explicit checkpoints provide the implemented bound under the supported
 SQLite/filesystem assumptions. They do not impose a filesystem quota on

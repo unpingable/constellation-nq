@@ -2302,7 +2302,7 @@ impl Store {
     /// before archive inventory and sealing.
     pub fn prepare_archive_copy(&self) -> Result<(), StoreError> {
         self.require_current_schema()?;
-        let _guard = self.write_guard()?;
+        let _guard = self.truncating_guard()?;
         let checkpoint: (i64, i64, i64) =
             self.connection
                 .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
@@ -4868,7 +4868,7 @@ impl Store {
     /// Returns the capacity or contention refusal of the bounded checkpoint.
     pub fn checkpoint_wal(&self) -> Result<(), StoreError> {
         self.require_current_schema()?;
-        drop(self.write_guard()?);
+        drop(self.truncating_guard()?);
         Ok(())
     }
 
@@ -4893,13 +4893,29 @@ impl Store {
         Ok(Some(guard))
     }
 
-    fn write_guard(&self) -> Result<Option<capacity::OperationGuard>, StoreError> {
+    /// Serialization plus the strict TRUNCATE checkpoint, for operations
+    /// whose purpose is a truncated WAL.
+    fn truncating_guard(&self) -> Result<Option<capacity::OperationGuard>, StoreError> {
         let guard = self.serialization_guard()?;
         if let Some(path) = &self.path {
             let envelope = self.capacity.as_ref().ok_or_else(|| {
                 StoreError::Invariant("writable operation requires persisted capacity envelope".into())
             })?;
             capacity::checkpoint_before_write(&self.connection, path, envelope)?;
+        }
+        Ok(guard)
+    }
+
+    /// Serialization plus admission of one ordinary write transaction, which
+    /// a concurrent reader refuses only when the write could exceed the
+    /// envelope's WAL bound (see `capacity::checkpoint_or_bound_before_write`).
+    fn write_guard(&self) -> Result<Option<capacity::OperationGuard>, StoreError> {
+        let guard = self.serialization_guard()?;
+        if let Some(path) = &self.path {
+            let envelope = self.capacity.as_ref().ok_or_else(|| {
+                StoreError::Invariant("writable operation requires persisted capacity envelope".into())
+            })?;
+            capacity::checkpoint_or_bound_before_write(&self.connection, path, envelope)?;
         }
         Ok(guard)
     }

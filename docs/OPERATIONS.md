@@ -1276,9 +1276,10 @@ A validation watermark is a separate, bounded metadata file. Publishing it
 uses the common cooperating-writer lock and checks the persisted operating
 policy, retention identity, certified frontier and non-regression rules. Its
 existing sidecar capacity preflight remains mandatory. Publication does not
-write SQLite and therefore does not require a WAL truncation. Normal SQLite
-transactions and explicit checkpoints retain their existing mandatory bounded
-checkpoint, including refusal while a reader prevents truncation.
+write SQLite and therefore does not require a WAL truncation. Explicit
+checkpoints retain their mandatory bounded checkpoint, including refusal while
+a reader prevents truncation; ordinary SQLite transactions follow the WAL-bound
+rule below.
 
 The earlier implementation used the full SQLite write guard for this metadata
 operation. An unrelated held reader could prevent a validated engine open from
@@ -1300,6 +1301,31 @@ certification and SQLite transaction protocols are unchanged. No general
 concurrent-writer liveness, lossless storage, alternate-backend guarantee or
 new incident Store semantics is claimed. Source/report context: cartography
 #90 and NQ #27. Operational observation and qualification remain separate.
+
+### Writes while a reader holds the WAL
+
+Every write transaction first attempts a `TRUNCATE` checkpoint. When a
+concurrent reader (status export, saved checks, the telemetry exporter,
+Nightshift) keeps the checkpoint from resetting the WAL, the write is no
+longer refused outright. It is admitted when it provably cannot take the WAL
+file past the envelope's `wal_bytes` allowance: the writer lowers its SQLite
+page ceiling (`max_page_count`) for that transaction to the envelope's
+`max_pages` minus the frames the current WAL file can hold (its whole length
+past the header, valid or not). With `cache_spill` off one transaction appends
+at most one frame per database page plus the sector padding the envelope
+already reserves, so the file stays inside `wal_bytes`, and the main file and
+shared-memory index stay inside the aggregate bound derived for a full WAL.
+The write is refused with the unchanged contention refusal ("reader or writer
+prevents bounded WAL checkpoint") only when the database already has more
+pages than that lowered ceiling; a transaction that would grow the database
+beyond it fails with SQLite's disk-full error, a capacity refusal that commits
+nothing. The capacity preflight still runs before and after, so the per-file
+limit and aggregate ceiling refuse exactly as before. The next write whose
+checkpoint succeeds truncates the WAL and restores the full ceiling.
+`checkpoint_wal` (the daemon's stop checkpoint), initialization, restore,
+archive preparation, and upgrades still require the truncation. A WAL kept
+from resetting by continuously overlapping readers grows until this bound and
+is then refused, as before.
 
 ### Resident store-writer queue
 

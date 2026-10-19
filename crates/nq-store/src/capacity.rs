@@ -398,20 +398,102 @@ pub fn configure(connection: &Connection, envelope: &OperatingEnvelope) -> Resul
 
 /// Require successful WAL truncation before reserving one full-database write.
 /// Caller holds common operation serialization through the following commit.
+///
+/// This is the strict form for explicit checkpoints, initialization,
+/// restore and upgrades, whose purpose is a truncated WAL. Ordinary write
+/// transactions use [`checkpoint_or_bound_before_write`].
 pub fn checkpoint_before_write(
     connection: &Connection,
     path: &Path,
     envelope: &OperatingEnvelope,
 ) -> Result<(), StoreError> {
     envelope.preflight(path)?;
+    if truncate_checkpoint_busy(connection)? {
+        return Err(contention(CHECKPOINT_CONTENTION));
+    }
+    apply_page_ceiling(connection, envelope.max_pages)?;
+    envelope.preflight(path)
+}
+
+/// Admit one ordinary write transaction. A successful TRUNCATE checkpoint
+/// admits it exactly as [`checkpoint_before_write`] does. When a reader (or
+/// writer) keeps the checkpoint from resetting the WAL, the write is still
+/// admitted if it provably cannot take the WAL past the envelope's
+/// `wal_bytes`: this connection's page ceiling is lowered by the frames the
+/// WAL file may already hold, and the write is refused with the same
+/// contention refusal only when the database already exceeds that lowered
+/// ceiling. The next admitted write restores the envelope's ceiling.
+///
+/// With `cache_spill` off, one transaction appends at most one frame per page
+/// of the database it commits plus the sector padding, which is exactly the
+/// envelope's full-database WAL allowance with `max_pages` replaced by the
+/// lowered ceiling; the frames already in the file use up the difference.
+/// Caller holds common operation serialization through the following commit.
+pub fn checkpoint_or_bound_before_write(
+    connection: &Connection,
+    path: &Path,
+    envelope: &OperatingEnvelope,
+) -> Result<(), StoreError> {
+    envelope.preflight(path)?;
+    let ceiling = if truncate_checkpoint_busy(connection)? {
+        contended_page_ceiling(connection, path, envelope)?
+            .ok_or_else(|| contention(CHECKPOINT_CONTENTION))?
+    } else {
+        envelope.max_pages
+    };
+    apply_page_ceiling(connection, ceiling)?;
+    envelope.preflight(path)
+}
+
+const CHECKPOINT_CONTENTION: &str = "reader or writer prevents bounded WAL checkpoint";
+
+fn truncate_checkpoint_busy(connection: &Connection) -> Result<bool, StoreError> {
     let (busy, _, _): (i64, i64, i64) =
         connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?;
-    if busy != 0 {
-        return Err(contention("reader or writer prevents bounded WAL checkpoint"));
+    Ok(busy != 0)
+}
+
+/// The page ceiling under which one more transaction keeps the WAL file
+/// inside `wal_bytes`, or `None` when the current database already exceeds
+/// it. Every byte of the WAL file past its header counts as resident frames,
+/// whether or not SQLite still considers them valid, so the measurement is
+/// conservative. The caller's serialization guard keeps cooperating writers
+/// from appending between this measurement and its commit.
+fn contended_page_ceiling(
+    connection: &Connection,
+    path: &Path,
+    envelope: &OperatingEnvelope,
+) -> Result<Option<u64>, StoreError> {
+    let wal_len = match std::fs::metadata(&store_files(path)[1]) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.into()),
+    };
+    let resident_frames = wal_len
+        .saturating_sub(32)
+        .div_ceil(add(envelope.page_size, 24)?);
+    let pages: u64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+    Ok(envelope
+        .max_pages
+        .checked_sub(resident_frames)
+        .filter(|ceiling| pages <= *ceiling))
+}
+
+fn apply_page_ceiling(connection: &Connection, pages: u64) -> Result<(), StoreError> {
+    let current: u64 = connection.query_row("PRAGMA max_page_count", [], |row| row.get(0))?;
+    if current == pages {
+        return Ok(());
     }
-    envelope.preflight(path)
+    let actual: u64 =
+        connection.query_row(&format!("PRAGMA max_page_count={pages}"), [], |row| {
+            row.get(0)
+        })?;
+    if actual != pages {
+        return Err(envelope_fault("SQLite could not apply page ceiling"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -707,34 +789,187 @@ mod tests {
         restored.validate().unwrap();
     }
 
+    fn hold_reader(path: &Path) -> Connection {
+        let reader =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM status_events", [], |row| row.get(0))
+            .unwrap();
+        reader
+    }
+
+    fn page_count(store: &crate::Store) -> u64 {
+        store
+            .connection
+            .query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    fn max_page_count(store: &crate::Store) -> u64 {
+        store
+            .connection
+            .query_row("PRAGMA max_page_count", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    /// Extend the WAL file with zero bytes past its last valid frame, as a
+    /// long-unreset WAL would be. SQLite ignores bytes after the last valid
+    /// commit frame and overwrites them on the next append.
+    fn pad_wal_to_frames(path: &Path, envelope: &OperatingEnvelope, frames: u64) {
+        let wal = sidecar(path, "-wal");
+        let current = std::fs::metadata(&wal).unwrap().len();
+        let target = 32 + frames * (envelope.page_size + 24);
+        assert!(target >= current, "fixture WAL already holds more frames");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&wal)
+            .unwrap()
+            .set_len(target)
+            .unwrap();
+    }
+
     #[test]
-    fn held_reader_refuses_checkpoint_then_release_permits_write() {
+    fn held_reader_admits_a_write_that_cannot_exceed_the_wal_bound() {
         let (_root, path, mut store) = tiny_store();
+        let envelope = store.capacity.clone().unwrap();
         store.record_status(&status(0, 1024)).unwrap();
         store
             .connection
             .busy_timeout(std::time::Duration::from_millis(10))
             .unwrap();
-        let reader =
-            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        reader.execute_batch("BEGIN").unwrap();
-        let _: i64 = reader
+        let reader = hold_reader(&path);
+        let wal = sidecar(&path, "-wal");
+        let resident = std::fs::metadata(&wal).unwrap().len();
+        let prior = stored_status_ids(&store);
+        store.record_status(&status(1, 1024)).unwrap();
+        assert_eq!(stored_status_ids(&store).len(), prior.len() + 1);
+        // The reader keeps the WAL from resetting: the commit is appended.
+        let grown = std::fs::metadata(&wal).unwrap().len();
+        assert!(grown > resident);
+        assert!(grown <= envelope.wal_bytes);
+        assert!(observe(&path).unwrap().occupied_bytes <= envelope.aggregate_bytes);
+        // While contended, this connection's page ceiling leaves room for the
+        // resident frames; the reader's snapshot is unchanged.
+        assert!(max_page_count(&store) < envelope.max_pages);
+        let seen: i64 = reader
             .query_row("SELECT COUNT(*) FROM status_events", [], |row| row.get(0))
             .unwrap();
+        assert_eq!(usize::try_from(seen).unwrap(), prior.len());
+        // An explicit checkpoint still requires the truncation.
+        let error = store.checkpoint_wal().unwrap_err();
+        assert!(
+            matches!(error, StoreError::Refused(crate::Refusal::Contention(ref text)) if text.contains("prevents bounded WAL checkpoint")),
+            "{error:?}"
+        );
+        reader.execute_batch("ROLLBACK").unwrap();
+        drop(reader);
+        store.record_status(&status(2, 1024)).unwrap();
+        assert_eq!(stored_status_ids(&store).len(), prior.len() + 2);
+        assert_eq!(max_page_count(&store), envelope.max_pages);
+        assert!(std::fs::metadata(&wal).unwrap().len() < grown);
+        store.checkpoint_wal().unwrap();
+        assert_eq!(std::fs::metadata(&wal).unwrap().len(), 0);
+        store.validate().unwrap();
+    }
+
+    #[test]
+    fn held_reader_refuses_a_write_that_could_exceed_the_wal_bound() {
+        let (_root, path, mut store) = tiny_store();
+        let envelope = store.capacity.clone().unwrap();
+        store.record_status(&status(0, 1024)).unwrap();
+        store
+            .connection
+            .busy_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+        let reader = hold_reader(&path);
+        let pages = page_count(&store);
+        // One resident frame more than a full rewrite of the current pages
+        // leaves room for: the next transaction could pass the WAL bound.
+        pad_wal_to_frames(&path, &envelope, envelope.max_pages - pages + 1);
         let prior = stored_status_ids(&store);
         let error = store.record_status(&status(1, 1024)).unwrap_err();
         assert!(
-            matches!(error, StoreError::Refused(crate::Refusal::Contention(ref text)) if text.contains("prevents bounded WAL checkpoint"))
+            matches!(error, StoreError::Refused(crate::Refusal::Contention(ref text)) if text.contains("prevents bounded WAL checkpoint")),
+            "{error:?}"
         );
         assert!(error.is_refusal());
         assert!(
-            error.to_string().starts_with("capacity refused: reader or writer prevents bounded WAL checkpoint")
+            error
+                .to_string()
+                .starts_with("capacity refused: reader or writer prevents bounded WAL checkpoint")
         );
         assert_eq!(stored_status_ids(&store), prior);
         reader.execute_batch("ROLLBACK").unwrap();
         drop(reader);
         store.record_status(&status(1, 1024)).unwrap();
         assert_eq!(stored_status_ids(&store).len(), prior.len() + 1);
+        assert_eq!(max_page_count(&store), envelope.max_pages);
+        store.validate().unwrap();
+    }
+
+    #[test]
+    fn held_reader_caps_the_transaction_at_the_remaining_wal_bound() {
+        let (_root, path, mut store) = tiny_store();
+        let envelope = store.capacity.clone().unwrap();
+        store.record_status(&status(0, 1024)).unwrap();
+        store
+            .connection
+            .busy_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+        let reader = hold_reader(&path);
+        let pages = page_count(&store);
+        let free: u64 = store
+            .connection
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+            .unwrap();
+        assert!(free < 16, "fixture must need new pages for 64 KiB");
+        // Exactly a full rewrite of the current pages fits: the write is
+        // admitted, but may not grow the database at all.
+        pad_wal_to_frames(&path, &envelope, envelope.max_pages - pages);
+        let prior = stored_status_ids(&store);
+        let error = store.record_status(&status(1, 64 * 1024)).unwrap_err();
+        assert!(
+            matches!(&error, StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) if code.code == rusqlite::ErrorCode::DiskFull),
+            "{error:?}"
+        );
+        assert!(error.is_refusal());
+        assert_eq!(stored_status_ids(&store), prior);
+        assert!(std::fs::metadata(sidecar(&path, "-wal")).unwrap().len() <= envelope.wal_bytes);
+        reader.execute_batch("ROLLBACK").unwrap();
+        drop(reader);
+        store.record_status(&status(1, 64 * 1024)).unwrap();
+        assert_eq!(stored_status_ids(&store).len(), prior.len() + 1);
+        assert_eq!(max_page_count(&store), envelope.max_pages);
+        store.validate().unwrap();
+    }
+
+    #[test]
+    fn held_reader_does_not_bypass_the_envelope_preflight() {
+        let (_root, path, mut store) = tiny_store();
+        let envelope = store.capacity.clone().unwrap();
+        store.record_status(&status(0, 1024)).unwrap();
+        store
+            .connection
+            .busy_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+        let reader = hold_reader(&path);
+        let wal = sidecar(&path, "-wal");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&wal)
+            .unwrap()
+            .set_len(envelope.wal_bytes + 1)
+            .unwrap();
+        let prior = stored_status_ids(&store);
+        let error = store.record_status(&status(1, 1024)).unwrap_err();
+        assert!(
+            matches!(error, StoreError::Refused(crate::Refusal::Capacity(_))),
+            "{error:?}"
+        );
+        assert_eq!(stored_status_ids(&store), prior);
+        reader.execute_batch("ROLLBACK").unwrap();
+        drop(reader);
     }
 
     #[test]
