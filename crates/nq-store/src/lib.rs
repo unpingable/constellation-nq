@@ -3616,16 +3616,23 @@ impl Store {
         Ok((intake_matches == 1).then_some(artifact))
     }
 
+    /// Whether this handle may write: a writable file-backed open, or an
+    /// in-memory store. Read-only opens may not.
+    #[must_use]
+    pub fn admits_writes(&self) -> bool {
+        self.path.is_none() || self.capacity.is_some()
+    }
+
     /// Append the only terminal fence after the existing provider/intake and
     /// artifact transaction has committed. Returns `true` when this call
     /// appended it and `false` when the identical completion was already
     /// recorded.
     pub fn complete_local_successor_acquisition(
-        &mut self,
+        &self,
         acquisition_id: &str,
         artifact_id: &Sha256Digest,
     ) -> Result<bool, StoreError> {
-        let transaction = self.immediate_transaction()?;
+        let transaction = self.shared_immediate_transaction()?;
         let (run_id, intake_id): (String, String) = transaction.query_row(
             "SELECT run_id, intake_id FROM local_successor_acquisition_intents WHERE acquisition_id = ?1",
             [acquisition_id], |row| Ok((row.get(0)?, row.get(1)?)),

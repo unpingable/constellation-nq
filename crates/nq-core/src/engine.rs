@@ -2315,14 +2315,14 @@ impl CollectionEngine {
     /// Returns a version, integrity, or database-opening error.
     pub fn open(config: &NqConfig) -> Result<Self, EngineError> {
         validate_compiled_config(config)?;
-        let mut store = Store::open_with_capacity(
+        let store = Store::open_with_capacity(
             &config.database_path,
             config.retention.horizon_seconds,
             config.retention.byte_ceiling,
             config.retention.reserve_bytes,
             config.retention.auxiliary_bytes,
         )?;
-        let replay = validate_engine_open_history(&mut store)?;
+        let replay = validate_engine_open_history(&store)?;
         Ok(Self {
             config: config.clone(),
             store,
@@ -2382,14 +2382,14 @@ impl CollectionEngine {
                 watcher.instance_id
             )));
         }
-        let mut store = Store::open_with_capacity(
+        let store = Store::open_with_capacity(
             &config.database_path,
             config.retention.horizon_seconds,
             config.retention.byte_ceiling,
             config.retention.reserve_bytes,
             config.retention.auxiliary_bytes,
         )?;
-        let replay = validate_engine_open_history(&mut store)?;
+        let replay = validate_engine_open_history(&store)?;
         let mut engine = Self {
             config: config.clone(),
             store,
@@ -2417,14 +2417,14 @@ impl CollectionEngine {
         evaluator_identity: Result<EvaluatorRuntimeIdentity, String>,
     ) -> Result<Self, EngineError> {
         validate_compiled_config(config)?;
-        let mut store = Store::open_with_capacity(
+        let store = Store::open_with_capacity(
             &config.database_path,
             config.retention.horizon_seconds,
             config.retention.byte_ceiling,
             config.retention.reserve_bytes,
             config.retention.auxiliary_bytes,
         )?;
-        let replay = validate_engine_open_history(&mut store)?;
+        let replay = validate_engine_open_history(&store)?;
         Ok(Self {
             config: config.clone(),
             store,
@@ -2801,7 +2801,7 @@ impl CollectionEngine {
                 classify_local_successor_acquisition(&self.store, acquisition_id)?
             {
                 record_recovered_local_successor_completion(
-                    &mut self.store,
+                    &self.store,
                     acquisition_id,
                     &artifact,
                 )?;
@@ -2942,7 +2942,7 @@ impl CollectionEngine {
                 // replay cursor follows it without re-reading history.
                 prune_replay_cursor(&self.store, &mut self.replay, &expired.boundary)?;
             } else {
-                self.replay = validate_engine_open_history(&mut self.store)?;
+                self.replay = validate_engine_open_history(&self.store)?;
             }
         }
         self.retention_attempt = Some(attempt);
@@ -6324,7 +6324,7 @@ fn classify_local_successor_acquisition(
 /// Record the completion an interrupted acquisition would have written,
 /// through the same idempotent store write, and say so on stderr.
 fn record_recovered_local_successor_completion(
-    store: &mut Store,
+    store: &Store,
     acquisition_id: &str,
     artifact: &Sha256Digest,
 ) -> Result<(), EngineError> {
@@ -6340,10 +6340,13 @@ fn record_recovered_local_successor_completion(
 }
 
 /// Record the completion of every acquisition among the fences this open
-/// re-checks whose artifact committed without one. Returns `false` when a
-/// refusal (contention or capacity) kept a completion from being recorded;
-/// the caller then leaves the watermark in place so the next open retries.
-fn recover_local_successor_completions(store: &mut Store) -> Result<bool, EngineError> {
+/// re-checks (every fence when it validated in full) whose artifact
+/// committed without one. Returns `false` when a refusal (contention or
+/// capacity) kept a completion from being recorded; the caller then leaves
+/// the watermark in place so the next open retries. Every validation that
+/// records a watermark runs this first, so a certified frontier never covers
+/// an unrecorded completion that later bounded opens would not revisit.
+fn recover_local_successor_completions(store: &Store) -> Result<bool, EngineError> {
     let frontier = engine_core_frontier(store);
     let mut recorded_all = true;
     for acquisition_id in
@@ -8637,7 +8640,7 @@ fn engine_semantic_state(
 ///
 /// Returns the engine's replay cursor: the evaluation replay state at the
 /// frontier this open certified, or `None` when it certified none.
-fn validate_engine_open_history(store: &mut Store) -> Result<Option<ReplayCursor>, EngineError> {
+fn validate_engine_open_history(store: &Store) -> Result<Option<ReplayCursor>, EngineError> {
     validate_core_history_since_open(store)?;
     let mut evaluation = None;
     let semantic = match engine_semantic_state(store) {
@@ -8830,6 +8833,13 @@ pub fn validate_fully_and_record(
     let state = validate_semantic_planes_in_full(store)?;
     validate_provider_intake_history(store)?;
     let verification = validate_diagnostic_artifact_history(store)?;
+    if store.admits_writes() && !recover_local_successor_completions(store)? {
+        eprintln!(
+            "nq: warning: full validation passed but is not recorded while a recovered \
+             local successor completion is unrecorded; run it again"
+        );
+        return Ok((verification, None));
+    }
     // `None` when the handle cannot record (read-only, or no sole genesis).
     let watermark = store.record_validation_watermark(
         nq_store::SemanticCertification::Established(state),
@@ -20682,6 +20692,7 @@ sys.stdout.write("\n")
     /// writable engine open records the exact completion event the
     /// interrupted acquisition would have written, once.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn committed_artifact_under_pending_fence_is_recovered_on_reopen() {
         for with_watermark in [true, false] {
             let directory = tempfile::tempdir().expect("temporary directory");
@@ -20794,6 +20805,45 @@ sys.stdout.write("\n")
             assert_eq!(successor_completion_event(&config, acquisition_id).len(), 1);
             full_validation_and_watermark(&config);
         }
+    }
+
+    /// `nq admin validate --full` on a store holding an interrupted
+    /// acquisition records the completion itself before certifying, so a
+    /// watermark never covers a fence that later opens would not revisit.
+    #[test]
+    fn full_validation_records_an_interrupted_successor_completion() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, _mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "interrupted-full-genesis",
+            b"watermark-evaluator",
+        ) else {
+            return;
+        };
+        engine
+            .diagnostic_execute(&watcher)
+            .expect("initial diagnostic");
+        let acquisition_id = "interrupted-before-full-validation";
+        INTERRUPT_BEFORE_SUCCESSOR_COMPLETION_FOR_TEST.with(|interrupt| interrupt.set(true));
+        engine
+            .diagnostic_acquire_successor_local(&watcher, acquisition_id)
+            .expect_err("interrupted before the completion write");
+        let config = engine.config.clone();
+        drop(engine);
+        assert_eq!(
+            successor_phases(&config, acquisition_id),
+            ["provider_invocation_started"]
+        );
+        full_validation_and_watermark(&config);
+        let phases = successor_phases(&config, acquisition_id);
+        assert_eq!(
+            phases,
+            ["provider_invocation_started", "provider_intake_completed"]
+        );
+        // Rollover and archive classify phases alone; they now accept it.
+        validate_local_successor_terminal_phases(&phases).expect("terminal for rollover");
+        drop(reopen_with_test_identity(&config).expect("certified store opens"));
+        assert_eq!(successor_completion_event(&config, acquisition_id).len(), 1);
     }
 
     /// A fence holding only `provider_invocation_started` with no committed
