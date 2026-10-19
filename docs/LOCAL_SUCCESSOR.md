@@ -93,6 +93,19 @@ process may still be running). Rollover inspection of a sealed, checkpointed
 snapshot reports it as `abandoned_before_intake`, settled history rather than
 pending work (see [Rollover](ROLLOVER.md)).
 
+A fence whose run committed a non-success outcome without a diagnostic
+artifact (an ordinary collection path, or history from before non-success
+diagnostics were committed as artifacts) is finished with a recorded failure.
+Retained history settles it only when the evidence agrees: the fence's exact
+intake/run link, a run belonging to the fence's watcher, exactly one status
+row for it (an instance status whose state and code match the run's
+acquisition outcome, with a retained refusal for a rejected response), and no
+artifact for the run.
+`replay-local-successor` and `acquire-next-local` refuse it with a message
+naming the run, the recorded outcome and the status event; rollover reports it
+as `failed_recorded`. The failure and its provenance stay as retained, and
+contradictory evidence remains outcome-unknown and refuses.
+
 ## Compatibility and qualification
 
 Schema12 requires the verified backup and explicit12→13 upgrade described in

@@ -6315,6 +6315,9 @@ fn classify_local_successor_acquisition(
     if let Some(artifact) = store.local_successor_artifact_without_completion(acquisition_id)? {
         return Ok(LocalSuccessorOutcome::CommittedWithoutCompletion(artifact));
     }
+    if let Some(failure) = store.local_successor_recorded_failure(acquisition_id)? {
+        return Err(EngineError::Invariant(recorded_failure_refusal(&failure)));
+    }
     let abandoned = store
         .local_successor_dispatch_residue(acquisition_id)?
         .is_some_and(LocalSuccessorDispatchResidue::is_empty);
@@ -6326,6 +6329,22 @@ fn classify_local_successor_acquisition(
     } else {
         "local successor acquisition is incomplete or outcome-unknown".into()
     }))
+}
+
+/// The refusal for a fence whose run recorded a non-success outcome without a
+/// diagnostic artifact (NQ #29): a finished collection, named by its retained
+/// evidence, that no acquire or replay can turn into an artifact.
+fn recorded_failure_refusal(failure: &nq_store::LocalSuccessorRecordedFailure) -> String {
+    format!(
+        "local successor acquisition finished without a diagnostic artifact: its run {} \
+         recorded the non-success outcome {} (instance status {}/{}, event {}); a finished \
+         acquisition is never dispatched again and has nothing to replay",
+        failure.run_id,
+        failure.acquisition_outcome,
+        failure.state,
+        failure.code,
+        failure.status_event_id
+    )
 }
 
 /// How retained history settles one local successor fence, for consumers
@@ -6349,8 +6368,20 @@ pub enum LocalSuccessorTerminalState {
     /// provider, so no completion can follow. Nothing in history depends on
     /// it.
     AbandonedBeforeIntake,
-    /// Every other shape: a started fence with partial residue, or an unknown
-    /// phase sequence. This remains the refusal boundary.
+    /// Only `provider_invocation_started`, but the run committed with a
+    /// non-success acquisition outcome, exactly one agreeing instance status
+    /// and the fence's exact intake/run link, and no diagnostic artifact
+    /// exists for it (NQ #29). The collection finished with a recorded
+    /// failure: nothing can complete the fence, an existing acquisition is
+    /// never dispatched again, and the failure and its provenance stay as
+    /// retained. Sound on a live store too: a run, its status and its
+    /// artifact commit in one transaction, and an admitted run (outcome
+    /// `response`, no refusal) never matches, so no in-flight acquisition
+    /// can read as failed.
+    FailedRecorded(nq_store::LocalSuccessorRecordedFailure),
+    /// Every other shape: a started fence with partial or contradictory
+    /// residue, or an unknown phase sequence. This remains the refusal
+    /// boundary.
     Unknown,
 }
 
@@ -6369,12 +6400,17 @@ pub fn classify_local_successor_terminal_state(
     if let Some(artifact) = store.local_successor_artifact_without_completion(acquisition_id)? {
         return Ok(LocalSuccessorTerminalState::CompletedUnrecorded(artifact));
     }
-    if phases == ["provider_invocation_started"]
-        && store
-            .local_successor_dispatch_residue(acquisition_id)?
-            .is_some_and(LocalSuccessorDispatchResidue::is_empty)
+    if phases != ["provider_invocation_started"] {
+        return Ok(LocalSuccessorTerminalState::Unknown);
+    }
+    if store
+        .local_successor_dispatch_residue(acquisition_id)?
+        .is_some_and(LocalSuccessorDispatchResidue::is_empty)
     {
         return Ok(LocalSuccessorTerminalState::AbandonedBeforeIntake);
+    }
+    if let Some(failure) = store.local_successor_recorded_failure(acquisition_id)? {
+        return Ok(LocalSuccessorTerminalState::FailedRecorded(failure));
     }
     Ok(LocalSuccessorTerminalState::Unknown)
 }
@@ -21039,6 +21075,123 @@ sys.stdout.write("\n")
             LocalSuccessorTerminalState::Unknown
         );
         let error = classify_local_successor_acquisition(&engine.store, residue_id)
+            .expect_err("unknown fence refuses");
+        assert!(
+            error
+                .to_string()
+                .ends_with("local successor acquisition is incomplete or outcome-unknown"),
+            "{error}"
+        );
+    }
+
+    /// NQ #29: a fence whose run committed a non-success outcome (here a
+    /// provider EOF) without a diagnostic artifact is finished history with
+    /// a known failure, not pending work. Acquire and replay refuse it by
+    /// naming the recorded outcome; a fence that does not link the run's
+    /// exact intake is still unknown.
+    #[test]
+    fn fence_whose_run_recorded_a_failure_is_finished_history() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "recorded-failure-genesis",
+            b"watermark-evaluator",
+        ) else {
+            return;
+        };
+        fs::write(&mode, "no_response\n").expect("select provider EOF");
+        let semantic = canonical(&watcher).expect("watcher").digest().to_owned();
+        let failed_collection = |engine: &mut CollectionEngine| -> (String, String) {
+            let outcome = engine.collect(&watcher).expect("collection persists");
+            let run_id = outcome
+                .run_id
+                .clone()
+                .expect("an acquisition failure retains its run");
+            assert!(
+                engine
+                    .store
+                    .diagnostic_artifact_id_for_run(&run_id)
+                    .expect("artifact read")
+                    .is_none(),
+                "an ordinary collection commits no diagnostic artifact"
+            );
+            let intake_id: String = rusqlite::Connection::open_with_flags(
+                &engine.config.database_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("raw reader")
+            .query_row(
+                "SELECT intake_id FROM local_watcher_provider_intakes WHERE run_id = ?1",
+                [&run_id],
+                |row| row.get(0),
+            )
+            .expect("intake link");
+            (run_id, intake_id)
+        };
+        let fence = |engine: &mut CollectionEngine, id: &str, run_id: &str, intake_id: &str| {
+            engine
+                .store
+                .commit_local_successor_dispatch(&nq_store::LocalSuccessorAcquisitionIntentInput {
+                    acquisition_id: id.into(),
+                    watcher_instance_id: watcher.instance_id.clone(),
+                    watcher_semantic_digest: semantic.clone(),
+                    selection_digest: local_successor_selection_digest(&watcher)
+                        .expect("selection"),
+                    run_id: run_id.into(),
+                    intake_id: intake_id.into(),
+                    intent: canonical(&json!({
+                        "schema": "nq.local_successor_acquisition_intent.v1",
+                        "acquisition_id": id,
+                    }))
+                    .expect("intent"),
+                })
+                .expect("fence");
+        };
+
+        let (run_id, intake_id) = failed_collection(&mut engine);
+        let failed_id = "failed-without-artifact";
+        fence(&mut engine, failed_id, &run_id, &intake_id);
+        let LocalSuccessorTerminalState::FailedRecorded(failure) =
+            classify_local_successor_terminal_state(&engine.store, failed_id).expect("classify")
+        else {
+            panic!("a recorded failure is finished history");
+        };
+        assert_eq!(failure.run_id, run_id);
+        assert_ne!(failure.acquisition_outcome, "response");
+        assert_eq!(
+            (failure.state.as_str(), failure.code.as_str()),
+            ("failed", "collection_failed")
+        );
+        for error in [
+            engine
+                .diagnostic_replay_local_successor(&watcher, failed_id)
+                .expect_err("nothing to replay"),
+            engine
+                .diagnostic_acquire_successor_local(&watcher, failed_id)
+                .expect_err("never dispatched again"),
+        ] {
+            let text = error.to_string();
+            assert!(
+                text.contains(&format!(
+                    "recorded the non-success outcome {}",
+                    failure.acquisition_outcome
+                )),
+                "{text}"
+            );
+            assert!(text.contains(&failure.status_event_id), "{text}");
+        }
+        assert!(successor_completion_event(&engine.config, failed_id).is_empty());
+
+        // The same shape without the fence's exact intake link is not a
+        // settled failure: the evidence does not agree with the fence.
+        let (other_run, _other_intake) = failed_collection(&mut engine);
+        let mislinked_id = "failed-mislinked-intake";
+        fence(&mut engine, mislinked_id, &other_run, "mislinked-intake");
+        assert_eq!(
+            classify_local_successor_terminal_state(&engine.store, mislinked_id).expect("classify"),
+            LocalSuccessorTerminalState::Unknown
+        );
+        let error = classify_local_successor_acquisition(&engine.store, mislinked_id)
             .expect_err("unknown fence refuses");
         assert!(
             error

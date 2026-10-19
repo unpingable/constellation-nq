@@ -148,13 +148,16 @@ struct LocalSuccessorAcquisitionIdentity {
     intake_id: String,
     phases: Vec<String>,
     /// `completed`, `completed_unrecorded` (artifact committed, completion
-    /// event never written: a writable open records it), or
+    /// event never written: a writable open records it),
     /// `abandoned_before_intake` (fence only, and no retained row names its
     /// run or intake: the provider's capture was never retained and an
     /// existing acquisition never re-invokes the provider, so nothing depends
-    /// on it and nothing can complete it). Sound only for the sealed,
-    /// checkpointed snapshot the inspector requires. Any other fence is
-    /// `pending_or_unknown` and also a refusal.
+    /// on it and nothing can complete it), or `failed_recorded` (the run
+    /// committed a non-success outcome with its one agreeing terminal status
+    /// and no diagnostic artifact: a finished collection whose failure stays
+    /// as retained). Sound only for the sealed, checkpointed snapshot the
+    /// inspector requires. Any other fence, contradictory evidence included,
+    /// is `pending_or_unknown` and also a refusal.
     state: &'static str,
 }
 
@@ -689,6 +692,7 @@ fn scan_local_successor_acquisitions(
                 LocalSuccessorTerminalState::Completed => "completed",
                 LocalSuccessorTerminalState::CompletedUnrecorded(_) => "completed_unrecorded",
                 LocalSuccessorTerminalState::AbandonedBeforeIntake => "abandoned_before_intake",
+                LocalSuccessorTerminalState::FailedRecorded(_) => "failed_recorded",
                 LocalSuccessorTerminalState::Unknown => {
                     refusals.push(RolloverRefusal {
                         kind: "local_successor_acquisition",
@@ -1098,6 +1102,200 @@ mod tests {
             "{error:#}"
         );
         drop(store);
+    }
+
+    /// The rows a collection commits in its one transaction when the
+    /// provider fails: the run, its intake link and its terminal instance
+    /// status (`status_events.run_id` is unique, so there is exactly one).
+    /// No artifact: this is the ordinary (non-diagnostic) path.
+    /// `status_component` is the instance the status is filed under; a real
+    /// commit files it under the run's own instance.
+    fn failed_run(
+        root: &Path,
+        run_id: &str,
+        intake_id: &str,
+        acquisition_outcome: &str,
+        state: &str,
+        code: &str,
+        status_component: &str,
+    ) {
+        let digest = |label: &str| nq_protocol::sha256_bytes(label.as_bytes()).into_string();
+        let raw = rusqlite::Connection::open(root.join("nq.db")).expect("raw writer");
+        raw.execute_batch("PRAGMA foreign_keys = OFF")
+            .expect("fixture pragma");
+        raw.execute(
+            "INSERT INTO watcher_runs (run_id, request_id, instance_id, admission_id, \
+             binding_digest, checkpoint_contract_digest, profile_id, profile_version, \
+             profile_digest, carrier, started_at, deadline_at, finished_at, \
+             acquisition_outcome, execution_identity_json, resource_outcome_json) \
+             VALUES (?1, ?2, 'host-local', NULL, ?3, ?4, 'nq.host', '1', ?5, 'stdio', ?6, ?6, \
+             ?6, ?7, ?8, ?8)",
+            rusqlite::params![
+                run_id,
+                format!("request-{run_id}"),
+                digest("binding"),
+                digest("checkpoint"),
+                digest("profile"),
+                AT,
+                acquisition_outcome,
+                br#"{}"#.as_slice()
+            ],
+        )
+        .expect("run row");
+        raw.execute(
+            "INSERT INTO local_watcher_provider_intakes (intake_id, run_id) VALUES (?1, ?2)",
+            rusqlite::params![intake_id, run_id],
+        )
+        .expect("intake link");
+        raw.execute(
+            "INSERT INTO status_events (status_event_id, component_kind, component_id, run_id, \
+             state, code, detail_json, observed_at) \
+             VALUES (?1, 'instance', ?7, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                format!("status-{run_id}"),
+                run_id,
+                state,
+                code,
+                br#"{"fixture":true}"#.as_slice(),
+                AT,
+                status_component
+            ],
+        )
+        .expect("status row");
+    }
+
+    #[test]
+    fn fence_whose_run_recorded_a_failure_is_finished_history() {
+        let (root, mut store) = store();
+        fence(&mut store, "failed-a", "run-failed-a", "intake-failed-a");
+        // The provider timed out; the run committed with its one terminal
+        // status and no diagnostic artifact (NQ #29). The failure stays as
+        // retained, and nothing can complete the fence.
+        failed_run(
+            root.path(),
+            "run-failed-a",
+            "intake-failed-a",
+            "timeout",
+            "failed",
+            "collection_failed",
+            "host-local",
+        );
+        let report = inspect_store(&store, parse_time(AT, "at").unwrap(), AT.into()).unwrap();
+        assert!(report.eligible, "{:?}", report.refusals);
+        assert!(report.refusals.is_empty());
+        assert_eq!(report.local_successor_acquisitions.len(), 1);
+        assert_eq!(
+            report.local_successor_acquisitions[0].state,
+            "failed_recorded"
+        );
+    }
+
+    /// A rejected response is the other recorded-failure shape: the run
+    /// says `response`, the status says the helper refused (or the report
+    /// was rejected), and a refusal row is retained.
+    #[test]
+    fn fence_whose_response_was_refused_is_finished_history() {
+        for (index, (state, code)) in [
+            ("degraded", "helper_refused"),
+            ("failed", "report_rejected"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (root, mut store) = store();
+            let run_id = format!("run-refused-{index}");
+            let intake_id = format!("intake-refused-{index}");
+            fence(&mut store, "refused", &run_id, &intake_id);
+            failed_run(
+                root.path(),
+                &run_id,
+                &intake_id,
+                "response",
+                state,
+                code,
+                "host-local",
+            );
+            let raw = rusqlite::Connection::open(root.path().join("nq.db")).expect("raw writer");
+            raw.execute_batch("PRAGMA foreign_keys = OFF")
+                .expect("fixture pragma");
+            raw.execute(
+                "INSERT INTO refusals (refusal_id, source_kind, responsible_instance_id, boundary, \
+                 code, run_id, submission_id, detail_json, created_at) \
+                 VALUES (?1, 'protocol', 'host-local', 'response', 'invalid_response', ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    format!("refusal-{run_id}"),
+                    run_id,
+                    format!("submission-{run_id}"),
+                    br#"{"fixture":true}"#.as_slice(),
+                    AT
+                ],
+            )
+            .expect("refusal row");
+            let report = inspect_store(&store, parse_time(AT, "at").unwrap(), AT.into()).unwrap();
+            assert!(report.eligible, "{state}/{code}: {:?}", report.refusals);
+            assert_eq!(
+                report.local_successor_acquisitions[0].state,
+                "failed_recorded"
+            );
+        }
+    }
+
+    /// The one status for the run must be the fence's watcher's own
+    /// instance status; a status filed under another instance is
+    /// contradictory evidence.
+    #[test]
+    fn fence_whose_run_status_names_another_instance_still_refuses_rollover() {
+        let (root, mut store) = store();
+        fence(&mut store, "other-instance", "run-other", "intake-other");
+        failed_run(
+            root.path(),
+            "run-other",
+            "intake-other",
+            "timeout",
+            "failed",
+            "collection_failed",
+            "another-watcher",
+        );
+        let report = inspect_store(&store, parse_time(AT, "at").unwrap(), AT.into()).unwrap();
+        assert!(!report.eligible);
+        assert_eq!(report.refusals[0].state, "pending_or_unknown");
+    }
+
+    #[test]
+    fn fence_whose_run_evidence_contradicts_itself_still_refuses_rollover() {
+        // A timeout whose status claims a complete report, and a response
+        // whose rejection left no refusal: contradictory evidence is not a
+        // settled failure.
+        for (index, (outcome, state, code)) in [
+            ("timeout", "healthy", "report_complete"),
+            ("response", "failed", "report_rejected"),
+            ("timeout", "failed", "report_failed"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (root, mut store) = store();
+            let run_id = format!("run-contradiction-{index}");
+            let intake_id = format!("intake-contradiction-{index}");
+            fence(&mut store, "contradiction", &run_id, &intake_id);
+            failed_run(
+                root.path(),
+                &run_id,
+                &intake_id,
+                outcome,
+                state,
+                code,
+                "host-local",
+            );
+            let report = inspect_store(&store, parse_time(AT, "at").unwrap(), AT.into()).unwrap();
+            assert!(!report.eligible, "{outcome}/{state}/{code}");
+            assert_eq!(report.refusals.len(), 1);
+            assert_eq!(report.refusals[0].state, "pending_or_unknown");
+            assert_eq!(
+                report.local_successor_acquisitions[0].state,
+                "pending_or_unknown"
+            );
+        }
     }
 
     #[test]

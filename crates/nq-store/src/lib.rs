@@ -3662,6 +3662,112 @@ impl Store {
         }))
     }
 
+    /// The recorded non-success outcome of the run a local successor fence
+    /// dispatched, when retained history settles it (NQ #29): the fence
+    /// holds only `provider_invocation_started`, its exact intake/run link
+    /// is retained, the run belongs to the fence's watcher and committed
+    /// with exactly one status row (an instance status for that watcher),
+    /// that status agrees with the run's acquisition outcome, and no
+    /// diagnostic artifact exists for the run. The failure and its
+    /// provenance are returned as retained; nothing is manufactured. `None`
+    /// for an unknown acquisition and for every other shape, including
+    /// contradictory evidence (a status that disagrees with the outcome,
+    /// more or fewer than one status, or a response outcome without a
+    /// retained refusal), which stays outcome-unknown.
+    pub fn local_successor_recorded_failure(
+        &self,
+        acquisition_id: &str,
+    ) -> Result<Option<LocalSuccessorRecordedFailure>, StoreError> {
+        let Some((watcher_instance_id, run_id, intake_id)) = self
+            .connection
+            .query_row(
+                "SELECT watcher_instance_id, run_id, intake_id FROM local_successor_acquisition_intents WHERE acquisition_id = ?1",
+                [acquisition_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        if self.local_successor_acquisition_phases(acquisition_id)?
+            != ["provider_invocation_started"]
+        {
+            return Ok(None);
+        }
+        let Some(run) = self
+            .connection
+            .query_row(
+                "SELECT run.acquisition_outcome, run.instance_id,
+                        (SELECT COUNT(*) FROM local_watcher_provider_intakes
+                          WHERE intake_id = ?2 AND run_id = ?1),
+                        (SELECT COUNT(*) FROM local_diagnostic_artifact_origins WHERE run_id = ?1),
+                        (SELECT COUNT(*) FROM status_events WHERE run_id = ?1),
+                        (SELECT COUNT(*) FROM refusals WHERE run_id = ?1)
+                 FROM watcher_runs AS run
+                 WHERE run.run_id = ?1",
+                params![run_id, intake_id],
+                |row| {
+                    Ok(RecordedFailureEvidence {
+                        acquisition_outcome: row.get(0)?,
+                        instance_id: row.get(1)?,
+                        intake_links: row.get(2)?,
+                        artifacts: row.get(3)?,
+                        statuses: row.get(4)?,
+                        refusals: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        if run.instance_id != watcher_instance_id
+            || run.intake_links != 1
+            || run.artifacts != 0
+            || run.statuses != 1
+        {
+            return Ok(None);
+        }
+        let Some((status_event_id, state, code)) = self
+            .connection
+            .query_row(
+                "SELECT status_event_id, state, code FROM status_events
+                 WHERE run_id = ?1 AND component_kind = 'instance' AND component_id = ?2",
+                params![run_id, run.instance_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let agrees = if run.acquisition_outcome == "response" {
+            run.refusals >= 1
+                && ((state == "degraded" && code == "helper_refused")
+                    || (state == "failed" && code == "report_rejected"))
+        } else {
+            state == "failed" && code == "collection_failed"
+        };
+        Ok(agrees.then_some(LocalSuccessorRecordedFailure {
+            run_id,
+            acquisition_outcome: run.acquisition_outcome,
+            status_event_id,
+            state,
+            code,
+        }))
+    }
+
     /// Whether this handle may write: a writable file-backed open, or an
     /// in-memory store. Read-only opens may not.
     #[must_use]
@@ -5788,6 +5894,33 @@ impl LocalSuccessorDispatchResidue {
     pub fn is_empty(self) -> bool {
         self.run_rows == 0 && self.intake_rows == 0
     }
+}
+
+/// The recorded non-success outcome of a local successor fence's run, as
+/// retained history states it (NQ #29).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalSuccessorRecordedFailure {
+    /// The run the fence dispatched.
+    pub run_id: String,
+    /// `watcher_runs.acquisition_outcome` of that run.
+    pub acquisition_outcome: String,
+    /// The one terminal instance status recorded for the run.
+    pub status_event_id: String,
+    /// That status's state: `failed` or `degraded`.
+    pub state: String,
+    /// That status's code: `collection_failed`, `helper_refused` or
+    /// `report_rejected`.
+    pub code: String,
+}
+
+/// Counts read beside a fence's run while settling a recorded failure.
+struct RecordedFailureEvidence {
+    acquisition_outcome: String,
+    instance_id: String,
+    intake_links: i64,
+    artifacts: i64,
+    statuses: i64,
+    refusals: i64,
 }
 
 /// A verified SQLite backup artifact.

@@ -80,9 +80,19 @@ is a fence holding only `provider_invocation_started` while no retained row
 names its run or intake: the acquisition was refused or killed between its
 fence transaction and its intake transaction, so the provider's capture was
 never retained, and an existing acquisition never re-invokes the provider, so
-no completion can follow; nothing in history depends on it. All three are
-settled history. Every other fence is `pending_or_unknown` and refuses
-eligibility.
+no completion can follow; nothing in history depends on it. `failed_recorded`
+is a fence holding only `provider_invocation_started` whose run belongs to the
+fence's watcher and committed with a non-success acquisition outcome, exactly
+one status row (an instance status for that watcher) that agrees with it
+(`failed/collection_failed` for a failed acquisition; `degraded/helper_refused`
+or `failed/report_rejected`, with a retained refusal, for a rejected
+response), the fence's exact intake/run link, and no diagnostic artifact (NQ
+#29): the collection finished with a recorded
+failure, which stays as retained; no artifact, completion or success is
+manufactured. All four are settled history. Every other fence is
+`pending_or_unknown` and refuses eligibility, including contradictory
+evidence: a status that disagrees with the run's outcome, more or fewer than
+one status for the run, or a response outcome without a retained refusal.
 
 These states are sound only for the sealed, quiescent, checkpointed snapshot
 this procedure produces. An immutable open ignores a `-wal` file, so a copy
