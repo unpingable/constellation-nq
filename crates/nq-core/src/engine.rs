@@ -21084,6 +21084,70 @@ sys.stdout.write("\n")
         );
     }
 
+    /// NQ #28 acceptance, component level: a collection must not be refused
+    /// merely because readers hold snapshots on the store. Monitor #22's
+    /// `mem-host` input was starved because every concurrent reader (status
+    /// export, saved checks, the attention evaluator) made the pre-write
+    /// TRUNCATE checkpoint refuse. Here two readers hold snapshots for three
+    /// collections, which still commit and are admitted, and the snapshots
+    /// stay isolated. What this does not show: behaviour near the WAL
+    /// envelope (where the bounded ceiling refuses by design), writer
+    /// contention, or the real `nq.host_io` helper; the store's
+    /// `held_reader_*` tests cover the ceiling, and the deploy record's
+    /// 150 s held-reader probe on the ops store covers the live profile.
+    #[test]
+    fn collection_commits_while_a_reader_holds_a_snapshot() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, _mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "contention-genesis",
+            b"watermark-evaluator",
+        ) else {
+            return;
+        };
+        let first = engine.collect(&watcher).expect("idle collection");
+        assert!(first.run_id.is_some());
+        let open_reader = || {
+            let reader = rusqlite::Connection::open_with_flags(
+                &engine.config.database_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("raw reader");
+            reader
+                .execute_batch("BEGIN; SELECT COUNT(*) FROM watcher_runs;")
+                .expect("hold a read snapshot");
+            reader
+        };
+        let reader = open_reader();
+        let second = open_reader();
+        let runs_before: i64 = reader
+            .query_row("SELECT COUNT(*) FROM watcher_runs", [], |row| row.get(0))
+            .expect("snapshot count");
+        for _ in 0..3 {
+            let outcome = engine
+                .collect(&watcher)
+                .expect("a held reader does not refuse a bounded write");
+            assert!(
+                matches!(outcome.result, CollectionResult::Admitted { .. }),
+                "{outcome:?}"
+            );
+        }
+        // The reader's snapshot is unchanged (SQLite isolation), and a fresh
+        // read sees every collection.
+        let runs_held: i64 = reader
+            .query_row("SELECT COUNT(*) FROM watcher_runs", [], |row| row.get(0))
+            .expect("snapshot count");
+        assert_eq!(runs_held, runs_before);
+        second
+            .execute_batch("COMMIT")
+            .expect("release second snapshot");
+        reader.execute_batch("COMMIT").expect("release snapshot");
+        let runs_after: i64 = reader
+            .query_row("SELECT COUNT(*) FROM watcher_runs", [], |row| row.get(0))
+            .expect("fresh count");
+        assert_eq!(runs_after, runs_before + 3);
+    }
+
     /// NQ #29: a fence whose run committed a non-success outcome (here a
     /// provider EOF) without a diagnostic artifact is finished history with
     /// a known failure, not pending work. Acquire and replay refuse it by

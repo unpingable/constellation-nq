@@ -421,6 +421,7 @@ impl Detector for HostLoadPressureDetector {
             | DetectorRuleParameters::FilesystemCapacityPressure { .. }
             | DetectorRuleParameters::FilesystemInodePressure { .. }
             | DetectorRuleParameters::MemoryPressureStall { .. }
+            | DetectorRuleParameters::IoPressureStall { .. }
             | DetectorRuleParameters::SystemdUnitRequiredActive { .. } => {
                 unreachable!("host detector descriptor uses only load-pressure parameters")
             }

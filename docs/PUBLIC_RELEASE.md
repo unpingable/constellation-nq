@@ -268,7 +268,8 @@ qualification does not inventory later dynamic/plugin/module loading. See
 
 The 0.2.0 package includes `nq-host-resource-helper`, which serves
 `nq.host_filesystem_capacity/v1`, `nq.host_filesystem_inodes/v1`,
-`nq.host_memory/v1` and `nq.systemd_unit/v2`, and
+`nq.host_memory/v1`, `nq.host_io/v1` (since 0.2.6; kernel PSI I/O `full avg60`,
+NQ #28) and `nq.systemd_unit/v2`, and
 `nq-synthetic-cache-result-helper`, which serves
 `nq.synthetic_cache_executor_result/v1`, under `/usr/lib/nq/helpers/`. The
 assembler runs `verify_catalog.py --helper` against the packaged

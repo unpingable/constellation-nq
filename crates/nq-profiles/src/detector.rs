@@ -60,6 +60,16 @@ pub enum DetectorRuleParameters {
         /// Minimum `CLOCK_BOOTTIME` seconds before the averages are trusted.
         minimum_boot_age_seconds: u32,
     },
+    /// Kernel PSI I/O law: `Present` when `full avg60` (hundredths of a
+    /// percent; the share of the last minute in which every non-idle task
+    /// was stalled on I/O) is at least the threshold, evaluable only once
+    /// boot age has reached the warm-up guard.
+    IoPressureStall {
+        /// Threshold on `full avg60` in hundredths of a percent.
+        full_avg60_threshold_centipercent: u32,
+        /// Minimum `CLOCK_BOOTTIME` seconds before the averages are trusted.
+        minimum_boot_age_seconds: u32,
+    },
     /// Systemd unit required-active law: `ExplicitlyAbsent` exactly when the
     /// system manager reports `LoadState == required_load_state` and
     /// `ActiveState == required_active_state`; `Present` for every other

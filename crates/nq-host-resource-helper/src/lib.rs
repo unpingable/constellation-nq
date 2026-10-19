@@ -1,6 +1,6 @@
 //! First-party, one-shot stdio watcher for the compiled
 //! `nq.host_filesystem_capacity/v1`, `nq.host_filesystem_inodes/v1`,
-//! `nq.host_memory/v1`, and `nq.systemd_unit/v2` profiles: closed branches
+//! `nq.host_memory/v1`, `nq.host_io/v1`, and `nq.systemd_unit/v2` profiles: closed branches
 //! selected by the exact admitted profile, in the same way
 //! `nq-operator-beta-helper` selects its two. The systemd branch lives in
 //! [`systemd`].
@@ -31,6 +31,8 @@ use nq_profiles::{
         self, ACCESS_PATH, CAPABILITIES, COVERAGE_KIND, HostFilesystemScope, OBSERVATION_KIND,
         SCOPE_KIND,
     },
+    host_io,
+    host_io::IoFailureCode,
     host_memory,
     host_memory::MemoryFailureCode,
     systemd_unit_v2::{self, SystemdUnitFailureCode},
@@ -55,6 +57,7 @@ const MOUNTINFO_PATH: &str = "/proc/self/mountinfo";
 const BY_UUID_DIR: &str = "/dev/disk/by-uuid";
 const MAX_MOUNTINFO_BYTES: usize = 1 << 20;
 const PRESSURE_MEMORY_PATH: &str = "/proc/pressure/memory";
+const PRESSURE_IO_PATH: &str = "/proc/pressure/io";
 
 /// Failure before a valid bounded response can be written.
 #[derive(Debug, Error)]
@@ -102,6 +105,7 @@ pub fn failure_code_vocabularies() -> Value {
             Branch::Memory,
             Branch::SystemdUnit,
             Branch::SystemdUnitBoot,
+            Branch::Io,
         ]
         .into_iter()
         .map(|branch| {
@@ -159,6 +163,7 @@ enum Branch {
     Capacity,
     Inodes,
     Memory,
+    Io,
     SystemdUnit,
     SystemdUnitBoot,
 }
@@ -169,6 +174,7 @@ impl Branch {
             Self::Capacity => &host_filesystem::CAPACITY_MODULE,
             Self::Inodes => &host_filesystem::INODES_MODULE,
             Self::Memory => &host_memory::MODULE,
+            Self::Io => &host_io::MODULE,
             Self::SystemdUnit => &systemd_unit_v2::MODULE,
             Self::SystemdUnitBoot => &systemd_unit_v3::MODULE,
         }
@@ -178,6 +184,7 @@ impl Branch {
         match self {
             Self::Capacity | Self::Inodes => &CAPABILITIES,
             Self::Memory => &host_memory::CAPABILITIES,
+            Self::Io => &host_io::CAPABILITIES,
             Self::SystemdUnit | Self::SystemdUnitBoot => &systemd_unit_v2::CAPABILITIES,
         }
     }
@@ -186,6 +193,7 @@ impl Branch {
         match self {
             Self::Capacity | Self::Inodes => COVERAGE_KIND,
             Self::Memory => host_memory::COVERAGE_KIND,
+            Self::Io => host_io::COVERAGE_KIND,
             Self::SystemdUnit | Self::SystemdUnitBoot => systemd_unit_v2::COVERAGE_KIND,
         }
     }
@@ -293,6 +301,12 @@ impl OwnerFailureCode for MemoryFailureCode {
     }
 }
 
+impl OwnerFailureCode for IoFailureCode {
+    fn wire_token(self) -> &'static str {
+        self.as_str()
+    }
+}
+
 impl OwnerFailureCode for SystemdUnitFailureCode {
     fn wire_token(self) -> &'static str {
         self.as_str()
@@ -338,6 +352,16 @@ fn handle_request(
             };
             match observe_memory(&scope, source, clock) {
                 Ok(observation) => complete_memory_report(request, &scope, &observation),
+                Err(failure) => failed_report(request, branch, failure),
+            }
+        }
+        Branch::Io => {
+            let scope = match validate_io_binding_request(request) {
+                Ok(scope) => scope,
+                Err(response) => return *response,
+            };
+            match observe_io(&scope, source, clock) {
+                Ok(observation) => complete_io_report(request, &scope, &observation),
                 Err(failure) => failed_report(request, branch, failure),
             }
         }
@@ -398,6 +422,7 @@ fn validate_profile_request(request: &HelperRequest) -> Result<Branch, Box<Helpe
         (host_filesystem::CAPACITY_PROFILE_ID, "1") => Branch::Capacity,
         (host_filesystem::INODES_PROFILE_ID, "1") => Branch::Inodes,
         (host_memory::PROFILE_ID, "1") => Branch::Memory,
+        (host_io::PROFILE_ID, "1") => Branch::Io,
         (systemd_unit_v2::PROFILE_ID, "2") => Branch::SystemdUnit,
         (systemd_unit_v3::PROFILE_ID, "3") => Branch::SystemdUnitBoot,
         _ => {
@@ -405,7 +430,7 @@ fn validate_profile_request(request: &HelperRequest) -> Result<Branch, Box<Helpe
                 request,
                 RefusalBoundary::Profile,
                 RefusalCode::UnknownProfile,
-                "this helper implements only nq.host_filesystem_capacity/v1, nq.host_filesystem_inodes/v1, nq.host_memory/v1, and nq.systemd_unit/v2 or v3",
+                "this helper implements only nq.host_filesystem_capacity/v1, nq.host_filesystem_inodes/v1, nq.host_memory/v1, nq.host_io/v1, and nq.systemd_unit/v2 or v3",
                 false,
                 json!({
                     "requested_id": request.profile.id,
@@ -625,6 +650,16 @@ pub trait ResourceSource {
     /// Bounded read-only read of `/proc/pressure/memory`. Errors are typed
     /// collection failures (`psi_not_provided`, `psi_read_failed`).
     fn pressure_memory(&self) -> Result<String, CollectionFailure<MemoryFailureCode>>;
+    /// Bounded read-only read of `/proc/pressure/io`. Errors are typed
+    /// collection failures (`psi_not_provided`, `psi_read_failed`). Sources
+    /// that serve no I/O branch report the accounting as not provided.
+    fn pressure_io(&self) -> Result<String, CollectionFailure<IoFailureCode>> {
+        Err(CollectionFailure::new(
+            IoFailureCode::PsiNotProvided,
+            "this source provides no I/O pressure accounting",
+            false,
+        ))
+    }
     /// The system manager's machine identity and its `ListUnitsByNames`
     /// rows for exactly `unit_name`, uninterpreted, within `budget`. Errors
     /// are typed collection failures (bus, manager, timeout, call, decode).
@@ -785,6 +820,162 @@ fn complete_memory_report(
         payload,
     );
     for capability in host_memory::CAPABILITIES {
+        builder = builder.used_capability(token(Capability::new(capability))?);
+    }
+    builder.build().map_err(|error| format!("{error:?}"))
+}
+
+/// Validated I/O observation ready for the payload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IoObservation {
+    /// `CLOCK_BOOTTIME` whole seconds at the read.
+    pub boot_age_seconds: u64,
+    /// Parsed `some` line.
+    pub some: host_memory::PressureLine,
+    /// Parsed `full` line.
+    pub full: host_memory::PressureLine,
+}
+
+fn validate_io_binding_request(
+    request: &HelperRequest,
+) -> Result<host_io::HostIoScope, Box<HelperResponse>> {
+    if request.binding.scope.kind.as_str() != host_io::SCOPE_KIND {
+        return Err(Box::new(refusal(
+            request,
+            RefusalBoundary::Scope,
+            RefusalCode::UnsupportedScope,
+            "nq.host_io/v1 requires host_io scope",
+            false,
+            json!({}),
+        )));
+    }
+    let scope = host_io::validate_scope_value(
+        &request.binding.scope.value,
+        request.binding.subject.as_str(),
+    )
+    .map_err(|message| {
+        Box::new(refusal(
+            request,
+            RefusalBoundary::Scope,
+            RefusalCode::UnsupportedScope,
+            &message,
+            false,
+            json!({}),
+        ))
+    })?;
+    if request.binding.vantage.kind.as_str() != "local"
+        || request.binding.vantage.value != json!({})
+    {
+        return Err(Box::new(refusal(
+            request,
+            RefusalBoundary::Vantage,
+            RefusalCode::UnsupportedVantage,
+            "nq.host_io/v1 requires the empty local vantage",
+            false,
+            json!({}),
+        )));
+    }
+    Ok(scope)
+}
+
+/// Read-only I/O pressure observation: machine identity, then one bounded
+/// read of the PSI file, then the boot age from `CLOCK_BOOTTIME`. The same
+/// shape as [`observe_memory`], over `/proc/pressure/io`.
+///
+/// # Errors
+///
+/// Returns a typed [`CollectionFailure`] for identity mismatch, PSI absence,
+/// PSI read failure, or a malformed PSI file.
+pub fn observe_io(
+    scope: &host_io::HostIoScope,
+    source: &impl ResourceSource,
+    clock: &impl DeadlineClock,
+) -> Result<IoObservation, CollectionFailure<IoFailureCode>> {
+    let machine_id = source.machine_id().map_err(|error| {
+        CollectionFailure::new(IoFailureCode::MachineIdentityUnavailable, error, true)
+    })?;
+    if machine_id != scope.machine_id {
+        return Err(CollectionFailure::new(
+            IoFailureCode::MachineIdentityMismatch,
+            "live /etc/machine-id differs from the exact request scope",
+            false,
+        ));
+    }
+    let text = source.pressure_io()?;
+    let (some, full) = host_memory::parse_pressure_file(&text)
+        .map_err(|error| CollectionFailure::new(IoFailureCode::PsiMalformed, error, false))?;
+    if full.avg10_centipercent > some.avg10_centipercent
+        || full.avg60_centipercent > some.avg60_centipercent
+        || full.avg300_centipercent > some.avg300_centipercent
+        || full.total_microseconds > some.total_microseconds
+    {
+        return Err(CollectionFailure::new(
+            IoFailureCode::PsiMalformed,
+            "full stall figures exceed some stall figures",
+            false,
+        ));
+    }
+    let boot_age_seconds = clock.now_ns().map_err(|error| {
+        CollectionFailure::new(IoFailureCode::BootClockUnavailable, error, true)
+    })? / 1_000_000_000;
+    Ok(IoObservation {
+        boot_age_seconds,
+        some,
+        full,
+    })
+}
+
+fn complete_io_report(
+    request: &HelperRequest,
+    scope: &host_io::HostIoScope,
+    observation: &IoObservation,
+) -> Result<EvidenceReport, String> {
+    let observed_at = Utc::now();
+    let basis = EvidenceBasis {
+        scope: ScopeGrant {
+            kind: request.binding.scope.kind.to_string(),
+            value: request.binding.scope.value.clone(),
+        },
+        vantage: VantageGrant {
+            kind: request.binding.vantage.kind.to_string(),
+            value: request.binding.vantage.value.clone(),
+        },
+        access_path: host_io::ACCESS_PATH.to_owned(),
+        basis: "kernel_snapshot".to_owned(),
+        regime: "normal".to_owned(),
+        capabilities_used: host_io::CAPABILITIES
+            .iter()
+            .map(|c| (*c).to_owned())
+            .collect(),
+    };
+    let payload = host_io::IoPressurePayload {
+        evidence_basis: basis,
+        machine_id: scope.machine_id.clone(),
+        boot_age_seconds: observation.boot_age_seconds,
+        some: observation.some.clone(),
+        full: observation.full.clone(),
+    };
+    let payload = serde_json::to_value(payload).map_err(|error| error.to_string())?;
+    let mut builder = EvidenceReport::builder(
+        request.profile.clone(),
+        request.binding.clone(),
+        observed_at,
+        ReportStatus::Complete,
+        backend_provenance()?,
+    )
+    .coverage(CoverageDeclaration {
+        kind: token(CoverageKind::new(host_io::COVERAGE_KIND))?,
+        subject: None,
+        state: CoverageState::Complete,
+        detail: None,
+    })
+    .observed_payload(
+        token(ObservationKind::new(host_io::OBSERVATION_KIND))?,
+        request.binding.subject.clone(),
+        observed_at,
+        payload,
+    );
+    for capability in host_io::CAPABILITIES {
         builder = builder.used_capability(token(Capability::new(capability))?);
     }
     builder.build().map_err(|error| format!("{error:?}"))
@@ -1407,6 +1598,55 @@ fn read_bounded(path: &str, max_bytes: usize) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8"))
 }
 
+/// Why a bounded PSI file read failed, before the owning profile types it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PressureReadError {
+    ReadFailed,
+    Malformed,
+    NotProvided,
+}
+
+/// One bounded `O_RDONLY` read of a `/proc/pressure/*` file (a write to such
+/// a file registers a PSI trigger). Errors carry the reason, a bounded
+/// message and the retriable statement for the owner to type.
+fn read_pressure_file(path: &str) -> Result<String, (PressureReadError, String, bool)> {
+    match File::open(path) {
+        Ok(file) => {
+            let mut bytes = Vec::with_capacity(512);
+            file.take(4_097)
+                .read_to_end(&mut bytes)
+                .map_err(|error| (PressureReadError::ReadFailed, error.to_string(), true))?;
+            if bytes.len() > 4_096 {
+                return Err((
+                    PressureReadError::ReadFailed,
+                    "pressure file exceeds its bound".to_owned(),
+                    false,
+                ));
+            }
+            String::from_utf8(bytes).map_err(|_| {
+                (
+                    PressureReadError::Malformed,
+                    "pressure file is not UTF-8".to_owned(),
+                    false,
+                )
+            })
+        }
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(libc::EOPNOTSUPP) =>
+        {
+            Err((
+                PressureReadError::NotProvided,
+                format!(
+                    "{path} is not available to this process (kernel without PSI, psi=0, or a restricted proc view)"
+                ),
+                false,
+            ))
+        }
+        Err(error) => Err((PressureReadError::ReadFailed, error.to_string(), true)),
+    }
+}
+
 impl ResourceSource for LinuxSource {
     fn boot_id(&self) -> Result<String, String> {
         Ok(read_bounded("/proc/sys/kernel/random/boot_id", 37)?
@@ -1419,6 +1659,22 @@ impl ResourceSource for LinuxSource {
 
     fn mountinfo(&self) -> Result<String, String> {
         read_bounded(MOUNTINFO_PATH, MAX_MOUNTINFO_BYTES)
+    }
+
+    fn pressure_io(&self) -> Result<String, CollectionFailure<IoFailureCode>> {
+        // The same bounded O_RDONLY read as the memory file; the typed codes
+        // belong to the I/O profile.
+        read_pressure_file(PRESSURE_IO_PATH).map_err(|(kind, message, retriable)| {
+            CollectionFailure::new(
+                match kind {
+                    PressureReadError::ReadFailed => IoFailureCode::PsiReadFailed,
+                    PressureReadError::Malformed => IoFailureCode::PsiMalformed,
+                    PressureReadError::NotProvided => IoFailureCode::PsiNotProvided,
+                },
+                message,
+                retriable,
+            )
+        })
     }
 
     fn pressure_memory(&self) -> Result<String, CollectionFailure<MemoryFailureCode>> {
@@ -1599,6 +1855,14 @@ mod tests {
                     .to_owned(),
             )
         }
+        fn pressure_io(&self) -> Result<String, CollectionFailure<IoFailureCode>> {
+            // labelwatch-host, 2026-10-18 evening (Monitor #22): the stall
+            // the profile exists to report.
+            Ok(
+                "some avg10=71.20 avg60=78.03 avg300=66.91 total=99951816734\nfull avg10=61.07 avg60=67.44 avg300=58.12 total=88687610549\n"
+                    .to_owned(),
+            )
+        }
         fn systemd_unit(
             &self,
             unit_name: &str,
@@ -1654,6 +1918,86 @@ mod tests {
         let real = LinuxSource.pressure_memory();
         if let Ok(text) = real {
             host_memory::parse_pressure_file(&text).expect("real PSI file parses");
+        }
+    }
+
+    #[test]
+    fn io_observation_binds_machine_and_reads_psi_exactly() {
+        // A source without an I/O branch reports the accounting as not
+        // provided, typed by the I/O profile, never as absence.
+        struct NoIo(Fake);
+        impl ResourceSource for NoIo {
+            fn machine_id(&self) -> Result<String, String> {
+                self.0.machine_id()
+            }
+            fn mountinfo(&self) -> Result<String, String> {
+                self.0.mountinfo()
+            }
+            fn by_uuid_rdev(&self, uuid: &str) -> Result<Option<u64>, String> {
+                self.0.by_uuid_rdev(uuid)
+            }
+            fn statfs_cut(
+                &self,
+                mountpoint: &str,
+                expected: u64,
+            ) -> Result<StatfsCut, CollectionFailure<FilesystemFailureCode>> {
+                self.0.statfs_cut(mountpoint, expected)
+            }
+            fn pressure_memory(&self) -> Result<String, CollectionFailure<MemoryFailureCode>> {
+                self.0.pressure_memory()
+            }
+            fn systemd_unit(
+                &self,
+                unit_name: &str,
+                budget: std::time::Duration,
+            ) -> Result<ManagerUnitReply, CollectionFailure<SystemdUnitFailureCode>> {
+                self.0.systemd_unit(unit_name, budget)
+            }
+        }
+        let ok = Fake {
+            machine_id: "1a5b08928e884e73bf4f60a3c73ef497",
+            rdev: None,
+            cut: good_cut(),
+        };
+        let scope = host_io::HostIoScope {
+            schema: host_io::SCOPE_SCHEMA.to_owned(),
+            machine_id: "1a5b08928e884e73bf4f60a3c73ef497".to_owned(),
+        };
+        let observation =
+            observe_io(&scope, &ok, &FixedClock(1_000 * 1_000_000_000)).expect("observation");
+        assert_eq!(observation.full.avg60_centipercent, 6_744);
+        assert_eq!(observation.some.avg60_centipercent, 7_803);
+        assert_eq!(observation.boot_age_seconds, 1_000);
+        let other = host_io::HostIoScope {
+            machine_id: "ffffffffffffffffffffffffffffffff".to_owned(),
+            ..scope
+        };
+        assert_eq!(
+            observe_io(&other, &ok, &FixedClock(1))
+                .unwrap_err()
+                .code()
+                .as_str(),
+            "machine_identity_mismatch"
+        );
+        let silent = NoIo(Fake {
+            machine_id: "1a5b08928e884e73bf4f60a3c73ef497",
+            rdev: None,
+            cut: good_cut(),
+        });
+        let scope = host_io::HostIoScope {
+            schema: host_io::SCOPE_SCHEMA.to_owned(),
+            machine_id: "1a5b08928e884e73bf4f60a3c73ef497".to_owned(),
+        };
+        assert_eq!(
+            observe_io(&scope, &silent, &FixedClock(1))
+                .unwrap_err()
+                .code()
+                .as_str(),
+            "psi_not_provided"
+        );
+        let real = LinuxSource.pressure_io();
+        if let Ok(text) = real {
+            host_memory::parse_pressure_file(&text).expect("real PSI io file parses");
         }
     }
 

@@ -62,6 +62,12 @@
       "version": 3,
       "descriptor": "nq.systemd_unit.v3.json",
       "semantic_digest": "sha256:25fbbdd320248701b79b3e5f6c3109667b6aa9388ed113678ee0e6ba3c04a853"
+    },
+    {
+      "id": "nq.host_io",
+      "version": 1,
+      "descriptor": "nq.host_io.v1.json",
+      "semantic_digest": "sha256:d031e22f12ca176be70f4cb9c0943919792db31d87e917b96ca337e0707aecab"
     }
   ]
 }

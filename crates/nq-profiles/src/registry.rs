@@ -1,13 +1,14 @@
 //! Explicit compile-time profile registry.
 
 use crate::{
-    ProfileKey, ProfileModule, conformance, host, host_filesystem, host_memory, http_endpoint,
-    synthetic_cache_executor_result, systemd_unit, systemd_unit_v2, systemd_unit_v3,
+    ProfileKey, ProfileModule, conformance, host, host_filesystem, host_io, host_memory,
+    http_endpoint, synthetic_cache_executor_result, systemd_unit, systemd_unit_v2,
+    systemd_unit_v3,
 };
 
 // Adding a compiled profile intentionally requires one visible registry entry.
 // There is no runtime scanning, inventory mechanism, or integration enum.
-static PROFILES: [&'static dyn ProfileModule; 10] = [
+static PROFILES: [&'static dyn ProfileModule; 11] = [
     &conformance::MODULE,
     &host::MODULE,
     &systemd_unit::MODULE,
@@ -18,6 +19,7 @@ static PROFILES: [&'static dyn ProfileModule; 10] = [
     &host_memory::MODULE,
     &systemd_unit_v2::MODULE,
     &systemd_unit_v3::MODULE,
+    &host_io::MODULE,
 ];
 
 /// Returns all profile modules compiled into this binary.

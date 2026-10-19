@@ -7,16 +7,16 @@
 
 use nq_host_resource_helper::{CollectionFailure, failure_code_vocabularies};
 use nq_profiles::{
-    ProfileModule, host_filesystem, host_filesystem::FilesystemFailureCode, host_memory,
-    host_memory::MemoryFailureCode, systemd_unit_v2, systemd_unit_v2::SystemdUnitFailureCode,
-    systemd_unit_v3,
+    ProfileModule, host_filesystem, host_filesystem::FilesystemFailureCode, host_io,
+    host_io::IoFailureCode, host_memory, host_memory::MemoryFailureCode, systemd_unit_v2,
+    systemd_unit_v2::SystemdUnitFailureCode, systemd_unit_v3,
 };
 
 #[test]
 fn the_helper_publishes_exactly_the_owner_vocabularies() {
     let vocabularies = failure_code_vocabularies();
     let entries = vocabularies.as_array().expect("array");
-    assert_eq!(entries.len(), 5);
+    assert_eq!(entries.len(), 6);
     for (entry, module, expected) in [
         (
             &entries[0],
@@ -42,6 +42,11 @@ fn the_helper_publishes_exactly_the_owner_vocabularies() {
             &entries[4],
             &systemd_unit_v3::MODULE as &dyn ProfileModule,
             systemd_unit_v3::SystemdUnitFailureCode::tokens(),
+        ),
+        (
+            &entries[5],
+            &host_io::MODULE as &dyn ProfileModule,
+            IoFailureCode::tokens(),
         ),
     ] {
         assert_eq!(entry["id"], module.descriptor().profile.id);

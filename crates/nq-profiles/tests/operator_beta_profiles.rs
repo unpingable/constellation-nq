@@ -310,6 +310,7 @@ fn registry_contains_the_two_generic_operator_beta_profiles() {
             ("nq.host_memory", 1),
             ("nq.systemd_unit", 2),
             ("nq.systemd_unit", 3),
+            ("nq.host_io", 1),
         ]
     );
 }
