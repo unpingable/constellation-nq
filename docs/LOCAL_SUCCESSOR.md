@@ -44,14 +44,19 @@ identity, and both are retained. Validation therefore accepts a started fence
 whose run has a committed local artifact and whose exact intake/run link is
 retained, so `qualify`, `export`, `inspect`, and replay of that acquisition
 work, read-only included. The next writable engine open (`acquire-next-local`,
-`replay-local-successor`, `collect`, or `nqd`) records the missing completion
-through the ordinary idempotent completion write and prints
+`replay-local-successor`, `collect`, or `nqd`) and `nq admin validate --full`
+each record the missing completion, before recording any validation
+watermark, through the ordinary idempotent completion write and print
 `nq: warning: local successor acquisition ... committed artifact ... but its
 completion was not recorded; recorded provider_intake_completed from the
 committed artifact`. The recorded event is byte-identical to the one the
 interrupted acquisition would have written; only its `occurred_at` is the
 recovery time. If that write is refused, the open still succeeds, warns, and
-leaves the validation watermark in place so the next open retries. Rollover
+leaves the validation watermark in place (full validation likewise warns and
+records no watermark), so no watermark ever covers an unrecorded completion
+and the next writable open or full validation finds the fence again and
+retries. Nothing is printed when the acquisition's own completion landed
+first. Rollover
 and archive classify phases alone and keep refusing such a fence until the
 completion is recorded. A started fence with no committed artifact for its run
 remains an unknown outcome and refuses exactly as before.
