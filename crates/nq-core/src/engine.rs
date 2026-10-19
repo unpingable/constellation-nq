@@ -25,10 +25,11 @@ use nq_store::{
     DiagnosticArtifactByteState, DiagnosticArtifactCommitInput, DiagnosticArtifactLocalOriginInput,
     DiagnosticArtifactLookup, DiagnosticArtifactOrigin, DiagnosticArtifactSchemaSupport,
     EvaluationCommitInput, EvaluationInput, EvaluationProfileBinding, EvidenceSnapshot,
-    FindingEventInput, FindingEvidenceInput, FindingSnapshotRow, GenesisInput, ObservationInput,
-    ProfileDescriptorInput, ProviderIntakeCommit, ProviderIntakeInput, ProviderIntakePreflight,
-    RefusalInput, ReportErrorInput, ReportInput, RunInput, RunResultStatusInput, StatusEventInput,
-    Store, SubmissionDisposition, SubmissionInput,
+    FindingEventInput, FindingEvidenceInput, FindingSnapshotRow, GenesisInput,
+    LocalSuccessorDispatchResidue, ObservationInput, ProfileDescriptorInput, ProviderIntakeCommit,
+    ProviderIntakeInput, ProviderIntakePreflight, RefusalInput, ReportErrorInput, ReportInput,
+    RunInput, RunResultStatusInput, StatusEventInput, Store, SubmissionDisposition,
+    SubmissionInput,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -6311,14 +6312,71 @@ fn classify_local_successor_acquisition(
     {
         return Ok(LocalSuccessorOutcome::Completed);
     }
-    store
-        .local_successor_artifact_without_completion(acquisition_id)?
-        .map(LocalSuccessorOutcome::CommittedWithoutCompletion)
-        .ok_or_else(|| {
-            EngineError::Invariant(
-                "local successor acquisition is incomplete or outcome-unknown".into(),
-            )
-        })
+    if let Some(artifact) = store.local_successor_artifact_without_completion(acquisition_id)? {
+        return Ok(LocalSuccessorOutcome::CommittedWithoutCompletion(artifact));
+    }
+    let abandoned = store
+        .local_successor_dispatch_residue(acquisition_id)?
+        .is_some_and(LocalSuccessorDispatchResidue::is_empty);
+    Err(EngineError::Invariant(if abandoned {
+        "local successor acquisition is incomplete or outcome-unknown: no run, intake or \
+         artifact is retained for it; unless a process still holds this acquisition it \
+         was abandoned, and it is never dispatched again"
+            .into()
+    } else {
+        "local successor acquisition is incomplete or outcome-unknown".into()
+    }))
+}
+
+/// How retained history settles one local successor fence, for consumers
+/// that read a sealed, quiescent, fully checkpointed snapshot and cannot
+/// write (rollover inspection). On a live store, or on a copy whose
+/// write-ahead log was not applied, an acquisition still between its fence
+/// and its intake transaction would read as abandoned; the inspector refuses
+/// such inputs before classifying.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalSuccessorTerminalState {
+    /// `provider_invocation_started` then `provider_intake_completed`.
+    Completed,
+    /// The artifact committed but the completion was never recorded (NQ #14);
+    /// a writable engine open records it, a sealed snapshot cannot.
+    CompletedUnrecorded(Sha256Digest),
+    /// Only `provider_invocation_started`, and no retained row names the
+    /// fence's run or intake: the process died or was refused between the
+    /// fence transaction and the intake transaction. The provider's capture
+    /// was never retained, and an existing acquisition never re-invokes the
+    /// provider, so no completion can follow. Nothing in history depends on
+    /// it.
+    AbandonedBeforeIntake,
+    /// Every other shape: a started fence with partial residue, or an unknown
+    /// phase sequence. This remains the refusal boundary.
+    Unknown,
+}
+
+/// Classify one fence for a read-only consumer of a sealed, quiescent,
+/// checkpointed snapshot. Only `Unknown` is unresolved work; the other three
+/// states are settled history.
+#[doc(hidden)]
+pub fn classify_local_successor_terminal_state(
+    store: &Store,
+    acquisition_id: &str,
+) -> Result<LocalSuccessorTerminalState, EngineError> {
+    let phases = store.local_successor_acquisition_phases(acquisition_id)?;
+    if validate_local_successor_terminal_phases(&phases).is_ok() {
+        return Ok(LocalSuccessorTerminalState::Completed);
+    }
+    if let Some(artifact) = store.local_successor_artifact_without_completion(acquisition_id)? {
+        return Ok(LocalSuccessorTerminalState::CompletedUnrecorded(artifact));
+    }
+    if phases == ["provider_invocation_started"]
+        && store
+            .local_successor_dispatch_residue(acquisition_id)?
+            .is_some_and(LocalSuccessorDispatchResidue::is_empty)
+    {
+        return Ok(LocalSuccessorTerminalState::AbandonedBeforeIntake);
+    }
+    Ok(LocalSuccessorTerminalState::Unknown)
 }
 
 /// Record the completion an interrupted acquisition would have written,
@@ -20739,6 +20797,10 @@ sys.stdout.write("\n")
             // Read-only consumers (qualify, export) accept the committed
             // outcome and write nothing.
             let reader = Store::open_read_only(&config.database_path).expect("read-only open");
+            assert_eq!(
+                classify_local_successor_terminal_state(&reader, acquisition_id).expect("classify"),
+                LocalSuccessorTerminalState::CompletedUnrecorded(artifact.clone())
+            );
             validate_semantic_history_since_open(&reader).expect("history validates");
             validate_referenced_diagnostic_artifact(&reader, &artifact)
                 .expect("artifact closure validates");
@@ -20913,6 +20975,77 @@ sys.stdout.write("\n")
             );
             assert!(successor_completion_event(&config, pending_id).is_empty());
         }
+        assert_sealed_reader_settles_fences(&config, &watcher, &semantic, pending_id);
+    }
+
+    /// A sealed-snapshot reader settles a started-only fence without residue
+    /// as abandoned, and a started-only fence whose run left residue as
+    /// unknown; the refusal text differs accordingly.
+    fn assert_sealed_reader_settles_fences(
+        config: &NqConfig,
+        watcher: &WatcherConfig,
+        semantic: &str,
+        pending_id: &str,
+    ) {
+        let reader = Store::open_read_only(&config.database_path).expect("read-only open");
+        assert_eq!(
+            classify_local_successor_terminal_state(&reader, pending_id).expect("classify"),
+            LocalSuccessorTerminalState::AbandonedBeforeIntake
+        );
+        let error = classify_local_successor_acquisition(&reader, pending_id)
+            .expect_err("abandoned fence refuses");
+        assert!(
+            error
+                .to_string()
+                .contains("no run, intake or artifact is retained for it"),
+            "{error}"
+        );
+        drop(reader);
+
+        // A fence whose run left residue (here: the initial diagnostic's
+        // committed run, with an intake the fence never linked) is unknown,
+        // not abandoned, and keeps the plain refusal.
+        let run_with_residue: String = rusqlite::Connection::open_with_flags(
+            &config.database_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("raw reader")
+        .query_row(
+            "SELECT run_id FROM local_diagnostic_artifact_origins ORDER BY completed_at LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("initial diagnostic run");
+        let residue_id = "pending-with-residue";
+        let mut engine = reopen_with_test_identity(config).expect("store opens");
+        engine
+            .store
+            .commit_local_successor_dispatch(&nq_store::LocalSuccessorAcquisitionIntentInput {
+                acquisition_id: residue_id.into(),
+                watcher_instance_id: watcher.instance_id.clone(),
+                watcher_semantic_digest: semantic.to_owned(),
+                selection_digest: local_successor_selection_digest(watcher).expect("selection"),
+                run_id: run_with_residue,
+                intake_id: "residue-intake".into(),
+                intent: canonical(&json!({
+                    "schema": "nq.local_successor_acquisition_intent.v1",
+                    "acquisition_id": residue_id,
+                }))
+                .expect("intent"),
+            })
+            .expect("residue fence");
+        assert_eq!(
+            classify_local_successor_terminal_state(&engine.store, residue_id).expect("classify"),
+            LocalSuccessorTerminalState::Unknown
+        );
+        let error = classify_local_successor_acquisition(&engine.store, residue_id)
+            .expect_err("unknown fence refuses");
+        assert!(
+            error
+                .to_string()
+                .ends_with("local successor acquisition is incomplete or outcome-unknown"),
+            "{error}"
+        );
     }
 
     #[test]

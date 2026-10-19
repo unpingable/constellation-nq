@@ -71,6 +71,28 @@ maintenance declaration. `current_maintenance` is evaluated at `INSPECTED_AT`.
 Pending, claimed-only, missing, malformed, contradictory, or unknown retained
 state refuses eligibility. Preserve this JSON as the transfer inventory.
 
+Each `local_successor_acquisitions` entry carries a `state`. `completed` is the
+exact two-phase fence. `completed_unrecorded` is a fence whose artifact
+committed but whose completion event was never written (NQ #14); the next
+writable engine open on the live store records it, so run that open before
+sealing if you want the archive to carry the event. `abandoned_before_intake`
+is a fence holding only `provider_invocation_started` while no retained row
+names its run or intake: the acquisition was refused or killed between its
+fence transaction and its intake transaction, so the provider's capture was
+never retained, and an existing acquisition never re-invokes the provider, so
+no completion can follow; nothing in history depends on it. All three are
+settled history. Every other fence is `pending_or_unknown` and refuses
+eligibility.
+
+These states are sound only for the sealed, quiescent, checkpointed snapshot
+this procedure produces. An immutable open ignores a `-wal` file, so a copy
+taken with frames still in its write-ahead log would show an older, partial
+state in which a committed acquisition looks abandoned; the inspector refuses
+any database that has a non-empty `-wal` beside it. Note that the pre-2026-10
+inspector refused `completed_unrecorded` and `abandoned_before_intake` as
+pending; this is a deliberate widening, and `state` is an additive field under
+the unchanged `nq.rollover-inspection/v1` schema.
+
 Record a before/after archive inventory and require every sealed path and byte
 to remain unchanged. The seal detects content mutation; it is not a filesystem
 write lock, so keep the archive read-only and its namespace stable.

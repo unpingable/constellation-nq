@@ -9,10 +9,12 @@
 //! delete anything.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
+use nq_core::engine::{LocalSuccessorTerminalState, classify_local_successor_terminal_state};
 use nq_protocol::Sha256Digest;
 use nq_store::{CanonicalDocument, Store};
 use serde::Serialize;
@@ -145,6 +147,15 @@ struct LocalSuccessorAcquisitionIdentity {
     run_id: String,
     intake_id: String,
     phases: Vec<String>,
+    /// `completed`, `completed_unrecorded` (artifact committed, completion
+    /// event never written: a writable open records it), or
+    /// `abandoned_before_intake` (fence only, and no retained row names its
+    /// run or intake: the provider's capture was never retained and an
+    /// existing acquisition never re-invokes the provider, so nothing depends
+    /// on it and nothing can complete it). Sound only for the sealed,
+    /// checkpointed snapshot the inspector requires. Any other fence is
+    /// `pending_or_unknown` and also a refusal.
+    state: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -177,6 +188,7 @@ pub(crate) fn inspect_rollover(
     let inspected = DateTime::parse_from_rfc3339(inspected_at)
         .context("inspected_at must be an explicit RFC3339 timestamp")?
         .with_timezone(&Utc);
+    require_no_unapplied_wal(database_path)?;
     let store = Store::open_immutable(database_path)
         .context("open operator-selected rollover snapshot immutable")?;
     let mut report = inspect_store(&store, inspected, inspected_at.to_owned())?;
@@ -186,6 +198,30 @@ pub(crate) fn inspect_rollover(
         archive_verification_claimed: false,
     };
     Ok(report)
+}
+
+/// An immutable open ignores the write-ahead log, so a database copied with
+/// frames still in its `-wal` file would read as an older, partial state in
+/// which a committed acquisition can look abandoned. A sealed archive is
+/// checkpointed and has no such file; anything else is refused here.
+fn require_no_unapplied_wal(database_path: &Path) -> Result<()> {
+    // The immutable open canonicalizes too; a symlinked database must not
+    // hide the write-ahead log that sits beside its target.
+    let database_path = fs::canonicalize(database_path)
+        .context("canonicalize operator-selected rollover snapshot")?;
+    let mut wal = database_path.as_os_str().to_owned();
+    wal.push("-wal");
+    match fs::metadata(&wal) {
+        Ok(metadata) if metadata.len() > 0 => bail!(
+            "rollover snapshot has an unapplied write-ahead log ({} bytes at {}); an immutable \
+             read would see a partial state, so checkpoint the source before sealing it",
+            metadata.len(),
+            Path::new(&wal).display()
+        ),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("inspect rollover snapshot write-ahead log"),
+    }
 }
 
 fn inspect_store(
@@ -643,13 +679,25 @@ fn scan_local_successor_acquisitions(
             after = Some(row.acquisition_id.clone());
             validate_local_successor_intent(&row)?;
             let phases = store.local_successor_acquisition_phases(&row.acquisition_id)?;
-            if !local_successor_phases_are_terminal(&phases) {
-                refusals.push(RolloverRefusal {
-                    kind: "local_successor_acquisition",
-                    identity: row.acquisition_id.clone(),
-                    state: "pending_or_unknown".into(),
-                });
-            }
+            let state = match classify_local_successor_terminal_state(store, &row.acquisition_id)
+                .with_context(|| {
+                    format!(
+                        "classify local successor acquisition {}",
+                        row.acquisition_id
+                    )
+                })? {
+                LocalSuccessorTerminalState::Completed => "completed",
+                LocalSuccessorTerminalState::CompletedUnrecorded(_) => "completed_unrecorded",
+                LocalSuccessorTerminalState::AbandonedBeforeIntake => "abandoned_before_intake",
+                LocalSuccessorTerminalState::Unknown => {
+                    refusals.push(RolloverRefusal {
+                        kind: "local_successor_acquisition",
+                        identity: row.acquisition_id.clone(),
+                        state: "pending_or_unknown".into(),
+                    });
+                    "pending_or_unknown"
+                }
+            };
             identities.push(LocalSuccessorAcquisitionIdentity {
                 acquisition_id: row.acquisition_id,
                 watcher_instance_id: row.watcher_instance_id,
@@ -658,6 +706,7 @@ fn scan_local_successor_acquisitions(
                 run_id: row.run_id,
                 intake_id: row.intake_id,
                 phases,
+                state,
             });
         }
         if page_len < PAGE as usize {
@@ -689,10 +738,6 @@ fn validate_local_successor_intent(
         bail!("local-successor columns differ from canonical intent");
     }
     Ok(())
-}
-
-fn local_successor_phases_are_terminal(phases: &[String]) -> bool {
-    nq_core::engine::validate_local_successor_terminal_phases(phases).is_ok()
 }
 
 fn canonical(bytes: &[u8], label: &str) -> Result<CanonicalDocument> {
@@ -938,20 +983,121 @@ mod tests {
         assert!(notification_state(&events).is_err());
     }
 
+    fn fence(store: &mut Store, acquisition_id: &str, run_id: &str, intake_id: &str) {
+        let digest = |label: &str| nq_protocol::sha256_bytes(label.as_bytes()).into_string();
+        store
+            .commit_local_successor_dispatch(&nq_store::LocalSuccessorAcquisitionIntentInput {
+                acquisition_id: acquisition_id.into(),
+                watcher_instance_id: "host-local".into(),
+                watcher_semantic_digest: digest("watcher"),
+                selection_digest: digest("selection"),
+                run_id: run_id.into(),
+                intake_id: intake_id.into(),
+                intent: document(json!({
+                    "schema":"nq.local_successor_acquisition_intent.v1",
+                    "acquisition_id":acquisition_id,
+                    "watcher_instance_id":"host-local",
+                    "watcher_semantic_digest":digest("watcher"),
+                    "selection_digest":digest("selection"),
+                    "run_id":run_id,
+                    "intake_id":intake_id,
+                })),
+            })
+            .expect("fence");
+    }
+
     #[test]
-    fn local_successor_phase_gate_accepts_only_the_exact_terminal_pair() {
-        assert!(local_successor_phases_are_terminal(&[
-            "provider_invocation_started".into(),
-            "provider_intake_completed".into(),
-        ]));
-        for phases in [
-            vec![],
-            vec!["provider_invocation_started".into()],
-            vec!["provider_intake_completed".into()],
-            vec!["provider_invocation_started".into(), "unknown".into()],
-        ] {
-            assert!(!local_successor_phases_are_terminal(&phases));
-        }
+    fn fence_abandoned_before_any_intake_is_settled_history_not_pending_work() {
+        let (_root, mut store) = store();
+        // The runner's acquisition committed its fence, then the intake write
+        // was refused (or the process died): no run, intake, refusal, status
+        // or artifact row names the dispatched identifiers.
+        fence(
+            &mut store,
+            "abandoned-a",
+            "run-abandoned-a",
+            "intake-abandoned-a",
+        );
+        let report = inspect_store(&store, parse_time(AT, "at").unwrap(), AT.into()).unwrap();
+        assert!(report.eligible, "{:?}", report.refusals);
+        assert!(report.refusals.is_empty());
+        assert_eq!(report.local_successor_acquisitions.len(), 1);
+        let identity = &report.local_successor_acquisitions[0];
+        assert_eq!(identity.state, "abandoned_before_intake");
+        assert_eq!(identity.phases, ["provider_invocation_started"]);
+    }
+
+    #[test]
+    fn fence_whose_run_left_residue_still_refuses_rollover() {
+        let (root, mut store) = store();
+        fence(&mut store, "residue-a", "run-residue-a", "intake-residue-a");
+        // A row naming the dispatched run proves the collection got past the
+        // fence; its outcome is unknown to this snapshot, not absent. (The
+        // engine tests cover the same boundary with a real collection run.)
+        let raw = rusqlite::Connection::open(root.path().join("nq.db")).expect("raw writer");
+        raw.execute_batch("PRAGMA foreign_keys = OFF")
+            .expect("fixture pragma");
+        raw.execute(
+            "INSERT INTO status_events (status_event_id, component_kind, component_id, run_id, \
+             state, code, detail_json, observed_at) \
+             VALUES ('fixture-status', 'instance', 'host-local', ?1, 'unknown', 'fixture', ?2, ?3)",
+            rusqlite::params!["run-residue-a", br#"{"fixture":true}"#.as_slice(), AT],
+        )
+        .expect("residue row");
+        let report = inspect_store(&store, parse_time(AT, "at").unwrap(), AT.into()).unwrap();
+        assert!(!report.eligible);
+        assert_eq!(report.refusals.len(), 1);
+        assert_eq!(report.refusals[0].kind, "local_successor_acquisition");
+        assert_eq!(report.refusals[0].state, "pending_or_unknown");
+        assert_eq!(
+            report.local_successor_acquisitions[0].state,
+            "pending_or_unknown"
+        );
+    }
+
+    #[test]
+    fn fence_whose_intake_left_residue_still_refuses_rollover() {
+        let (root, mut store) = store();
+        fence(&mut store, "residue-b", "run-residue-b", "intake-residue-b");
+        // The intake side alone (a provider intake linked to some run) is
+        // residue too: the dispatched intake identifier was retained.
+        let raw = rusqlite::Connection::open(root.path().join("nq.db")).expect("raw writer");
+        raw.execute_batch("PRAGMA foreign_keys = OFF")
+            .expect("fixture pragma");
+        raw.execute(
+            "INSERT INTO local_watcher_provider_intakes (intake_id, run_id) VALUES (?1, ?2)",
+            rusqlite::params!["intake-residue-b", "some-other-run"],
+        )
+        .expect("residue row");
+        let report = inspect_store(&store, parse_time(AT, "at").unwrap(), AT.into()).unwrap();
+        assert!(!report.eligible);
+        assert_eq!(report.refusals.len(), 1);
+        assert_eq!(report.refusals[0].state, "pending_or_unknown");
+    }
+
+    #[test]
+    fn snapshot_with_an_unapplied_wal_is_refused_before_classification() {
+        let (root, mut store) = store();
+        fence(
+            &mut store,
+            "abandoned-b",
+            "run-abandoned-b",
+            "intake-abandoned-b",
+        );
+        // The store is still open: its last writes sit in the -wal file. An
+        // immutable read would not see them and could settle a live fence.
+        let path = root.path().join("nq.db");
+        let wal = fs::metadata(root.path().join("nq.db-wal")).expect("wal present");
+        assert!(
+            wal.len() > 0,
+            "fixture must leave frames in the write-ahead log"
+        );
+        let error = inspect_rollover(&path, AT).expect_err("unapplied WAL refuses");
+        assert!(
+            error.to_string().contains("unapplied write-ahead log"),
+            "{error:#}"
+        );
+        drop(store);
     }
 
     #[test]

@@ -3616,6 +3616,52 @@ impl Store {
         Ok((intake_matches == 1).then_some(artifact))
     }
 
+    /// Every retained row that names the run or intake a local successor
+    /// fence dispatched, or `None` for an unknown acquisition. A fence whose
+    /// residue is empty was interrupted before any provider intake, run,
+    /// refusal, status or artifact row committed: nothing in history depends
+    /// on it, and once the dispatching process is gone nothing can complete
+    /// it, because the provider's capture was never retained and an existing
+    /// acquisition never re-invokes the provider.
+    pub fn local_successor_dispatch_residue(
+        &self,
+        acquisition_id: &str,
+    ) -> Result<Option<LocalSuccessorDispatchResidue>, StoreError> {
+        let Some((run_id, intake_id)) = self
+            .connection
+            .query_row(
+                "SELECT run_id, intake_id FROM local_successor_acquisition_intents WHERE acquisition_id = ?1",
+                [acquisition_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let (run_rows, intake_rows): (i64, i64) = self.connection.query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM watcher_runs WHERE run_id = ?1)
+             + (SELECT COUNT(*) FROM local_diagnostic_artifact_origins WHERE run_id = ?1)
+             + (SELECT COUNT(*) FROM local_watcher_provider_intakes WHERE run_id = ?1)
+             + (SELECT COUNT(*) FROM provider_intake_acknowledgments WHERE run_id = ?1)
+             + (SELECT COUNT(*) FROM raw_submissions WHERE run_id = ?1)
+             + (SELECT COUNT(*) FROM refusals WHERE run_id = ?1)
+             + (SELECT COUNT(*) FROM status_events WHERE run_id = ?1)
+             + (SELECT COUNT(*) FROM evaluation_runs WHERE trigger_run_id = ?1)
+             + (SELECT COUNT(*) FROM legacy_v3_watcher_run_intake_gaps WHERE run_id = ?1)
+             + (SELECT COUNT(*) FROM provider_intake_attempts WHERE retired_run_id = ?1),
+               (SELECT COUNT(*) FROM provider_intake_attempts WHERE intake_id = ?2)
+             + (SELECT COUNT(*) FROM local_watcher_provider_intakes WHERE intake_id = ?2)
+             + (SELECT COUNT(*) FROM provider_intake_acknowledgments WHERE intake_id = ?2)",
+            params![run_id, intake_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(Some(LocalSuccessorDispatchResidue {
+            run_rows: u64::try_from(run_rows).unwrap_or(u64::MAX),
+            intake_rows: u64::try_from(intake_rows).unwrap_or(u64::MAX),
+        }))
+    }
+
     /// Whether this handle may write: a writable file-backed open, or an
     /// in-memory store. Read-only opens may not.
     #[must_use]
@@ -5725,6 +5771,23 @@ pub struct LocalSuccessorAcquisitionIntentRow {
     pub run_id: String,
     pub intake_id: String,
     pub intent: CanonicalDocument,
+}
+
+/// Retained rows naming the run and intake a local successor fence dispatched.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalSuccessorDispatchResidue {
+    /// Rows in any table that names the fence's run identifier.
+    pub run_rows: u64,
+    /// Rows in any table that names the fence's intake identifier.
+    pub intake_rows: u64,
+}
+
+impl LocalSuccessorDispatchResidue {
+    /// No retained row names the run or the intake.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.run_rows == 0 && self.intake_rows == 0
+    }
 }
 
 /// A verified SQLite backup artifact.

@@ -82,6 +82,17 @@ Use the artifact's actual timestamps and the consuming contract's currentness
 policy. Missing, pending, unknown or contradictory history is not success.
 Neither collection nor replay grants downstream authorization or continuation.
 
+A fence that holds only `provider_invocation_started` while no retained row
+names its run or intake was interrupted between the fence transaction and the
+intake transaction (a refused write under contention, a timeout kill). The
+provider's capture was never retained, and an existing acquisition never
+re-invokes the provider, so no completion can follow once the dispatching
+process is gone. `replay-local-successor` and `acquire-next-local` refuse it
+with a message that says so (conditionally: on a live store the dispatching
+process may still be running). Rollover inspection of a sealed, checkpointed
+snapshot reports it as `abandoned_before_intake`, settled history rather than
+pending work (see [Rollover](ROLLOVER.md)).
+
 ## Compatibility and qualification
 
 Schema12 requires the verified backup and explicit12→13 upgrade described in
