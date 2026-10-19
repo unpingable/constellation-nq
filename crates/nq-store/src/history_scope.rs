@@ -1480,6 +1480,40 @@ impl crate::Store {
             .map_err(StoreError::from)
     }
 
+    /// Local successor acquisitions holding only `provider_invocation_started`
+    /// whose run already has a committed local diagnostic artifact, among the
+    /// fences whose obligations rows beyond `frontier` can change (every
+    /// fence without a frontier), in acquisition order. These are the
+    /// acquisitions interrupted between their artifact commit and their
+    /// completion write.
+    pub fn local_successor_acquisitions_without_completion(
+        &self,
+        frontier: Option<&HistoryFrontier>,
+    ) -> Result<Vec<String>, StoreError> {
+        let scope = frontier.map_or(Scope::FULL, Scope::after);
+        let affected = scope.affected_with(
+            "intent.acquisition_id",
+            "local_successor_acquisition_intents",
+            &[("local_successor_acquisition_events", "acquisition_id")],
+            &[format!(
+                "SELECT named.acquisition_id FROM local_successor_acquisition_intents AS named \
+                 WHERE named.run_id IN (SELECT child.run_id FROM local_diagnostic_artifact_origins \
+                 AS child WHERE {})",
+                scope.new_rows("local_diagnostic_artifact_origins", "child"),
+            )],
+        );
+        self.ids_since(&format!(
+            "SELECT intent.acquisition_id FROM local_successor_acquisition_intents AS intent \
+             WHERE {affected} \
+             AND NOT EXISTS (SELECT 1 FROM local_successor_acquisition_events AS event \
+                 WHERE event.acquisition_id = intent.acquisition_id \
+                 AND event.phase = 'provider_intake_completed') \
+             AND EXISTS (SELECT 1 FROM local_diagnostic_artifact_origins AS origin \
+                 WHERE origin.run_id = intent.run_id) \
+             ORDER BY intent.acquisition_id"
+        ))
+    }
+
     /// Diagnostic artifacts whose commitment, payload, or origin is beyond
     /// `frontier`, in commitment order.
     pub fn diagnostic_artifact_ids_since(

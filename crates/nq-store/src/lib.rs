@@ -3571,6 +3571,45 @@ impl Store {
         Ok(())
     }
 
+    /// The artifact an acquisition committed before its completion was
+    /// recorded: when the fence holds exactly `provider_invocation_started`,
+    /// its run has a committed local diagnostic artifact, and the fence's
+    /// exact provider intake/run link is retained, this returns that artifact,
+    /// which is the one value the completion event carries. `None` for every
+    /// other fence (completed, unknown, or without a committed artifact).
+    pub fn local_successor_artifact_without_completion(
+        &self,
+        acquisition_id: &str,
+    ) -> Result<Option<Sha256Digest>, StoreError> {
+        let Some((run_id, intake_id)) = self
+            .connection
+            .query_row(
+                "SELECT run_id, intake_id FROM local_successor_acquisition_intents WHERE acquisition_id = ?1",
+                [acquisition_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        if self.local_successor_acquisition_phases(acquisition_id)?
+            != ["provider_invocation_started"]
+        {
+            return Ok(None);
+        }
+        let Some(artifact) =
+            diagnostic_artifact_id_for_run_on_connection(&self.connection, &run_id)?
+        else {
+            return Ok(None);
+        };
+        let intake_matches: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM local_watcher_provider_intakes WHERE intake_id = ?1 AND run_id = ?2",
+            params![intake_id, run_id],
+            |row| row.get(0),
+        )?;
+        Ok((intake_matches == 1).then_some(artifact))
+    }
+
     /// Append the only terminal fence after the existing provider/intake and
     /// artifact transaction has committed.
     pub fn complete_local_successor_acquisition(

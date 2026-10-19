@@ -2315,14 +2315,14 @@ impl CollectionEngine {
     /// Returns a version, integrity, or database-opening error.
     pub fn open(config: &NqConfig) -> Result<Self, EngineError> {
         validate_compiled_config(config)?;
-        let store = Store::open_with_capacity(
+        let mut store = Store::open_with_capacity(
             &config.database_path,
             config.retention.horizon_seconds,
             config.retention.byte_ceiling,
             config.retention.reserve_bytes,
             config.retention.auxiliary_bytes,
         )?;
-        let replay = validate_engine_open_history(&store)?;
+        let replay = validate_engine_open_history(&mut store)?;
         Ok(Self {
             config: config.clone(),
             store,
@@ -2382,14 +2382,14 @@ impl CollectionEngine {
                 watcher.instance_id
             )));
         }
-        let store = Store::open_with_capacity(
+        let mut store = Store::open_with_capacity(
             &config.database_path,
             config.retention.horizon_seconds,
             config.retention.byte_ceiling,
             config.retention.reserve_bytes,
             config.retention.auxiliary_bytes,
         )?;
-        let replay = validate_engine_open_history(&store)?;
+        let replay = validate_engine_open_history(&mut store)?;
         let mut engine = Self {
             config: config.clone(),
             store,
@@ -2417,14 +2417,14 @@ impl CollectionEngine {
         evaluator_identity: Result<EvaluatorRuntimeIdentity, String>,
     ) -> Result<Self, EngineError> {
         validate_compiled_config(config)?;
-        let store = Store::open_with_capacity(
+        let mut store = Store::open_with_capacity(
             &config.database_path,
             config.retention.horizon_seconds,
             config.retention.byte_ceiling,
             config.retention.reserve_bytes,
             config.retention.auxiliary_bytes,
         )?;
-        let replay = validate_engine_open_history(&store)?;
+        let replay = validate_engine_open_history(&mut store)?;
         Ok(Self {
             config: config.clone(),
             store,
@@ -2797,11 +2797,15 @@ impl CollectionEngine {
                     "local successor acquisition differs from exact watcher binding".into(),
                 ));
             }
-            validate_local_successor_terminal_phases(
-                &self
-                    .store
-                    .local_successor_acquisition_phases(acquisition_id)?,
-            )?;
+            if let LocalSuccessorOutcome::CommittedWithoutCompletion(artifact) =
+                classify_local_successor_acquisition(&self.store, acquisition_id)?
+            {
+                record_recovered_local_successor_completion(
+                    &mut self.store,
+                    acquisition_id,
+                    &artifact,
+                )?;
+            }
             let artifact = self
                 .store
                 .diagnostic_artifact_id_for_run(&existing.run_id)?
@@ -2823,6 +2827,13 @@ impl CollectionEngine {
                 "local successor completed without a qualified diagnostic artifact".into(),
             )
         })?;
+        #[cfg(test)]
+        if INTERRUPT_BEFORE_SUCCESSOR_COMPLETION_FOR_TEST.with(|interrupt| interrupt.replace(false))
+        {
+            return Err(EngineError::Invariant(
+                "test: interrupted before the local successor completion write".into(),
+            ));
+        }
         self.store
             .complete_local_successor_acquisition(acquisition_id, &artifact)?;
         reopen_diagnostic_artifact(&self.store, &artifact)
@@ -2850,11 +2861,9 @@ impl CollectionEngine {
                 "local successor replay differs from exact watcher binding".into(),
             ));
         }
-        validate_local_successor_terminal_phases(
-            &self
-                .store
-                .local_successor_acquisition_phases(acquisition_id)?,
-        )?;
+        // A committed artifact whose completion was not recorded is a known
+        // outcome; the writable open of this engine records it.
+        classify_local_successor_acquisition(&self.store, acquisition_id)?;
         let artifact = self
             .store
             .diagnostic_artifact_id_for_run(&existing.run_id)?
@@ -2933,7 +2942,7 @@ impl CollectionEngine {
                 // replay cursor follows it without re-reading history.
                 prune_replay_cursor(&self.store, &mut self.replay, &expired.boundary)?;
             } else {
-                self.replay = validate_engine_open_history(&self.store)?;
+                self.replay = validate_engine_open_history(&mut self.store)?;
             }
         }
         self.retention_attempt = Some(attempt);
@@ -5105,9 +5114,7 @@ fn validate_local_v2_provider_correspondence(
                 artifact.artifact_id.0
             )));
         }
-        validate_local_successor_terminal_phases(
-            &store.local_successor_acquisition_phases(&successor.acquisition_id)?,
-        )?;
+        classify_local_successor_acquisition(store, &successor.acquisition_id)?;
         semantic_identity(
             "nq.deliberate_successor_single_admitted_report",
             "1",
@@ -6278,8 +6285,92 @@ fn local_successor_selection_digest(watcher: &WatcherConfig) -> Result<String, E
     .to_owned())
 }
 
-/// Shared read-only classification for archive and rollover consumers. Unknown
-/// phase shapes are not historical success and must remain a refusal boundary.
+/// How a local successor fence ended, as far as retained history proves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalSuccessorOutcome {
+    /// `provider_invocation_started` then `provider_intake_completed`.
+    Completed,
+    /// Only `provider_invocation_started`, but the acquisition's artifact
+    /// transaction committed (NQ #14): the run's artifact and the fence's
+    /// exact intake/run link are retained, so the completion event is fully
+    /// determined and the outcome is known success. It is not yet recorded.
+    CommittedWithoutCompletion(Sha256Digest),
+}
+
+/// Classify one fence. Every shape other than the two above (no committed
+/// artifact for a started fence, or an unknown phase sequence) remains the
+/// existing refusal.
+fn classify_local_successor_acquisition(
+    store: &Store,
+    acquisition_id: &str,
+) -> Result<LocalSuccessorOutcome, EngineError> {
+    if validate_local_successor_terminal_phases(
+        &store.local_successor_acquisition_phases(acquisition_id)?,
+    )
+    .is_ok()
+    {
+        return Ok(LocalSuccessorOutcome::Completed);
+    }
+    store
+        .local_successor_artifact_without_completion(acquisition_id)?
+        .map(LocalSuccessorOutcome::CommittedWithoutCompletion)
+        .ok_or_else(|| {
+            EngineError::Invariant(
+                "local successor acquisition is incomplete or outcome-unknown".into(),
+            )
+        })
+}
+
+/// Record the completion an interrupted acquisition would have written,
+/// through the same idempotent store write, and say so on stderr.
+fn record_recovered_local_successor_completion(
+    store: &mut Store,
+    acquisition_id: &str,
+    artifact: &Sha256Digest,
+) -> Result<(), EngineError> {
+    store.complete_local_successor_acquisition(acquisition_id, artifact)?;
+    eprintln!(
+        "nq: warning: local successor acquisition {acquisition_id} committed artifact {artifact} \
+         but its completion was not recorded; recorded provider_intake_completed from the \
+         committed artifact"
+    );
+    Ok(())
+}
+
+/// Record the completion of every acquisition among the fences this open
+/// re-checks whose artifact committed without one. Returns `false` when a
+/// refusal (contention or capacity) kept a completion from being recorded;
+/// the caller then leaves the watermark in place so the next open retries.
+fn recover_local_successor_completions(store: &mut Store) -> Result<bool, EngineError> {
+    let frontier = engine_core_frontier(store);
+    let mut recorded_all = true;
+    for acquisition_id in
+        store.local_successor_acquisitions_without_completion(frontier.as_ref())?
+    {
+        let LocalSuccessorOutcome::CommittedWithoutCompletion(artifact) =
+            classify_local_successor_acquisition(store, &acquisition_id)?
+        else {
+            continue;
+        };
+        match record_recovered_local_successor_completion(store, &acquisition_id, &artifact) {
+            Ok(()) => {}
+            Err(EngineError::Store(error)) if error.is_refusal() => {
+                eprintln!(
+                    "nq: warning: could not record the completion of local successor acquisition \
+                     {acquisition_id} ({error}); the next engine open retries"
+                );
+                recorded_all = false;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(recorded_all)
+}
+
+/// Shared read-only classification of phases alone, for archive and rollover
+/// consumers. Unknown phase shapes are not historical success and must remain
+/// a refusal boundary. A fence whose artifact committed without a recorded
+/// completion stays refused here until an engine open records it.
 #[doc(hidden)]
 pub fn validate_local_successor_terminal_phases(phases: &[String]) -> Result<(), EngineError> {
     if phases == ["provider_invocation_started", "provider_intake_completed"] {
@@ -8544,7 +8635,7 @@ fn engine_semantic_state(
 ///
 /// Returns the engine's replay cursor: the evaluation replay state at the
 /// frontier this open certified, or `None` when it certified none.
-fn validate_engine_open_history(store: &Store) -> Result<Option<ReplayCursor>, EngineError> {
+fn validate_engine_open_history(store: &mut Store) -> Result<Option<ReplayCursor>, EngineError> {
     validate_core_history_since_open(store)?;
     let mut evaluation = None;
     let semantic = match engine_semantic_state(store) {
@@ -8581,6 +8672,9 @@ fn validate_engine_open_history(store: &Store) -> Result<Option<ReplayCursor>, E
             nq_store::SemanticCertification::NotEstablished
         }
     };
+    if !recover_local_successor_completions(store)? {
+        return Ok(cursor);
+    }
     match store.record_validation_watermark(certification, engine_validation_rules()) {
         Ok(_) => Ok(cursor),
         Err(nq_store::StoreError::WatermarkWrite(message)) => {
@@ -9052,6 +9146,15 @@ fn validate_expiry_candidates(
         validate_status_event_record(store, row, EvaluationHistory::AlreadyValidated)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// One-shot: the next local successor acquisition stops after its
+    /// artifact commit and before its completion write, as a kill there
+    /// would (tests only).
+    static INTERRUPT_BEFORE_SUCCESSOR_COMPLETION_FOR_TEST: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -20544,6 +20647,213 @@ sys.stdout.write("\n")
             ])
             .is_err()
         );
+    }
+
+    fn successor_phases(config: &NqConfig, acquisition_id: &str) -> Vec<String> {
+        Store::open_read_only(&config.database_path)
+            .expect("read-only open")
+            .local_successor_acquisition_phases(acquisition_id)
+            .expect("phases")
+    }
+
+    fn successor_completion_event(config: &NqConfig, acquisition_id: &str) -> Vec<Vec<u8>> {
+        rusqlite::Connection::open_with_flags(
+            &config.database_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("raw reader")
+        .prepare(
+            "SELECT event_json FROM local_successor_acquisition_events \
+             WHERE acquisition_id = ?1 AND phase = 'provider_intake_completed'",
+        )
+        .expect("event query")
+        .query_map([acquisition_id], |row| row.get(0))
+        .expect("events")
+        .collect::<Result<_, _>>()
+        .expect("event rows")
+    }
+
+    /// NQ #14: a kill between the artifact commit and the completion write
+    /// leaves a committed artifact under a fence holding only
+    /// `provider_invocation_started`. The store still opens, read-only
+    /// qualification and export accept it without writing, and the next
+    /// writable engine open records the exact completion event the
+    /// interrupted acquisition would have written, once.
+    #[test]
+    fn committed_artifact_under_pending_fence_is_recovered_on_reopen() {
+        for with_watermark in [true, false] {
+            let directory = tempfile::tempdir().expect("temporary directory");
+            let Some((mut engine, watcher, _mode)) = admitted_host_diagnostic_fixture(
+                directory.path(),
+                "interrupted-successor-genesis",
+                b"watermark-evaluator",
+            ) else {
+                return;
+            };
+            engine
+                .diagnostic_execute(&watcher)
+                .expect("initial diagnostic");
+            engine
+                .diagnostic_acquire_successor_local(&watcher, "completed-before")
+                .expect("ordinary successor");
+            let acquisition_id = "interrupted-successor";
+            INTERRUPT_BEFORE_SUCCESSOR_COMPLETION_FOR_TEST.with(|interrupt| interrupt.set(true));
+            let error = engine
+                .diagnostic_acquire_successor_local(&watcher, acquisition_id)
+                .expect_err("interrupted before the completion write");
+            assert!(error.to_string().contains("interrupted"), "{error}");
+            let fence = engine
+                .store
+                .local_successor_acquisition(acquisition_id)
+                .expect("fence read")
+                .expect("fence");
+            let artifact = engine
+                .store
+                .diagnostic_artifact_id_for_run(&fence.run_id)
+                .expect("artifact read")
+                .expect("the artifact transaction committed");
+            let config = engine.config.clone();
+            drop(engine);
+            assert_eq!(
+                successor_phases(&config, acquisition_id),
+                ["provider_invocation_started"]
+            );
+            if !with_watermark {
+                fs::remove_file(nq_store::watermark_path(&config.database_path))
+                    .expect("remove watermark");
+            }
+
+            // Read-only consumers (qualify, export) accept the committed
+            // outcome and write nothing.
+            let reader = Store::open_read_only(&config.database_path).expect("read-only open");
+            validate_semantic_history_since_open(&reader).expect("history validates");
+            validate_referenced_diagnostic_artifact(&reader, &artifact)
+                .expect("artifact closure validates");
+            qualify_diagnostic_admission(&reader, &artifact).expect("qualifies");
+            let retained = reopen_diagnostic_artifact(&reader, &artifact)
+                .expect("export reopens")
+                .canonical_bytes()
+                .expect("artifact bytes");
+            drop(reader);
+            assert_eq!(
+                successor_phases(&config, acquisition_id),
+                ["provider_invocation_started"]
+            );
+
+            // The next writable engine open records the completion.
+            let mut engine = reopen_with_test_identity(&config).expect("store opens");
+            assert_eq!(
+                successor_phases(&config, acquisition_id),
+                ["provider_invocation_started", "provider_intake_completed"]
+            );
+            assert_eq!(
+                successor_completion_event(&config, acquisition_id),
+                [canonical(&json!({
+                    "schema": "nq.local_successor_acquisition_event.v1",
+                    "acquisition_id": acquisition_id,
+                    "phase": "provider_intake_completed",
+                    "artifact_id": artifact,
+                }))
+                .expect("expected event")
+                .as_bytes()
+                .to_vec()]
+            );
+            let replay = engine
+                .diagnostic_replay_local_successor(&watcher, acquisition_id)
+                .expect("replay of the recovered acquisition");
+            assert_eq!(replay.canonical_bytes().expect("replay bytes"), retained);
+            let intakes = engine
+                .store
+                .provider_intakes_bounded(100, None)
+                .expect("intakes")
+                .len();
+            let again = engine
+                .diagnostic_acquire_successor_local(&watcher, acquisition_id)
+                .expect("same id reopens the retained artifact");
+            assert_eq!(again.canonical_bytes().expect("bytes"), retained);
+            assert_eq!(
+                engine
+                    .store
+                    .provider_intakes_bounded(100, None)
+                    .expect("intakes")
+                    .len(),
+                intakes,
+                "recovery never dispatches a second provider attempt"
+            );
+            drop(engine);
+            drop(reopen_with_test_identity(&config).expect("reopen is idempotent"));
+            assert_eq!(successor_completion_event(&config, acquisition_id).len(), 1);
+            full_validation_and_watermark(&config);
+        }
+    }
+
+    /// A fence holding only `provider_invocation_started` with no committed
+    /// artifact for its run is still an unknown outcome: the store opens as
+    /// before, nothing is recorded, and acquisition and replay refuse.
+    #[test]
+    fn pending_fence_without_committed_artifact_still_refuses() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let Some((mut engine, watcher, _mode)) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "pending-successor-genesis",
+            b"watermark-evaluator",
+        ) else {
+            return;
+        };
+        engine
+            .diagnostic_execute(&watcher)
+            .expect("initial diagnostic");
+        let pending_id = "pending-without-artifact";
+        let semantic = canonical(&watcher).expect("watcher").digest().to_owned();
+        engine
+            .store
+            .commit_local_successor_dispatch(&nq_store::LocalSuccessorAcquisitionIntentInput {
+                acquisition_id: pending_id.into(),
+                watcher_instance_id: watcher.instance_id.clone(),
+                watcher_semantic_digest: semantic.clone(),
+                selection_digest: local_successor_selection_digest(&watcher).expect("selection"),
+                run_id: "pending-run".into(),
+                intake_id: "pending-intake".into(),
+                intent: canonical(&json!({
+                    "schema": "nq.local_successor_acquisition_intent.v1",
+                    "acquisition_id": pending_id,
+                }))
+                .expect("intent"),
+            })
+            .expect("pending fence");
+        let config = engine.config.clone();
+        drop(engine);
+        for with_watermark in [true, false] {
+            if !with_watermark {
+                fs::remove_file(nq_store::watermark_path(&config.database_path)).ok();
+            }
+            let engine = reopen_with_test_identity(&config).expect("store opens");
+            assert_eq!(
+                successor_phases(&config, pending_id),
+                ["provider_invocation_started"]
+            );
+            let error = engine
+                .diagnostic_replay_local_successor(&watcher, pending_id)
+                .expect_err("pending replay refuses");
+            assert!(
+                error
+                    .to_string()
+                    .contains("local successor acquisition is incomplete or outcome-unknown"),
+                "{error}"
+            );
+            drop(engine);
+            let mut engine = reopen_with_test_identity(&config).expect("store opens");
+            let error = engine
+                .diagnostic_acquire_successor_local(&watcher, pending_id)
+                .expect_err("pending acquisition refuses");
+            assert!(
+                error
+                    .to_string()
+                    .contains("local successor acquisition is incomplete or outcome-unknown"),
+                "{error}"
+            );
+            assert!(successor_completion_event(&config, pending_id).is_empty());
+        }
     }
 
     #[test]

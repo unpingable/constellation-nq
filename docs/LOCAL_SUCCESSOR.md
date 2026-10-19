@@ -35,6 +35,27 @@ but unresolved acquisition also refuses; changing the ID is not recovery of
 that acquisition. Inspect the retained run/intake and reconcile the original
 producer before deciding whether a genuinely new observation is appropriate.
 
+The artifact and the `provider_intake_completed` record are written by two
+transactions. An acquisition interrupted between them (killed, or its
+completion write refused) leaves a fence holding only
+`provider_invocation_started` beside a committed artifact. That outcome is
+known: the completion event carries only the acquisition and the artifact
+identity, and both are retained. Validation therefore accepts a started fence
+whose run has a committed local artifact and whose exact intake/run link is
+retained, so `qualify`, `export`, `inspect`, and replay of that acquisition
+work, read-only included. The next writable engine open (`acquire-next-local`,
+`replay-local-successor`, `collect`, or `nqd`) records the missing completion
+through the ordinary idempotent completion write and prints
+`nq: warning: local successor acquisition ... committed artifact ... but its
+completion was not recorded; recorded provider_intake_completed from the
+committed artifact`. The recorded event is byte-identical to the one the
+interrupted acquisition would have written; only its `occurred_at` is the
+recovery time. If that write is refused, the open still succeeds, warns, and
+leaves the validation watermark in place so the next open retries. Rollover
+and archive classify phases alone and keep refusing such a fence until the
+completion is recorded. A started fence with no committed artifact for its run
+remains an unknown outcome and refuses exactly as before.
+
 For this profile, evaluation selects exactly the newly admitted report. Prior
 matching history remains retained for finding and watermark continuity, but
 is excluded from this single-report detector invocation. Other ordinary
