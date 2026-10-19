@@ -442,7 +442,46 @@ pub fn checkpoint_or_bound_before_write(
         envelope.max_pages
     };
     apply_page_ceiling(connection, ceiling)?;
+    PAGE_CEILING_LOWERED.with(|lowered| lowered.set(ceiling < envelope.max_pages));
     envelope.preflight(path)
+}
+
+thread_local! {
+    /// Whether the write transaction this thread is admitting or running
+    /// was admitted under a page ceiling lowered for a held WAL.
+    static PAGE_CEILING_LOWERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Scope of one admitted write transaction: clears the lowered-ceiling mark
+/// when the transaction (or a failed attempt to begin it) ends.
+pub(crate) struct CeilingScope(());
+
+impl CeilingScope {
+    pub(crate) fn begin() -> Self {
+        Self(())
+    }
+}
+
+impl Drop for CeilingScope {
+    fn drop(&mut self) {
+        PAGE_CEILING_LOWERED.with(|lowered| lowered.set(false));
+    }
+}
+
+/// SQLite's disk-full from a write admitted under a lowered page ceiling is
+/// the held reader's WAL, not capacity: report it as that contention.
+pub(crate) fn classify_sqlite_error(error: rusqlite::Error) -> StoreError {
+    let full = matches!(
+        &error,
+        rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::DiskFull
+    );
+    if full && PAGE_CEILING_LOWERED.with(std::cell::Cell::get) {
+        return contention(format!(
+            "{CHECKPOINT_CONTENTION}: this write needs more pages than the page ceiling the \
+             held WAL leaves ({error})"
+        ));
+    }
+    StoreError::Sqlite(error)
 }
 
 const CHECKPOINT_CONTENTION: &str = "reader or writer prevents bounded WAL checkpoint";
@@ -929,8 +968,9 @@ mod tests {
         pad_wal_to_frames(&path, &envelope, envelope.max_pages - pages);
         let prior = stored_status_ids(&store);
         let error = store.record_status(&status(1, 64 * 1024)).unwrap_err();
+        // Not a disk-full: the held reader's WAL, not capacity, stopped it.
         assert!(
-            matches!(&error, StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) if code.code == rusqlite::ErrorCode::DiskFull),
+            matches!(&error, StoreError::Refused(crate::Refusal::Contention(text)) if text.starts_with("reader or writer prevents bounded WAL checkpoint") && text.contains("page ceiling")),
             "{error:?}"
         );
         assert!(error.is_refusal());
@@ -942,6 +982,15 @@ mod tests {
         assert_eq!(stored_status_ids(&store).len(), prior.len() + 1);
         assert_eq!(max_page_count(&store), envelope.max_pages);
         store.validate().unwrap();
+        // Without a held reader the envelope's own page ceiling still
+        // surfaces as SQLite's disk-full capacity refusal.
+        let full = (2..256)
+            .find_map(|index| store.record_status(&status(index, 64 * 1024)).err())
+            .expect("the envelope's page ceiling is reached");
+        assert!(
+            matches!(&full, StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _)) if code.code == rusqlite::ErrorCode::DiskFull),
+            "{full:?}"
+        );
     }
 
     #[test]
@@ -1524,6 +1573,9 @@ pub(crate) struct GuardedTransaction<'a> {
     // Ownership is retained solely for its destructor after SQLite completion.
     #[allow(dead_code)]
     pub(crate) guard: Option<OperationGuard>,
+    // Declared after the transaction, so it drops after the rollback.
+    #[allow(dead_code)]
+    pub(crate) ceiling: CeilingScope,
 }
 impl<'a> std::ops::Deref for GuardedTransaction<'a> {
     type Target = rusqlite::Transaction<'a>;

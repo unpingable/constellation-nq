@@ -1317,9 +1317,12 @@ already reserves, so the file stays inside `wal_bytes`, and the main file and
 shared-memory index stay inside the aggregate bound derived for a full WAL.
 The write is refused with the unchanged contention refusal ("reader or writer
 prevents bounded WAL checkpoint") only when the database already has more
-pages than that lowered ceiling; a transaction that would grow the database
-beyond it fails with SQLite's disk-full error, a capacity refusal that commits
-nothing. The capacity preflight still runs before and after, so the per-file
+pages than that lowered ceiling. A transaction that would grow the database
+beyond the lowered ceiling commits nothing and is reported as the same
+contention refusal, extended with "this write needs more pages than the page
+ceiling the held WAL leaves", not as disk full: the held reader, not capacity,
+stopped it. Without a lowered ceiling SQLite's disk-full stays a capacity
+refusal. The capacity preflight still runs before and after, so the per-file
 limit and aggregate ceiling refuse exactly as before. The next write whose
 checkpoint succeeds truncates the WAL and restores the full ceiling.
 `checkpoint_wal` (the daemon's stop checkpoint), initialization, restore,

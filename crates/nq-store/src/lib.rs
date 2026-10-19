@@ -271,7 +271,7 @@ pub enum StoreError {
     HistoricalEvidenceExpired(String),
     /// A SQLite operation failed.
     #[error("SQLite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    Sqlite(#[source] rusqlite::Error),
     /// A filesystem operation failed.
     #[error("filesystem error: {0}")]
     Io(#[from] std::io::Error),
@@ -349,6 +349,12 @@ impl StoreError {
             }
             _ => false,
         }
+    }
+}
+
+impl From<rusqlite::Error> for StoreError {
+    fn from(error: rusqlite::Error) -> Self {
+        capacity::classify_sqlite_error(error)
     }
 }
 
@@ -4961,17 +4967,20 @@ impl Store {
 
     fn immediate_transaction(&mut self) -> Result<capacity::GuardedTransaction<'_>, StoreError> {
         self.require_current_schema()?;
+        let ceiling = capacity::CeilingScope::begin();
         let guard = self.write_guard()?;
         Ok(capacity::GuardedTransaction {
             transaction: self
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)?,
             guard,
+            ceiling,
         })
     }
 
     fn shared_immediate_transaction(&self) -> Result<capacity::GuardedTransaction<'_>, StoreError> {
         self.require_current_schema()?;
+        let ceiling = capacity::CeilingScope::begin();
         let guard = self.write_guard()?;
         Ok(capacity::GuardedTransaction {
             transaction: Transaction::new_unchecked(
@@ -4979,6 +4988,7 @@ impl Store {
                 TransactionBehavior::Immediate,
             )?,
             guard,
+            ceiling,
         })
     }
 
