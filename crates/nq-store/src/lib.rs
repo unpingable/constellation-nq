@@ -3617,12 +3617,14 @@ impl Store {
     }
 
     /// Append the only terminal fence after the existing provider/intake and
-    /// artifact transaction has committed.
+    /// artifact transaction has committed. Returns `true` when this call
+    /// appended it and `false` when the identical completion was already
+    /// recorded.
     pub fn complete_local_successor_acquisition(
         &mut self,
         acquisition_id: &str,
         artifact_id: &Sha256Digest,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let transaction = self.immediate_transaction()?;
         let (run_id, intake_id): (String, String) = transaction.query_row(
             "SELECT run_id, intake_id FROM local_successor_acquisition_intents WHERE acquisition_id = ?1",
@@ -3650,7 +3652,7 @@ impl Store {
         let existing: Option<(Vec<u8>,String)> = transaction.query_row("SELECT event_json,event_digest FROM local_successor_acquisition_events WHERE acquisition_id=?1 AND phase='provider_intake_completed'", [acquisition_id], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
         if let Some((bytes, digest)) = existing {
             if bytes == event.as_bytes() && digest == event.digest() {
-                return Ok(());
+                return Ok(false);
             }
             return Err(StoreError::ReplayConflict(
                 "local successor completion was reused for different bytes".into(),
@@ -3658,7 +3660,7 @@ impl Store {
         }
         transaction.execute("INSERT INTO local_successor_acquisition_events (acquisition_id,event_number,phase,event_json,event_digest,occurred_at) VALUES (?1,2,'provider_intake_completed',?2,?3,?4)", params![acquisition_id,event.as_bytes(),event.digest(),now_utc()])?;
         transaction.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     /// Reopen the exact canonical collection result bound to one completed run.

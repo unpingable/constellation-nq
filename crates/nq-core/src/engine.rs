@@ -6328,12 +6328,14 @@ fn record_recovered_local_successor_completion(
     acquisition_id: &str,
     artifact: &Sha256Digest,
 ) -> Result<(), EngineError> {
-    store.complete_local_successor_acquisition(acquisition_id, artifact)?;
-    eprintln!(
-        "nq: warning: local successor acquisition {acquisition_id} committed artifact {artifact} \
-         but its completion was not recorded; recorded provider_intake_completed from the \
-         committed artifact"
-    );
+    // `false`: the acquisition's own completion landed first; nothing to say.
+    if store.complete_local_successor_acquisition(acquisition_id, artifact)? {
+        eprintln!(
+            "nq: warning: local successor acquisition {acquisition_id} committed artifact \
+             {artifact} but its completion was not recorded; recorded provider_intake_completed \
+             from the committed artifact"
+        );
+    }
     Ok(())
 }
 
@@ -20779,6 +20781,13 @@ sys.stdout.write("\n")
                     .len(),
                 intakes,
                 "recovery never dispatches a second provider attempt"
+            );
+            assert!(
+                !engine
+                    .store
+                    .complete_local_successor_acquisition(acquisition_id, &artifact)
+                    .expect("idempotent completion"),
+                "an existing completion is reported as already present"
             );
             drop(engine);
             drop(reopen_with_test_identity(&config).expect("reopen is idempotent"));
