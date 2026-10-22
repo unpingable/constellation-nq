@@ -1,5 +1,6 @@
 //! Bounded notification-delivery custody. It owns no attention or admission.
 
+use crate::escalation::Policy;
 use anyhow::{Context, Result, bail};
 use nq_core::config::{
     CommandConfig, NotificationRouteConfig, NotificationTransportKind, NqConfig, ResourceLimits,
@@ -28,35 +29,6 @@ const INTENT_V1: &str = "nq.notification_delivery_intent.v1";
 const INTENT_V2: &str = "nq.notification_delivery_intent.v2";
 const PAGERDUTY_ENQUEUE_URL: &str = "https://events.pagerduty.com/v2/enqueue";
 const PAGERDUTY_DETAILS_MAX_BYTES: usize = 4_096;
-const PAGERDUTY_COMPONENTS: [&str; 6] = [
-    "nq",
-    "host_posture",
-    "nightshift",
-    "docket",
-    "ag",
-    "service",
-];
-/// The rule anchors of the beta alert registry (page and warn), excluding the
-/// retired `docket-not-ready` anchor.
-const PAGERDUTY_RULES: [&str; 17] = [
-    "nq-no-fresh-acquisition",
-    "host-posture-unknown",
-    "nightshift-recurrence-missing",
-    "docket-unsettled",
-    "ag-executor-unavailable",
-    "service-down",
-    "host-disk",
-    "nq-latency-near-bound",
-    "nq-open-cost-growing",
-    "nq-pending-acquisition",
-    "host-posture-refusals",
-    "host-posture-retention",
-    "nightshift-evidence-stale",
-    "nightshift-cycle-slow",
-    "docket-reconciliation-lag",
-    "ag-repeated-refusals",
-    "build-identity",
-];
 const V2_FIELDS: [&str; 5] = ["action", "condition", "severity", "runbook_url", "details"];
 /// The closed response classes an evaluator assigns. Only `page` may reach an
 /// interruption channel; NQ never derives the class from any other field.
@@ -219,6 +191,10 @@ fn condition_token(label: &str, value: &str, maximum: usize, validation: Validat
     Ok(())
 }
 
+pub(crate) fn policy_token(label: &str, value: &str) -> Result<()> {
+    condition_token(label, value, 64, Validation::Submission)
+}
+
 fn secret_like_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     [
@@ -254,7 +230,11 @@ fn reject_secret_like_keys(value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn validate_pagerduty_fields(fields: &PagerDutyFields, validation: Validation) -> Result<()> {
+fn validate_pagerduty_fields(
+    fields: &PagerDutyFields,
+    validation: Validation,
+    policy: Option<&Policy>,
+) -> Result<()> {
     if !matches!(fields.action.as_str(), "trigger" | "resolve") {
         bail!("notification action must be trigger or resolve");
     }
@@ -268,13 +248,10 @@ fn validate_pagerduty_fields(fields: &PagerDutyFields, validation: Validation) -
     condition_token("site", &condition.site, 64, validation)?;
     condition_token("component", &condition.component, 64, validation)?;
     condition_token("rule", &condition.rule, 64, validation)?;
-    if validation == Validation::Submission
-        && !PAGERDUTY_COMPONENTS.contains(&condition.component.as_str())
-    {
-        bail!("notification condition component is not in the closed component set");
-    }
-    if validation == Validation::Submission && !PAGERDUTY_RULES.contains(&condition.rule.as_str()) {
-        bail!("notification condition rule is not a beta alert registry anchor");
+    if validation == Validation::Submission {
+        policy
+            .context("submission requires escalation policy")?
+            .validate_condition(&condition.rule, &condition.component)?;
     }
     if let Some(target_class) = &condition.target_class {
         condition_token("target_class", target_class, 48, validation)?;
@@ -323,6 +300,7 @@ fn required_json_string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
 
 fn read_intent(
     path: &std::path::Path,
+    policy: &Policy,
 ) -> Result<(Intent, Option<PagerDutyFields>, CanonicalDocument)> {
     let file = OpenOptions::new()
         .read(true)
@@ -348,20 +326,20 @@ fn read_intent(
     if document.as_bytes() != bytes {
         bail!("notification intent must be canonical JSON");
     }
-    let (intent, pager) = parse_submitted(value)?;
+    let (intent, pager) = parse_submitted(value, policy)?;
     Ok((intent, pager, document))
 }
 
 fn parse_retained_intent(value: Value) -> Result<Intent> {
-    parse_intent_value(value, Validation::Retained).map(|(intent, _)| intent)
+    parse_intent_value(value, Validation::Retained, None).map(|(intent, _)| intent)
 }
 
-fn parse_submitted(value: Value) -> Result<(Intent, Option<PagerDutyFields>)> {
-    parse_intent_value(value, Validation::Submission)
+fn parse_submitted(value: Value, policy: &Policy) -> Result<(Intent, Option<PagerDutyFields>)> {
+    parse_intent_value(value, Validation::Submission, Some(policy))
 }
 
 fn parse_retained(value: Value) -> Result<(Intent, Option<PagerDutyFields>)> {
-    parse_intent_value(value, Validation::Retained)
+    parse_intent_value(value, Validation::Retained, None)
 }
 
 /// Parse a v1 intent, or a v2 intent as its v1 fields plus the `PagerDuty`
@@ -369,6 +347,7 @@ fn parse_retained(value: Value) -> Result<(Intent, Option<PagerDutyFields>)> {
 fn parse_intent_value(
     value: Value,
     validation: Validation,
+    policy: Option<&Policy>,
 ) -> Result<(Intent, Option<PagerDutyFields>)> {
     match value.get("schema").and_then(Value::as_str) {
         Some(INTENT_V1) => Ok((parse_intent_fields(value, 512)?, None)),
@@ -384,7 +363,7 @@ fn parse_intent_value(
                 }
             }
             let pager: PagerDutyFields = serde_json::from_value(Value::Object(added))?;
-            validate_pagerduty_fields(&pager, validation)?;
+            validate_pagerduty_fields(&pager, validation, policy)?;
             Ok((
                 parse_intent_fields(Value::Object(common), 1024)?,
                 Some(pager),
@@ -1111,7 +1090,8 @@ fn deliver_local_with<O: LocalInboxWriteOperation>(
     route_ref: &str,
     operation: &O,
 ) -> Result<Value> {
-    let (intent, pager, intent_document) = read_intent(intent_path)?;
+    let policy = Policy::load(config)?;
+    let (intent, pager, intent_document) = read_intent(intent_path, &policy)?;
     if pager.is_some() {
         bail!("nq.notification_delivery_intent.v2 is accepted only by pagerduty routes");
     }
@@ -1133,11 +1113,13 @@ fn deliver_local_with<O: LocalInboxWriteOperation>(
     if let Some(existing) = retained_duplicate(config, route, &intent, &intent_document)? {
         return Ok(existing);
     }
+    policy.authorize(route_ref, intent.response_class(), None)?;
     replay_nightshift(route, &intent)?;
     let owner_receipt = intent.owner_receipt.clone();
     let (root, directory_binding) = local_inbox_binding(route)?;
     let payload = render_local_inbox(&intent, &directory_binding)?;
     validate_local_inbox_payload(&payload)?;
+    policy.validate_payload(route_ref, None, Some(payload.as_bytes().len()))?;
     let original_intent: Value = serde_json::from_slice(intent_document.as_bytes())?;
     let retained_intent = CanonicalDocument::from_serializable(&json!({
         "schema":"nq.local-inbox-delivery-intent/v1",
@@ -1262,9 +1244,11 @@ where
     F: FnOnce(String, Vec<u8>, u64) -> Fut,
     Fut: Future<Output = Result<TransportResult>>,
 {
-    let (intent, pager, intent_document) = read_intent(intent_path)?;
+    let policy = Policy::load(config)?;
+    let (intent, pager, intent_document) = read_intent(intent_path, &policy)?;
     submit_parsed_with_dispatch(
         config,
+        &policy,
         intent,
         pager,
         intent_document,
@@ -1282,6 +1266,7 @@ where
 )]
 async fn submit_parsed_with_dispatch<R, P, F, Fut>(
     config: &NqConfig,
+    policy: &Policy,
     intent: Intent,
     pager: Option<PagerDutyFields>,
     intent_document: CanonicalDocument,
@@ -1299,6 +1284,7 @@ where
     let key = pager.as_ref().map(|pager| dedup_key(&pager.condition));
     let mut result = submit_custody(
         config,
+        policy,
         intent,
         pager.as_ref(),
         intent_document,
@@ -1321,6 +1307,7 @@ where
 )]
 async fn submit_custody<R, P, F, Fut>(
     config: &NqConfig,
+    policy: &Policy,
     intent: Intent,
     pager: Option<&PagerDutyFields>,
     intent_document: CanonicalDocument,
@@ -1361,6 +1348,21 @@ where
     // so replay runs only for intents that could be sent.
     let not_page = pagerduty && !intent.is_page();
     if !not_page {
+        policy.authorize(
+            route_ref,
+            intent.response_class(),
+            pager.map(|fields| {
+                (
+                    fields.condition.rule.as_str(),
+                    fields.condition.component.as_str(),
+                )
+            }),
+        )?;
+        policy.validate_payload(
+            route_ref,
+            pager.and_then(|fields| fields.details.as_ref()),
+            None,
+        )?;
         replay_nightshift(route, &intent)?;
     }
     let owner_receipt = intent.owner_receipt.clone();
@@ -1496,12 +1498,23 @@ pub(crate) async fn submit(
     route_ref: &str,
     enable_network: bool,
 ) -> Result<Value> {
-    let (intent, pager, document) = read_intent(intent_path)?;
-    submit_parsed(config, intent, pager, document, route_ref, enable_network).await
+    let policy = Policy::load(config)?;
+    let (intent, pager, document) = read_intent(intent_path, &policy)?;
+    submit_parsed(
+        config,
+        &policy,
+        intent,
+        pager,
+        document,
+        route_ref,
+        enable_network,
+    )
+    .await
 }
 
 async fn submit_parsed(
     config: &NqConfig,
+    policy: &Policy,
     intent: Intent,
     pager: Option<PagerDutyFields>,
     document: CanonicalDocument,
@@ -1517,6 +1530,7 @@ async fn submit_parsed(
     let max_response_bytes = route.map_or(1, |route| route.max_response_bytes);
     submit_parsed_with_dispatch(
         config,
+        policy,
         intent,
         pager,
         document,
@@ -1565,6 +1579,7 @@ async fn submit_parsed(
 /// event identity. The condition, and therefore the dedup key, is unchanged.
 fn prepare_resubmission(
     config: &NqConfig,
+    policy: &Policy,
     notification_id: &str,
     stable_event_id: &str,
 ) -> Result<(Intent, Option<PagerDutyFields>, CanonicalDocument)> {
@@ -1601,7 +1616,7 @@ fn prepare_resubmission(
     if document.as_bytes().len() > MAX_INTENT_BYTES {
         bail!("notification intent exceeds {MAX_INTENT_BYTES} bytes");
     }
-    let (intent, pager) = parse_submitted(value)?;
+    let (intent, pager) = parse_submitted(value, policy)?;
     Ok((intent, pager, document))
 }
 
@@ -1613,9 +1628,20 @@ pub(crate) async fn resubmit(
     stable_event_id: &str,
     enable_network: bool,
 ) -> Result<Value> {
-    let (intent, pager, document) = prepare_resubmission(config, notification_id, stable_event_id)?;
+    let policy = Policy::load(config)?;
+    let (intent, pager, document) =
+        prepare_resubmission(config, &policy, notification_id, stable_event_id)?;
     let route = intent.route_reference.clone();
-    let mut result = submit_parsed(config, intent, pager, document, &route, enable_network).await?;
+    let mut result = submit_parsed(
+        config,
+        &policy,
+        intent,
+        pager,
+        document,
+        &route,
+        enable_network,
+    )
+    .await?;
     result["resubmitted_from"] = json!(notification_id);
     Ok(result)
 }
@@ -1687,6 +1713,7 @@ pub(crate) fn historical_pagerduty_intent(route: &str, stable_event_id: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use nq_core::config::CONFIG_SCHEMA;
     use rusqlite::Connection;
     use sha2::{Digest as _, Sha256};
@@ -1695,6 +1722,29 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tempfile::TempDir;
+
+    fn parse_submitted(value: Value) -> Result<(Intent, Option<PagerDutyFields>)> {
+        super::parse_submitted(value, &Policy::compiled(&[])?)
+    }
+
+    fn read_intent(
+        path: &std::path::Path,
+    ) -> Result<(Intent, Option<PagerDutyFields>, CanonicalDocument)> {
+        super::read_intent(path, &Policy::compiled(&[])?)
+    }
+
+    fn prepare_resubmission(
+        config: &NqConfig,
+        notification_id: &str,
+        stable_event_id: &str,
+    ) -> Result<(Intent, Option<PagerDutyFields>, CanonicalDocument)> {
+        super::prepare_resubmission(
+            config,
+            &Policy::load(config)?,
+            notification_id,
+            stable_event_id,
+        )
+    }
 
     fn route(transport: NotificationTransportKind) -> NotificationRouteConfig {
         NotificationRouteConfig {
@@ -1714,6 +1764,7 @@ mod tests {
 
     fn config(root: &TempDir) -> NqConfig {
         let config = NqConfig {
+            escalation_policy: None,
             retention: Default::default(),
             schema: CONFIG_SCHEMA.into(),
             database_path: root.path().join("notification.db"),
@@ -1732,6 +1783,7 @@ mod tests {
         fs::create_dir(&inbox).expect("create inbox");
         fs::set_permissions(&inbox, fs::Permissions::from_mode(0o711)).expect("protect inbox");
         let config = NqConfig {
+            escalation_policy: None,
             retention: Default::default(),
             schema: CONFIG_SCHEMA.into(),
             database_path: root.path().join("notification.db"),
@@ -3372,6 +3424,7 @@ mod tests {
         let captured = Arc::clone(&sent);
         let resubmitted = submit_parsed_with_dispatch(
             &config,
+            &Policy::load(&config).unwrap(),
             resubmission,
             pager,
             document,
@@ -3954,5 +4007,273 @@ mod tests {
             listed[9]["condition"],
             "crow-lab:nq:nq-no-fresh-acquisition:j"
         );
+    }
+    fn installed_policy(root: &TempDir, config: &mut NqConfig, document: &Value) {
+        let path = root.path().join("escalation-policy.json");
+        let bytes = serde_json::to_vec_pretty(document).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        config.escalation_policy = Some(nq_core::config::EscalationPolicyConfig {
+            path,
+            sha256: sha256_bytes(&bytes).into_string(),
+        });
+    }
+
+    fn remediation_policy(config: &NqConfig) -> Value {
+        let mut document = Policy::compiled(&config.notification_routes)
+            .unwrap()
+            .inspect()["policy"]
+            .clone();
+        document["anchors"].as_array_mut().unwrap().push(json!({
+            "rule":"remediation-journal-critical",
+            "components":["service"],
+            "response_classes":["page"]
+        }));
+        document["routes"][1]["anchors"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("remediation-journal-critical"));
+        document
+    }
+
+    #[test]
+    fn compiled_policy_reproduces_exactly_the_legacy_anchor_component_set() {
+        let rules = [
+            "nq-no-fresh-acquisition",
+            "host-posture-unknown",
+            "nightshift-recurrence-missing",
+            "docket-unsettled",
+            "ag-executor-unavailable",
+            "service-down",
+            "host-disk",
+            "nq-latency-near-bound",
+            "nq-open-cost-growing",
+            "nq-pending-acquisition",
+            "host-posture-refusals",
+            "host-posture-retention",
+            "nightshift-evidence-stale",
+            "nightshift-cycle-slow",
+            "docket-reconciliation-lag",
+            "ag-repeated-refusals",
+            "build-identity",
+        ];
+        let components = [
+            "nq",
+            "host_posture",
+            "nightshift",
+            "docket",
+            "ag",
+            "service",
+        ];
+        let policy = Policy::compiled(&[pagerduty_route()]).unwrap();
+        let document = policy.inspect();
+        let anchors = document["policy"]["anchors"].as_array().unwrap();
+        assert_eq!(anchors.len(), 17);
+        for (anchor, rule) in anchors.iter().zip(rules) {
+            assert_eq!(anchor["rule"], rule);
+            assert_eq!(anchor["components"], json!(components));
+            assert_eq!(
+                anchor["response_classes"],
+                json!(["informational", "attention", "page"])
+            );
+            for component in components {
+                let mut value = pagerduty_intent("trigger", "event-1", "inspect");
+                value["condition"]["rule"] = json!(rule);
+                value["condition"]["component"] = json!(component);
+                super::parse_submitted(value, &policy).unwrap();
+                policy
+                    .authorize("pd.ops", "page", Some((rule, component)))
+                    .unwrap();
+            }
+        }
+        assert!(
+            policy
+                .validate_condition("remediation-journal-critical", "service")
+                .is_err()
+        );
+        assert!(
+            policy
+                .validate_condition("docket-not-ready", "docket")
+                .is_err()
+        );
+        assert!(policy.validate_condition("service-down", "kernel").is_err());
+    }
+
+    #[tokio::test]
+    async fn declared_remediation_page_delivers_and_keeps_derived_dedup_and_redaction() {
+        let root = TempDir::new().unwrap();
+        let mut config = pagerduty_config(&root);
+        let mut value = pagerduty_intent(
+            "trigger",
+            "remediation-1",
+            "take journal segments into custody",
+        );
+        value["condition"]["rule"] = json!("remediation-journal-critical");
+        value["condition"]["component"] = json!("service");
+        let path = write_intent(&root, value.clone());
+        assert!(submit(&config, &path, "pd.ops", false).await.is_err());
+        assert_eq!(inspect(&config, None).unwrap(), json!([]));
+        let document = remediation_policy(&config);
+        installed_policy(&root, &mut config, &document);
+        let expected_key = "constellation:crow-lab:service:remediation-journal-critical:demo";
+        for (action, event) in [("trigger", "remediation-1"), ("resolve", "remediation-2")] {
+            value["action"] = json!(action);
+            value["stable_event_id"] = json!(event);
+            let path = write_intent(&root, value.clone());
+            let result = submit_with_dispatch(&config, &path, "pd.ops", true, routing_key, |_| {
+                Ok(|key: String, body: Vec<u8>, _| async move {
+                    let request = inject_routing_key(&body, &key).unwrap();
+                    let request: Value = serde_json::from_slice(&request).unwrap();
+                    assert_eq!(request["dedup_key"], expected_key);
+                    assert_eq!(request["routing_key"], ROUTING_KEY);
+                    assert!(!String::from_utf8(body).unwrap().contains(ROUTING_KEY));
+                    Ok(accepted())
+                })
+            })
+            .await
+            .unwrap();
+            assert_eq!(result["delivery_state"], "accepted");
+            assert_eq!(result["dedup_key"], expected_key);
+            let duplicate = submit(&config, &path, "pd.ops", true).await.unwrap();
+            assert_eq!(duplicate, result);
+        }
+        assert_routing_key_absent(&config);
+        // Historical reads remain possible when the approving file disappears.
+        fs::remove_file(&config.escalation_policy.as_ref().unwrap().path).unwrap();
+        assert_eq!(inspect(&config, None).unwrap().as_array().unwrap().len(), 2);
+        assert!(submit(&config, &path, "pd.ops", false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn installed_policy_denies_unlisted_rules_components_classes_routes_and_details() {
+        for denial in ["rule", "component", "class", "route", "details"] {
+            let root = TempDir::new().unwrap();
+            let mut config = pagerduty_config(&root);
+            let mut document = remediation_policy(&config);
+            let mut value = pagerduty_intent("trigger", "remediation-1", "inspect");
+            value["condition"]["rule"] = json!("remediation-journal-critical");
+            value["condition"]["component"] = json!("service");
+            match denial {
+                "rule" => value["condition"]["rule"] = json!("unlisted-rule"),
+                "component" => value["condition"]["component"] = json!("nq"),
+                "class" => {
+                    document["anchors"]
+                        .as_array_mut()
+                        .unwrap()
+                        .last_mut()
+                        .unwrap()["response_classes"] = json!(["attention"])
+                }
+                "route" => {
+                    document["routes"][1]["anchors"]
+                        .as_array_mut()
+                        .unwrap()
+                        .pop();
+                }
+                "details" => document["routes"][1]["handler"]["max_details_bytes"] = json!(1),
+                _ => unreachable!(),
+            }
+            installed_policy(&root, &mut config, &document);
+            let path = write_intent(&root, value);
+            assert!(
+                submit_with_dispatch(
+                    &config,
+                    &path,
+                    "pd.ops",
+                    true,
+                    |_| panic!("policy denial must precede secrets"),
+                    |_| Ok(|_, _, _| async { panic!("policy denial must precede dispatch") })
+                )
+                .await
+                .is_err(),
+                "{denial}"
+            );
+            assert_eq!(inspect(&config, None).unwrap(), json!([]), "{denial}");
+        }
+    }
+
+    #[tokio::test]
+    async fn installed_policy_preserves_non_page_refusal_and_rechecks_resubmission() {
+        let root = TempDir::new().unwrap();
+        let mut config = pagerduty_config(&root);
+        let mut document = remediation_policy(&config);
+        // This smaller payload ceiling must not replace the non-page refusal.
+        document["routes"][1]["handler"]["max_details_bytes"] = json!(1);
+        installed_policy(&root, &mut config, &document);
+        let mut value = pagerduty_intent("resolve", "event-1", "inspect");
+        value["response_class"] = json!("attention");
+        let path = write_intent(&root, value);
+        let result = submit_with_dispatch(
+            &config,
+            &path,
+            "pd.ops",
+            true,
+            |_| panic!("non-page must not resolve a key"),
+            |_| Ok(|_, _, _| async { panic!("non-page must not dispatch") }),
+        )
+        .await
+        .unwrap();
+        let status = inspect(&config, result["notification_id"].as_str()).unwrap();
+        assert_eq!(
+            status[0]["pagerduty"]["last_event"]["detail"]["reason"],
+            RESPONSE_CLASS_NOT_PAGE
+        );
+        // Revoke the anchor. Resubmission must use current authorization.
+        document["anchors"][0]["components"] = json!(["service"]);
+        installed_policy(&root, &mut config, &document);
+        assert!(
+            resubmit(
+                &config,
+                result["notification_id"].as_str().unwrap(),
+                "event-2",
+                false
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(inspect(&config, None).unwrap().as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn all_existing_handlers_share_policy_route_class_admission() {
+        for transport in [
+            NotificationTransportKind::Slack,
+            NotificationTransportKind::Discord,
+            NotificationTransportKind::LocalFile,
+        ] {
+            let root = TempDir::new().unwrap();
+            let mut config = if transport == NotificationTransportKind::LocalFile {
+                local_config(&root)
+            } else {
+                config(&root)
+            };
+            config.notification_routes[0].transport = transport;
+            let mut document = Policy::compiled(&config.notification_routes)
+                .unwrap()
+                .inspect()["policy"]
+                .clone();
+            document["routes"][0]["response_classes"] = json!(["informational"]);
+            installed_policy(&root, &mut config, &document);
+            let value = if transport == NotificationTransportKind::LocalFile {
+                local_intent()
+            } else {
+                intent("inspect", "operator_assertion", None)
+            };
+            let path = write_intent(&root, value);
+            let route = &config.notification_routes[0].reference;
+            let result = if transport == NotificationTransportKind::LocalFile {
+                deliver_local(&config, &path, route)
+            } else {
+                submit_with_dispatch(
+                    &config,
+                    &path,
+                    route,
+                    true,
+                    |_| panic!("disallowed route class must not resolve a secret"),
+                    |_| Ok(|_, _, _| async { panic!("disallowed route class must not dispatch") }),
+                )
+                .await
+            };
+            assert!(result.unwrap_err().to_string().contains("not authorized"));
+            assert_eq!(inspect(&config, None).unwrap(), json!([]));
+        }
     }
 }

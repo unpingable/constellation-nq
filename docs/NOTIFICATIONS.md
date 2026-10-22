@@ -71,6 +71,12 @@ message summary, `[attention] check storage`.
 
 ## Configure and inspect
 
+Escalation authorization can come from an operator-installed, digest-pinned
+[`nq.escalation_policy.v1` document](ESCALATION-POLICY.md). Without a configured
+document, the bundled default preserves the former 17 anchors and six
+components. `nq --config FILE --json notification policy` shows the effective
+document and digest without opening the database or resolving credentials.
+
 Add a route to an explicit NQ configuration whose database, socket, admissions
 and helper-runtime paths are all selected by the operator:
 
@@ -295,8 +301,8 @@ may be up to 1024 bytes) and, with the same closed field set:
 | `response_class` | required in effect: must be `page`, or the record is retained as the refusal `response_class_not_page` (see [above](#sinks-are-not-interchangeable)) |
 | `action` | `trigger` or `resolve` |
 | `condition.site` | bounded site or installation id, 1..=64 of `[a-z0-9._-]` |
-| `condition.component` | one of `nq`, `host_posture`, `nightshift`, `docket`, `ag`, `service` |
-| `condition.rule` | a beta alert registry anchor; see [`PAGERDUTY_ALERT_MAP.md`](PAGERDUTY_ALERT_MAP.md) |
+| `condition.component` | permitted by the effective escalation policy for this anchor; default: `nq`, `host_posture`, `nightshift`, `docket`, `ag`, `service` |
+| `condition.rule` | an anchor in the effective escalation policy; the default is mapped in [`PAGERDUTY_ALERT_MAP.md`](PAGERDUTY_ALERT_MAP.md) |
 | `condition.target_class` | optional, 1..=48 of `[a-z0-9._-]` |
 | `severity` | `critical`, `error`, `warning` or `info` |
 | `runbook_url` | optional `https://` URL, at most 1024 bytes |
