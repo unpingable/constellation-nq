@@ -76,6 +76,19 @@ pub struct NqConfig {
     /// is resolved only at an enabled dispatch boundary and is never stored.
     #[serde(default)]
     pub notification_routes: Vec<NotificationRouteConfig>,
+    /// Operator-approved escalation document. Absence selects the bundled default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation_policy: Option<EscalationPolicyConfig>,
+}
+
+/// Exact bytes approved separately from notification-provider credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EscalationPolicyConfig {
+    /// Absolute regular-file location, normally beside the routes configuration.
+    pub path: PathBuf,
+    /// SHA-256 of the exact installed bytes, approved outside the document.
+    pub sha256: String,
 }
 
 /// Retention policy overrides. Automatic sizing is chosen once and persisted;
@@ -490,6 +503,12 @@ impl NqConfig {
         require_absolute("socket_path", &self.socket_path)?;
         require_absolute("admissions_dir", &self.admissions_dir)?;
         require_absolute("helper_runtime_dir", &self.helper_runtime_dir)?;
+        if let Some(policy) = &self.escalation_policy {
+            require_absolute("escalation_policy.path", &policy.path)?;
+            nq_protocol::Sha256Digest::parse(policy.sha256.clone()).map_err(|_| {
+                invalid("escalation_policy.sha256", "must be a sha256: lowercase hex digest")
+            })?;
+        }
         if self.watchers.len() > MAX_WATCHERS {
             return Err(invalid(
                 "watchers",

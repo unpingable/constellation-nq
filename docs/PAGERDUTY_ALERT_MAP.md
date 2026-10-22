@@ -4,8 +4,10 @@ This maps each rule anchor of the candidate beta alert registry
 (`constellation-beta.rules.yml` and `RUNBOOKS.md` in the Cartography
 `architecture/beta-observability/` design, recorded 2026-10-02) to the
 `condition.component`, `condition.rule` and `severity` of an
-`nq.notification_delivery_intent.v2`. The `rule` values below are the closed
-set NQ accepts. The retired `docket-not-ready` anchor is excluded.
+`nq.notification_delivery_intent.v2`. The `rule` values below are NQ's bundled
+default escalation policy. An approved, digest-pinned
+[escalation document](ESCALATION-POLICY.md) can change permissions without an
+adapter release. The retired `docket-not-ready` anchor is excluded by default.
 
 **No component evaluates or emits any of these conditions today.** The
 registry's rules reference proposed metrics that no component exports yet, and
@@ -25,7 +27,7 @@ local-inbox route, because a PagerDuty route retains it as the refusal
 evaluator can still decide to page on one. The severity column is only
 PagerDuty's payload `severity` (registry `page` maps to `critical`, `warn` to
 `warning`); a site may choose another mapping, but the rule and component
-values are fixed.
+values must be permitted by the effective escalation policy.
 
 | Rule anchor | component | severity | Page? | Suggested `target_class` | Operator response | Evaluated by (today / future owner) |
 |---|---|---|---|---|---|---|
