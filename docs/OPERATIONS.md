@@ -23,6 +23,11 @@ at read time, so its output changes for any store that has delivery records,
 Slack-only stores included. A PagerDuty record left `unknown` (for example
 after a timeout) blocks rollover for the life of the store.
 
+Operator-installed escalation authorization, exact digest pins, effective-policy
+inspection, startup refusal and rollback are described in
+[`ESCALATION-POLICY.md`](ESCALATION-POLICY.md). No document is installed or
+activated by package installation.
+
 The remainder of this runbook preserves the earlier NQ-ng developer-preview
 service procedures. It remains useful for its named daemon, package and
 diagnostic surfaces, but its schema-v5 and “not implemented yet” statements are

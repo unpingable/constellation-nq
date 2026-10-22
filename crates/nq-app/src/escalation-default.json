@@ -1,0 +1,23 @@
+{
+  "schema": "nq.escalation_policy.v1",
+  "anchors": [
+    {"rule": "nq-no-fresh-acquisition", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "host-posture-unknown", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "nightshift-recurrence-missing", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "docket-unsettled", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "ag-executor-unavailable", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "service-down", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "host-disk", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "nq-latency-near-bound", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "nq-open-cost-growing", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "nq-pending-acquisition", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "host-posture-refusals", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "host-posture-retention", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "nightshift-evidence-stale", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "nightshift-cycle-slow", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "docket-reconciliation-lag", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "ag-repeated-refusals", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]},
+    {"rule": "build-identity", "components": ["nq", "host_posture", "nightshift", "docket", "ag", "service"], "response_classes": ["informational", "attention", "page"]}
+  ],
+  "routes": []
+}

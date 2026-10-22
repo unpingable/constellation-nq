@@ -16304,6 +16304,7 @@ sys.stdout.write("\n")
         };
         validate_compiled_watcher(&watcher).expect("owner-valid watcher");
         let config = NqConfig {
+            escalation_policy: None,
             retention: Default::default(),
             schema: crate::config::CONFIG_SCHEMA.to_owned(),
             database_path: root.join("nq.db"),
@@ -16503,6 +16504,7 @@ sys.stdout.write("\n")
             checkpoint_policy: CheckpointPolicy::Disabled,
         };
         let config = NqConfig {
+            escalation_policy: None,
             retention: Default::default(),
             schema: crate::config::CONFIG_SCHEMA.to_owned(),
             database_path: root.join("nq.db"),
@@ -16583,6 +16585,7 @@ sys.stdout.write("\n")
             checkpoint_policy: CheckpointPolicy::Disabled,
         };
         let config = NqConfig {
+            escalation_policy: None,
             retention: Default::default(),
             schema: crate::config::CONFIG_SCHEMA.to_owned(),
             database_path: root.join("nq.db"),

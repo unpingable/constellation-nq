@@ -42,6 +42,8 @@ pub async fn run(options: Nqd) -> Result<()> {
     initialize_tracing();
     let config = NqConfig::load(&options.config)
         .with_context(|| format!("cannot load {}", options.config.display()))?;
+    let policy = crate::escalation::Policy::load(&config)?;
+    info!(digest = %policy.inspect()["digest"], "escalation policy validated");
     let _database_ownership = crate::ownership::acquire(&config.database_path, "nqd")?;
     let mut store = open_configured_store(&config).context(
         "database is absent or has an incompatible schema; run `nq init` or `nq admin upgrade`",

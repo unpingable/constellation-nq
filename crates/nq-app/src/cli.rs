@@ -463,6 +463,12 @@ pub enum RefusalsCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum NotificationCommand {
+    /// Show the validated effective escalation document and its digest.
+    Policy {
+        /// Check an attention registry export against the same policy.
+        #[arg(long)]
+        check_registry: Option<PathBuf>,
+    },
     /// Retain one explicit operator/Nightshift intent and perform at most one
     /// transport attempt. Network dispatch is disabled unless explicitly named.
     Submit {
@@ -1463,6 +1469,13 @@ async fn notification_command(
 ) -> Result<()> {
     let config = NqConfig::load(config_path)?;
     match command {
+        NotificationCommand::Policy { check_registry } => {
+            let policy = crate::escalation::Policy::load(&config)?;
+            if let Some(path) = check_registry {
+                policy.check_registry(&path)?;
+            }
+            print_value(&policy.inspect(), json_output)
+        }
         NotificationCommand::Submit {
             intent,
             route,
@@ -3275,6 +3288,7 @@ fn validate_query_arguments(arguments: &QueryArgs) -> Result<()> {
 }
 
 fn validate_compiled_profiles(config: &NqConfig) -> Result<()> {
+    crate::escalation::Policy::load(config)?;
     Ok(nq_core::engine::validate_compiled_config(config)?)
 }
 
