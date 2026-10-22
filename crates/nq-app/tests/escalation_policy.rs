@@ -1,7 +1,6 @@
-//! Policy admission through shipped CLI/startup surfaces, without a database.
+//! Policy admission and observation through shipped CLI/startup surfaces.
 
 use nq_protocol::sha256_bytes;
-use nq_store::CanonicalDocument;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
@@ -65,9 +64,7 @@ fn inspect_policy_check_registry_and_rollback_need_no_database() {
     assert_eq!(fallback["policy"]["anchors"].as_array().unwrap().len(), 17);
     assert_eq!(
         fallback["digest"],
-        CanonicalDocument::from_serializable(&fallback["policy"])
-            .unwrap()
-            .digest()
+        sha256_bytes(include_bytes!("../src/escalation-default.json")).as_str()
     );
     let mut document = fallback["policy"].clone();
     let anchor = json!({"rule":"remediation-journal-critical", "components":["service"], "response_classes":["page"]});
@@ -120,7 +117,7 @@ fn inspect_policy_check_registry_and_rollback_need_no_database() {
 }
 
 #[test]
-fn invalid_pinned_policy_stops_startup_and_every_delivery_surface_before_effects() {
+fn invalid_pinned_policy_stops_every_delivery_surface_before_effects() {
     let root = tempfile::tempdir().unwrap();
     let active = root.path().join("nq.toml");
     fs::write(&active, config(root.path(), None)).unwrap();
@@ -142,7 +139,6 @@ fn invalid_pinned_policy_stops_startup_and_every_delivery_surface_before_effects
         fs::write(&active, config(root.path(), Some(digest.as_str()))).unwrap();
         for args in [
             vec!["config", "check"],
-            vec!["daemon", "--once"],
             vec!["notification", "policy"],
             vec![
                 "notification",
@@ -221,5 +217,65 @@ fn config_apply_cannot_activate_a_bad_pin_and_binding_is_strict() {
         );
         fs::write(&candidate, basic).unwrap();
         assert!(!run(&candidate, &["config", "check"]).status.success());
+    }
+}
+
+#[test]
+fn broken_policy_does_not_stop_observation_but_refuses_notification_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let active = root.path().join("nq.toml");
+    // Observation must also survive invalid approval metadata, not just bad JSON.
+    for broken in ["missing", "malformed", "pin", "relative"] {
+        let bytes = b"{broken JSON";
+        fs::write(root.path().join("policy.json"), bytes).unwrap();
+        let digest = if broken == "pin" {
+            "invalid".to_owned()
+        } else {
+            sha256_bytes(bytes).into_string()
+        };
+        let mut configuration = config(root.path(), Some(&digest));
+        if broken == "missing" {
+            fs::remove_file(root.path().join("policy.json")).unwrap();
+        } else if broken == "relative" {
+            configuration = configuration.replace(
+                &format!("{}/policy.json", root.path().display()),
+                "relative.json",
+            );
+        }
+        fs::write(&active, configuration).unwrap();
+        if broken == "missing" {
+            success(&run(&active, &["init"]));
+        }
+        let doctor = success(&run(&active, &["doctor"]));
+        assert_eq!(doctor["escalation_policy"]["state"], "failed", "{broken}");
+        let daemon = Command::new(env!("CARGO_BIN_EXE_nqd"))
+            .args(["--config", active.to_str().unwrap(), "--once"])
+            .output()
+            .unwrap();
+        assert!(
+            daemon.status.success(),
+            "{broken}: {}",
+            String::from_utf8_lossy(&daemon.stderr)
+        );
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&daemon.stdout),
+            String::from_utf8_lossy(&daemon.stderr)
+        );
+        assert!(log.contains("observation continues"), "{broken}: {log}");
+        let output = run(
+            &active,
+            &[
+                "notification",
+                "submit",
+                "--intent",
+                "/absent-intent",
+                "--route",
+                "pagerduty-ops",
+            ],
+        );
+        assert!(!output.status.success(), "{broken}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("escalation policy"));
+        assert!(!run(&active, &["config", "check"]).status.success());
     }
 }
