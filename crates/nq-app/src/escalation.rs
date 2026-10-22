@@ -290,9 +290,7 @@ impl Policy {
                 handler: Handler::for_route(route),
             })
             .collect();
-        let digest = CanonicalDocument::from_serializable(&document)?
-            .digest()
-            .to_owned();
+        let digest = sha256_bytes(DEFAULT_DOCUMENT.as_bytes()).into_string();
         Ok(Self {
             document,
             digest,
@@ -304,6 +302,10 @@ impl Policy {
         let Some(binding) = &config.escalation_policy else {
             return Self::compiled(&config.notification_routes);
         };
+        ensure!(
+            binding.path.is_absolute(),
+            "escalation policy path must be absolute"
+        );
         Sha256Digest::parse(binding.sha256.clone()).context("invalid escalation policy pin")?;
         let bytes = super::bounded_input::read(&binding.path, MAX_POLICY_BYTES)
             .context("read escalation policy")?;
@@ -422,7 +424,11 @@ impl Policy {
             "digest": self.digest, "policy": self.document})
     }
 
-    pub(crate) fn check_registry(&self, path: &Path) -> Result<()> {
+    pub(crate) fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub(crate) fn check_registry(&self, path: &Path, selected_route: Option<&str>) -> Result<()> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Registry {
@@ -436,6 +442,15 @@ impl Policy {
             "unsupported escalation registry schema"
         );
         validate_anchors(&registry.anchors)?;
+        if let Some(reference) = selected_route {
+            ensure!(
+                self.document
+                    .routes
+                    .iter()
+                    .any(|route| route.reference == reference),
+                "registry check route is not authorized by escalation policy"
+            );
+        }
         for anchor in registry.anchors {
             for component in &anchor.components {
                 let permitted = self.anchor(&anchor.rule, component)?;
@@ -447,6 +462,19 @@ impl Policy {
                     "attention registry class is not authorized for {}",
                     anchor.rule
                 );
+                if anchor.response_classes.contains(&ResponseClass::Page) {
+                    ensure!(
+                        self.document.routes.iter().any(|route| {
+                            selected_route.is_none_or(|reference| route.reference == reference)
+                                // Only PagerDuty currently accepts condition-bearing v2 pages.
+                                && matches!(route.handler, Handler::PagerDuty { .. })
+                                && route.anchors.contains(&anchor.rule)
+                                && route.response_classes.contains(&ResponseClass::Page)
+                        }),
+                        "attention registry page for {} has no authorized delivery route",
+                        anchor.rule
+                    );
+                }
             }
         }
         Ok(())
@@ -485,6 +513,20 @@ mod tests {
             path,
             sha256: sha256_bytes(bytes).into_string(),
         });
+    }
+
+    #[test]
+    fn default_digest_pins_shipped_bytes_independently_of_routes() {
+        let root = TempDir::new().unwrap();
+        let config = config(&root);
+        let routed = Policy::compiled(&config.notification_routes).unwrap();
+        let route_free = Policy::compiled(&[]).unwrap();
+        assert_eq!(
+            routed.digest(),
+            sha256_bytes(DEFAULT_DOCUMENT.as_bytes()).as_str()
+        );
+        assert_eq!(routed.digest(), route_free.digest());
+        assert_ne!(routed.inspect()["policy"], route_free.inspect()["policy"]);
     }
 
     #[test]
@@ -633,6 +675,46 @@ mod tests {
     }
 
     #[test]
+    fn registry_pages_need_a_capable_route_and_honor_the_selected_route() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        let mut other = config.notification_routes[0].clone();
+        other.reference = "pagerduty-other".into();
+        config.notification_routes.push(other);
+        let mut notice = config.notification_routes[0].clone();
+        notice.reference = "operations".into();
+        notice.transport = NotificationTransportKind::Slack;
+        config.notification_routes.push(notice);
+        let mut policy = Policy::compiled(&config.notification_routes).unwrap();
+        let rule = policy.document.anchors[0].rule.clone();
+        let component = policy.document.anchors[0].components[0].clone();
+        for route in &mut policy.document.routes[..2] {
+            route.anchors.retain(|anchor| anchor != &rule);
+        }
+        let path = root.path().join("registry.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "schema": "nq.escalation_registry.v1",
+                "anchors": [{"rule": rule, "components": [component], "response_classes": ["page"]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        // Slack carrying the anchor/class is insufficient: it cannot accept v2.
+        assert!(policy.check_registry(&path, None).is_err());
+        assert!(policy.check_registry(&path, Some("operations")).is_err());
+        policy.document.routes[0].anchors.push(rule);
+        policy.check_registry(&path, None).unwrap();
+        policy.check_registry(&path, Some("pagerduty-ops")).unwrap();
+        assert!(
+            policy
+                .check_registry(&path, Some("pagerduty-other"))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn attention_mirror_must_fit_the_same_pinned_document() {
         let root = TempDir::new().unwrap();
         let mut config = config(&root);
@@ -642,7 +724,7 @@ mod tests {
             "rule":"remediation-journal-critical", "components":["service"], "response_classes":["page"]
         }]});
         fs::write(&path, serde_json::to_vec(&mirror).unwrap()).unwrap();
-        assert!(document.check_registry(&path).is_err());
+        assert!(document.check_registry(&path, None).is_err());
         document
             .document
             .anchors
@@ -653,13 +735,31 @@ mod tests {
             &serde_json::to_vec(&document.document).unwrap(),
         );
         let loaded = Policy::load(&config).unwrap();
-        loaded.check_registry(&path).unwrap();
+        assert!(
+            loaded
+                .check_registry(&path, None)
+                .unwrap_err()
+                .to_string()
+                .contains("no authorized delivery route")
+        );
+        document.document.routes[0]
+            .anchors
+            .push("remediation-journal-critical".into());
+        install(
+            &mut config,
+            &root,
+            &serde_json::to_vec(&document.document).unwrap(),
+        );
+        let loaded = Policy::load(&config).unwrap();
+        loaded.check_registry(&path, None).unwrap();
+        loaded.check_registry(&path, Some("pagerduty-ops")).unwrap();
+        assert!(loaded.check_registry(&path, Some("missing")).is_err());
         mirror["anchors"][0]["response_classes"] = json!(["attention"]);
         fs::write(&path, serde_json::to_vec(&mirror).unwrap()).unwrap();
-        assert!(loaded.check_registry(&path).is_err());
+        assert!(loaded.check_registry(&path, None).is_err());
         mirror["anchors"][0]["response_classes"] = json!(["page"]);
         mirror["anchors"][0]["components"] = json!(["nq"]);
         fs::write(&path, serde_json::to_vec(&mirror).unwrap()).unwrap();
-        assert!(loaded.check_registry(&path).is_err());
+        assert!(loaded.check_registry(&path, None).is_err());
     }
 }

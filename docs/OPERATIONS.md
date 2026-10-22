@@ -24,7 +24,7 @@ Slack-only stores included. A PagerDuty record left `unknown` (for example
 after a timeout) blocks rollover for the life of the store.
 
 Operator-installed escalation authorization, exact digest pins, effective-policy
-inspection, startup refusal and rollback are described in
+inspection, notification admission refusal, observation diagnostics and rollback are described in
 [`ESCALATION-POLICY.md`](ESCALATION-POLICY.md). No document is installed or
 activated by package installation.
 
