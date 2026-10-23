@@ -35,14 +35,12 @@ bodies remain unread: their response ceiling preserves the existing setting,
 not a new transfer-budget guarantee. Local bounds do not impose a sync deadline.
 Unknown fields, schemas and enum variants refuse. The document is at most
 128 KiB, with at most 256 anchors, 64 routes and 32 components per anchor.
-These declaration bounds apply to installed documents; fallback route binding
-preserves the existing configuration's route count.
 Every route names existing anchors and exactly one configured route; configured
 routes missing from an installed document also refuse.
 
 For example, this fragment authorizes the new page on one route. A complete
 document must also declare every other configured route and the anchors it
-uses. Start from the effective policy export when preserving existing grants.
+uses. Start from the packaged example or an installed policy export.
 
 ```json
 {
@@ -52,14 +50,46 @@ uses. Start from the effective policy export when preserving existing grants.
 }
 ```
 
-Install a regular JSON file beside the operator-owned routes configuration,
-readable by the NQ account and writable only by the operator. Add this top-level
-table to that configuration (the digest below is a placeholder):
+Each deployed instance pins its own document. Shared source documents are
+allowed, but each instance has its own configuration and estate pin, and its
+document must cover exactly its configured routes. The operator-installed
+configuration is authoritative for permitted identities and classes; there is
+no compiled identity ceiling or fallback. Compiled code enforces schema,
+bounds, protocol invariants and authorization checks.
+
+The package ships today's 17 anchors × six components only as
+`/usr/share/doc/nq-ng/examples/escalation-policy.example.json` (source:
+`examples/escalation-policy.example.json`). It is never loaded automatically.
+The example declares production routes `operations`, `operations-discord` and
+`pagerduty-ops`; review its grants and adapt route references, handler bounds
+and route membership to the selected instance before installing it. It does
+not grant `remediation-journal-critical`.
+
+Install the reviewed regular JSON file beside the operator-owned routes
+configuration, readable by the NQ account and writable only by the operator:
+
+```sh
+sudo install -o root -g nq -m 0640 escalation-policy.reviewed.json /etc/nq/escalation-policy.json
+sudo sha256sum /etc/nq/escalation-policy.json
+```
+
+For unchanged production routes, the reviewed file may be a copy of the
+packaged example. Add this top-level table to that instance's configuration,
+replacing the placeholder with `sha256:` followed by the exact hash above:
 
 ```toml
 [escalation_policy]
 path = "/etc/nq/escalation-policy.json"
 sha256 = "sha256:<64 lowercase hex characters>"
+```
+
+Pin the same digest in that instance's estate entry, then verify before an
+explicit restart:
+
+```sh
+sudo -u nq nq --config /etc/nq/nq.toml config check
+sudo -u nq nq --config /etc/nq/nq.toml --json notification policy
+sudo -u nq nq --config /etc/nq/nq.toml notification policy --check-registry registry.json --route pagerduty-ops
 ```
 
 The pin is SHA-256 of the exact file bytes, including whitespace and any final
@@ -77,31 +107,31 @@ that could restore permissions intentionally removed by a newer policy.
 Daemon startup (including `--once`) validates and logs the result without
 stopping observation. Doctor reports an `escalation_policy` finding without
 failing solely because of that finding; its `healthy` result describes its
-existing observation diagnostics. Initialization and watcher inspection do not
-load the policy. Policy path and digest validation belong to the notification
+existing observation diagnostics. Initialization also reports policy status
+without failing solely for a missing or invalid policy. Watcher inspection does
+not load the policy. Policy path and digest validation belong to the notification
 boundary too. The containing TOML must still have a valid configuration shape.
 Historical notification inspection remains independent of current policy.
 
-With no `escalation_policy` table, the binary uses its bundled default document.
-It retains exactly the former 17-anchor by six-component Cartesian permission
-set, permitting all three classes at the anchor level. The default binds the
-existing route configuration to handler declarations, allowing all classes on
-Slack/Discord/local routes and only page on PagerDuty. Legacy payload bytes,
-outcomes, errors for unlisted conditions, dedup keys and refusals are preserved.
-The default grants no permission to `remediation-journal-critical`.
+With no `escalation_policy` table, there is no policy document or digest.
+V2 page intents receive a retained `escalation_policy_missing` refusal before
+Nightshift replay, credential access or dispatch. The refusal uses the existing
+one-attempt retention and redaction path; retaining its intent, payload and
+refusal evidence does not admit it for delivery. Notice-class v1 intents
+continue through the existing routes configuration, including Slack, Discord
+and local inboxes. No code path can authorize a page from compiled identities.
+`nqd`, `doctor` and `init` continue and report the missing document.
+`config check` and `notification policy --check-registry` fail explicitly with
+"missing escalation policy document". A still-pinned file that disappears is
+an invalid installed policy and refuses notification admission, as before.
 
 ## Delivery boundary and inspection
 
-`nq --config FILE --json notification policy` reports the effective document,
-its digest and whether it came from the compiled default or an installed file.
-It requires no database, secret resolution or network access. In both cases the
-digest means SHA-256 of the source document's exact file bytes: the installed
-file SHA when bound in configuration, or the shipped `escalation-default.json`
-SHA for the compiled default. Default route bindings are derived from the
-instance configuration after hashing and are shown in the effective export;
-they do not alter the default-file digest. The separate configuration digest
-covers those bindings. Adding the `[escalation_policy]` table changes that
-configuration digest, even when its grants match the default.
+`nq --config FILE --json notification policy` reports the installed document
+and its digest, or `source: missing` with the missing-policy diagnostic and no
+document or digest. It requires no database, secret resolution or network
+access. The installed digest is SHA-256 of the document's exact file bytes.
+The separate configuration digest covers the document binding and routes.
 
 Authorization precedes provider dispatch. V2 conditions must name an authorized
 anchor/component, an allowed anchor class and a route explicitly carrying that
@@ -113,7 +143,9 @@ replay, explicit network enablement, routing-key redaction, retained provider
 failures and one-attempt custody remain in force.
 
 Existing v1 messages have no condition and keep their operator/Nightshift
-authorization; policy gates their route and class only. NQ does not infer an
+authorization; an installed policy gates their route and class only. With no
+policy, notices continue through the routes configuration; page authorization
+requires an installed document. NQ does not infer an
 anchor from prose or a policy ID. V2 remains PagerDuty's existing wire envelope;
 other current handlers still accept v1 only. This repair does not add a shared
 condition envelope to those handlers. A future handler must join the same
@@ -144,12 +176,12 @@ condition-bearing pages (currently PagerDuty) carrying its anchor and page
 class. `--route REFERENCE` requires that delivery path on the named route.
 An anchor-only grant with no deliverable page route fails this check, even
 though the document can pass `config check`. The export must include all
-page-capable rules, including disabled ones. A subset is allowed because NQ's legacy default has anchors no current evaluator
-uses. Attention must generate that export from its registry rather than copy
+page-capable rules, including disabled ones. A subset is allowed because the
+example has anchors no current evaluator uses. Attention must generate that export from its registry rather than copy
 another manually maintained list. Its consumer change and estate deployment
 are separate work; this lane changes neither repository. Today's 18-rule
-mirror must fail against the 17-rule default and pass only with an approved
-document adding the new anchor. No check turns a notice into a page.
+mirror must fail against the installed 17-rule example and pass only with an
+approved document adding the new anchor. No check turns a notice into a page.
 
 ## Rollout, rollback and acceptance
 
@@ -166,22 +198,20 @@ or with any binary downgrade, remove `[escalation_policy]` from the
 configuration: `NqConfig` uses `deny_unknown_fields`, so older binaries without
 this binding (including `50ef404`) refuse the new table. Adding or
 removing the table changes the configuration digest; reconcile that pin too.
-To return to the compiled default on a supporting binary, remove the document
-binding from configuration and remove the installed document, then restart and
-reconcile the reported default-file digest. Deleting a still-pinned file
-refuses notification admission; observation continues. Reconcile open
-conditions before removing their authorization; rollback does not resolve or
-resend an existing incident.
+Removing the document binding disables page authorization; it never restores
+a compiled policy. Restore the previous document and pin together to restore
+paging. Deleting a still-pinned file refuses notification admission;
+observation continues. Reconcile open conditions before removing their
+authorization; rollback does not resolve or resend an existing incident.
 
-Acceptance covers every legacy 17-by-six combination and response-class
-refusal, admitting the added remediation page only with a matching document,
-unknown rule/component/class and route denials, malformed enums, duplicate
-entries, missing pins, mismatch and size refusal before effects, effective CLI
-inspection without a database, attention mirror deliverability (including
-missing route grants and selected route denials), observation continuing with
-a broken policy, stable default-file digests across route configurations, and
-unchanged rendered bytes, redaction, deduplication, retries and retained
-history. Run
+Acceptance covers every installed-example 17-by-six combination and
+response-class refusal, admitting the added remediation page only with a
+matching document, unknown rule/component/class and route denials, malformed
+enums, duplicate entries, missing pins, mismatch and size refusal before
+effects, CLI inspection without a database, attention mirror deliverability,
+observation continuing with missing or broken policy, retained missing-policy
+page refusals, notice delivery without a document, and unchanged rendered
+bytes, redaction, deduplication, retries and retained history. Run
 `cargo test -p nq-app` and then the workspace suite under `umask 022`.
 
 Dedup semantics, provider behavior, incident lifecycle, new authority paths,
@@ -194,17 +224,21 @@ the verified labelwatch-host procedure recorded on 2026-10-19 and the NQ
 operations runbook. First roll out the bounded ops-runtime side-install to the
 seven ops watchers and verify it before installing the deb. Verify package
 checksums, stop the affected services and submitting units, and install the
-deb. Re-rotate all seven ops watchers again after the deb because packaged
+deb and, in the same operator-controlled step while units remain stopped,
+install and pin the reviewed example as the production escalation document for
+each instance. Adapt each document to exactly its configured routes; use
+per-instance configuration and estate pins even when source bytes are shared.
+This installation is an explicit operator action, not a deb maintainer-script
+action. Re-rotate all seven ops watchers again after the deb because packaged
 helper binaries drift; admissions pin the `nq` binary and helper digests.
 Rotate the main instance's `fs-data-capacity` and phlogiston's
 `svc-phlogiston-pds` admissions too. Bump host-posture `policy_generation` and
 re-enroll with a new-evaluator initial artifact obtained via
-`acquire-next-local`. Update the admission pins in `estate.json`, install and
-reconcile the approved escalation documents and configuration/estate pins,
+`acquire-next-local`. Update the admission pins in `estate.json`, reconcile
+the escalation document and per-instance configuration/estate pins,
 run config, registry, doctor and collector checks, then explicitly restart the
-affected services, including phlogiston's nqd. Install the document only for
-NQ instances with notification routes; each instance's document must cover
-exactly its own configured routes. Preserve the production and qualification
+affected services, including phlogiston's nqd. Each deployed instance pins its
+own document, including route-free instances (with an empty routes list). Preserve the production and qualification
 route split above. The profile-identity closure is unchanged: no store rollover.
 Package installation remains inert. This lane builds and stages no package and
 performs no host operation.
@@ -217,11 +251,9 @@ wire-compatibility change for Slack, Discord and local delivery and tests of
 each handler's refusal and retention behavior. The owner must decide whether
 that work is required before cartography #95's acceptance item closes.
 
-## Open decisions
+## Owner decisions (2026-10-22)
 
-- What is the estate pin granularity for NQ instances with routes? Recommend
-  one pin per instance; the owner has not decided.
-- Should an installed document be bounded by a compiled ceiling, or should the
-  operator-installed, root-owned configuration pin be the authority? Recommend
-  the config pin as authority, matching how routes and keys are installed today;
-  the owner has not decided.
+Each deployed instance has its own pin; shared sources are allowed. The
+operator-installed configuration is authoritative. Compiled code enforces
+schema, bounds, protocol invariants and authorization checks, without a
+compiled list of permitted alert identities.

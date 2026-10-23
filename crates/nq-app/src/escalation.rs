@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 pub(crate) const MAX_POLICY_BYTES: usize = 131_072;
-const DEFAULT_DOCUMENT: &str = include_str!("escalation-default.json");
+pub(crate) const POLICY_MISSING: &str = "escalation_policy_missing: missing escalation policy document; install and pin [escalation_policy]";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(try_from = "String")]
@@ -82,6 +82,7 @@ enum Handler {
 }
 
 impl Handler {
+    #[cfg(test)]
     fn for_route(route: &NotificationRouteConfig) -> Self {
         let timeout_ms = route.timeout_ms;
         let max_response_bytes = route.max_response_bytes;
@@ -259,16 +260,18 @@ impl Document {
 #[derive(Debug)]
 pub(crate) struct Policy {
     document: Document,
-    digest: String,
-    compiled: bool,
+    digest: Option<String>,
 }
 
 impl Policy {
-    pub(crate) fn compiled(routes: &[NotificationRouteConfig]) -> Result<Self> {
-        let mut document: Document = serde_json::from_str(DEFAULT_DOCUMENT)?;
-        validate_anchors(&document.anchors)?;
-        // The fallback preserves all pre-policy route names and bounds. Only
-        // installed documents introduce the new declaration cardinality bound.
+    // Test fixtures explicitly install these bytes; production never loads examples.
+    #[cfg(test)]
+    pub(crate) fn example(routes: &[NotificationRouteConfig]) -> Result<Self> {
+        let bytes = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../examples/escalation-policy.example.json"),
+        )?;
+        let mut document: Document = serde_json::from_slice(&bytes)?;
         document.routes = routes
             .iter()
             .map(|route| Route {
@@ -290,25 +293,52 @@ impl Policy {
                 handler: Handler::for_route(route),
             })
             .collect();
-        let digest = sha256_bytes(DEFAULT_DOCUMENT.as_bytes()).into_string();
+        document.validate(routes)?;
+        let digest = sha256_bytes(&serde_json::to_vec(&document)?).into_string();
         Ok(Self {
             document,
-            digest,
-            compiled: true,
+            digest: Some(digest),
         })
+    }
+
+    pub(crate) fn is_missing(&self) -> bool {
+        self.digest.is_none()
+    }
+
+    pub(crate) fn require_installed(&self) -> Result<()> {
+        ensure!(!self.is_missing(), POLICY_MISSING);
+        Ok(())
+    }
+
+    pub(crate) fn status(&self) -> Value {
+        if self.is_missing() {
+            json!({"state":"missing", "diagnostic":POLICY_MISSING,
+                "page_admission":"refused", "notice_admission":"routes_config"})
+        } else {
+            json!({"state":"healthy", "digest":self.digest})
+        }
     }
 
     pub(crate) fn load(config: &NqConfig) -> Result<Self> {
         let Some(binding) = &config.escalation_policy else {
-            return Self::compiled(&config.notification_routes);
+            return Ok(Self {
+                document: Document {
+                    schema: Schema::V1,
+                    anchors: Vec::new(),
+                    routes: Vec::new(),
+                },
+                digest: None,
+            });
         };
         ensure!(
             binding.path.is_absolute(),
             "escalation policy path must be absolute"
         );
         Sha256Digest::parse(binding.sha256.clone()).context("invalid escalation policy pin")?;
-        let bytes = super::bounded_input::read(&binding.path, MAX_POLICY_BYTES)
-            .context("read escalation policy")?;
+        let bytes =
+            super::bounded_input::read(&binding.path, MAX_POLICY_BYTES).with_context(|| {
+                format!("read escalation policy document {}", binding.path.display())
+            })?;
         let digest = sha256_bytes(&bytes).into_string();
         ensure!(
             digest == binding.sha256,
@@ -319,13 +349,12 @@ impl Policy {
         document.validate(&config.notification_routes)?;
         Ok(Self {
             document,
-            digest,
-            compiled: false,
+            digest: Some(digest),
         })
     }
 
     fn anchor(&self, rule: &str, component: &str) -> Result<&Anchor> {
-        // Keep the legacy refusal text for the compiled default.
+        self.require_installed()?;
         if !self
             .document
             .anchors
@@ -348,6 +377,11 @@ impl Policy {
     }
 
     pub(crate) fn validate_condition(&self, rule: &str, component: &str) -> Result<()> {
+        // Missing-policy submissions still undergo protocol validation so the
+        // refusal can be retained. No condition is authorized by this branch.
+        if self.is_missing() {
+            return Ok(());
+        }
         self.anchor(rule, component).map(|_| ())
     }
 
@@ -358,6 +392,10 @@ impl Policy {
         condition: Option<(&str, &str)>,
     ) -> Result<()> {
         let class: ResponseClass = serde_json::from_value(json!(class))?;
+        if self.is_missing() {
+            ensure!(class != ResponseClass::Page, POLICY_MISSING);
+            return Ok(());
+        }
         let route = self
             .document
             .routes
@@ -388,6 +426,9 @@ impl Policy {
         details: Option<&Value>,
         local_bytes: Option<usize>,
     ) -> Result<()> {
+        if self.is_missing() {
+            return Ok(());
+        }
         let route = self
             .document
             .routes
@@ -420,15 +461,18 @@ impl Policy {
     }
 
     pub(crate) fn inspect(&self) -> Value {
-        json!({"source": if self.compiled { "compiled_default" } else { "installed" },
-            "digest": self.digest, "policy": self.document})
+        if self.is_missing() {
+            return json!({"source":"missing", "status":self.status()});
+        }
+        json!({"source":"installed", "digest":self.digest, "policy":self.document})
     }
 
-    pub(crate) fn digest(&self) -> &str {
-        &self.digest
+    pub(crate) fn digest(&self) -> Option<&str> {
+        self.digest.as_deref()
     }
 
     pub(crate) fn check_registry(&self, path: &Path, selected_route: Option<&str>) -> Result<()> {
+        self.require_installed()?;
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Registry {
@@ -516,29 +560,37 @@ mod tests {
     }
 
     #[test]
-    fn default_digest_pins_shipped_bytes_independently_of_routes() {
+    fn no_binding_has_no_document_or_digest_and_cannot_authorize_pages() {
         let root = TempDir::new().unwrap();
-        let config = config(&root);
-        let routed = Policy::compiled(&config.notification_routes).unwrap();
-        let route_free = Policy::compiled(&[]).unwrap();
-        assert_eq!(
-            routed.digest(),
-            sha256_bytes(DEFAULT_DOCUMENT.as_bytes()).as_str()
+        let policy = Policy::load(&config(&root)).unwrap();
+        assert!(policy.is_missing());
+        assert_eq!(policy.digest(), None);
+        assert!(
+            policy
+                .require_installed()
+                .unwrap_err()
+                .to_string()
+                .contains(POLICY_MISSING)
         );
-        assert_eq!(routed.digest(), route_free.digest());
-        assert_ne!(routed.inspect()["policy"], route_free.inspect()["policy"]);
+        assert!(
+            policy
+                .authorize("pagerduty-ops", "page", Some(("service-down", "service")))
+                .is_err()
+        );
+        policy.authorize("operations", "attention", None).unwrap();
+        assert_eq!(policy.inspect()["source"], "missing");
     }
 
     #[test]
-    fn exact_bytes_are_pinned_and_error_never_selects_the_default() {
+    fn exact_bytes_are_pinned_and_error_never_selects_an_example() {
         let root = TempDir::new().unwrap();
         let mut config = config(&root);
-        let default = Policy::load(&config).unwrap();
-        let bytes = serde_json::to_vec_pretty(&default.document).unwrap();
+        let example = Policy::example(&config.notification_routes).unwrap();
+        let bytes = serde_json::to_vec_pretty(&example.document).unwrap();
         install(&mut config, &root, &bytes);
         let loaded = Policy::load(&config).unwrap();
-        assert!(!loaded.compiled);
-        assert_eq!(loaded.digest, sha256_bytes(&bytes).as_str());
+        assert!(!loaded.is_missing());
+        assert_eq!(loaded.digest(), Some(sha256_bytes(&bytes).as_str()));
         let binding = config.escalation_policy.as_ref().unwrap();
         let mut changed = bytes;
         changed.push(b'\n');
@@ -552,7 +604,7 @@ mod tests {
         fs::remove_file(&binding.path).unwrap();
         assert!(Policy::load(&config).is_err());
         config.escalation_policy = None;
-        assert!(Policy::load(&config).unwrap().compiled);
+        assert!(Policy::load(&config).unwrap().is_missing());
         assert!(!config.database_path.exists());
     }
 
@@ -590,7 +642,7 @@ mod tests {
     fn load_refuses_unknown_enums_fields_duplicates_and_unbounded_permissions() {
         let root = TempDir::new().unwrap();
         let mut config = config(&root);
-        let base = Policy::compiled(&config.notification_routes)
+        let base = Policy::example(&config.notification_routes)
             .unwrap()
             .inspect()["policy"]
             .clone();
@@ -685,7 +737,7 @@ mod tests {
         notice.reference = "operations".into();
         notice.transport = NotificationTransportKind::Slack;
         config.notification_routes.push(notice);
-        let mut policy = Policy::compiled(&config.notification_routes).unwrap();
+        let mut policy = Policy::example(&config.notification_routes).unwrap();
         let rule = policy.document.anchors[0].rule.clone();
         let component = policy.document.anchors[0].components[0].clone();
         for route in &mut policy.document.routes[..2] {
@@ -718,7 +770,7 @@ mod tests {
     fn attention_mirror_must_fit_the_same_pinned_document() {
         let root = TempDir::new().unwrap();
         let mut config = config(&root);
-        let mut document = Policy::compiled(&config.notification_routes).unwrap();
+        let mut document = Policy::example(&config.notification_routes).unwrap();
         let path = root.path().join("registry.json");
         let mut mirror = json!({"schema":"nq.escalation_registry.v1", "anchors":[{
             "rule":"remediation-journal-critical", "components":["service"], "response_classes":["page"]
