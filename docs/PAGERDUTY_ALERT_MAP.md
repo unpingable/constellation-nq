@@ -4,10 +4,10 @@ This maps each rule anchor of the candidate beta alert registry
 (`constellation-beta.rules.yml` and `RUNBOOKS.md` in the Cartography
 `architecture/beta-observability/` design, recorded 2026-10-02) to the
 `condition.component`, `condition.rule` and `severity` of an
-`nq.notification_delivery_intent.v2`. The `rule` values below are NQ's bundled
-default escalation policy. An approved, digest-pinned
+`nq.notification_delivery_intent.v2`. The `rule` values below are the unloaded,
+packaged escalation-policy example. An approved, digest-pinned
 [escalation document](ESCALATION-POLICY.md) can change permissions without an
-adapter release. The retired `docket-not-ready` anchor is excluded by default.
+adapter release. The retired `docket-not-ready` anchor is excluded from the example.
 
 **No component evaluates or emits any of these conditions today.** The
 registry's rules reference proposed metrics that no component exports yet, and
@@ -23,8 +23,8 @@ is an interruption channel and refuses non-page intents: a "yes" condition is
 sent with `response_class: page`, for both trigger and resolve. A "no"
 condition is `attention`; send it as a v1 intent to a Slack, Discord or
 local-inbox route, because a PagerDuty route retains it as the refusal
-`response_class_not_page`. The rule anchors stay in the closed set so an
-evaluator can still decide to page on one. The severity column is only
+`response_class_not_page`. An installed policy must permit the rule and
+component before an evaluator can submit a page. The severity column is only
 PagerDuty's payload `severity` (registry `page` maps to `critical`, `warn` to
 `warning`); a site may choose another mapping, but the rule and component
 values must be permitted by the effective escalation policy.
@@ -51,9 +51,9 @@ values must be permitted by the effective escalation policy.
 
 Notes:
 
-- The closed component set has no host-level value, so `host-disk` uses
-  `host_posture`, the existing host observation owner. Changing that needs a
-  new closed value, not a free-form string.
+- The example component set has no host-level value, so `host-disk` uses
+  `host_posture`, the existing host observation owner. Changing that needs an
+  explicitly permitted value in the installed policy.
 - `docket-unsettled` serves two registry rules with different severities. They
   share a dedup key unless they use different `target_class` values, so a site
   that sends both should give them distinct classes (for example `oldest` and

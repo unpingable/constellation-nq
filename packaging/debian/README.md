@@ -28,8 +28,10 @@ semantics:
   destroyed.
 
 There is no package-owned conffile. The sample configuration is installed only
-under `/usr/share/doc/nq-ng/examples/`. The explicit, destructive local-state
-purge procedure is documented in `docs/OPERATIONS.md`.
+under `/usr/share/doc/nq-ng/examples/`, alongside the unloaded
+`escalation-policy.example.json`. Page delivery requires explicitly installing
+and pinning a reviewed document; see the installed `docs/ESCALATION-POLICY.md`.
+The explicit, destructive local-state purge procedure is documented in `docs/OPERATIONS.md`.
 
 The public operator executable is `/usr/bin/nq`, which is also owned by
 Debian's unrelated `nq` package. The generated package declares `Conflicts`

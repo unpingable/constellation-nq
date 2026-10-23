@@ -91,6 +91,8 @@ def expected_files(descriptors: list[str]) -> dict[str, int]:
         "share/doc/nq-ng/docs/PORTER_NETBOX_ADDENDUM.md": 0o644,
         "share/doc/nq-ng/examples/nq.toml": 0o644,
         "share/doc/nq-ng/examples/nq-host.toml": 0o644,
+        "share/doc/nq-ng/examples/escalation-policy.example.json": 0o644,
+        "share/doc/nq-ng/docs/ESCALATION-POLICY.md": 0o644,
         "share/nq/profiles/manifest.json": 0o644,
         "share/nq/profiles/failure-codes.json": 0o644,
         "share/nq/protocol/README.md": 0o644,

@@ -53,20 +53,32 @@ max_response_bytes = 4096
     )
 }
 
+fn example() -> Value {
+    let bytes = fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/escalation-policy.example.json"),
+    )
+    .unwrap();
+    let mut document: Value = serde_json::from_slice(&bytes).unwrap();
+    let pagerduty = document["routes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|route| route["reference"] == "pagerduty-ops")
+        .unwrap()
+        .clone();
+    document["routes"] = json!([pagerduty]);
+    document
+}
+
 #[test]
-fn inspect_policy_check_registry_and_rollback_need_no_database() {
+fn inspect_policy_check_registry_and_removal_need_no_database() {
     let root = tempfile::tempdir().unwrap();
     let active = root.path().join("nq.toml");
     fs::write(&active, config(root.path(), None)).unwrap();
-    let fallback = success(&run(&active, &["notification", "policy"]));
-    assert_eq!(fallback["source"], "compiled_default");
-    assert_eq!(fallback["policy"]["schema"], "nq.escalation_policy.v1");
-    assert_eq!(fallback["policy"]["anchors"].as_array().unwrap().len(), 17);
-    assert_eq!(
-        fallback["digest"],
-        sha256_bytes(include_bytes!("../src/escalation-default.json")).as_str()
-    );
-    let mut document = fallback["policy"].clone();
+    let missing = success(&run(&active, &["notification", "policy"]));
+    assert_eq!(missing["source"], "missing");
+    assert!(missing.get("policy").is_none());
+    let mut document = example();
     let anchor = json!({"rule":"remediation-journal-critical", "components":["service"], "response_classes":["page"]});
     document["anchors"]
         .as_array_mut()
@@ -89,11 +101,29 @@ fn inspect_policy_check_registry_and_rollback_need_no_database() {
         "--check-registry",
         mirror.to_str().unwrap(),
     ];
-    assert!(!run(&active, &registry_args).status.success());
+    for args in [&registry_args[..], &["config", "check"]] {
+        let failure = run(&active, args);
+        assert!(!failure.status.success());
+        let error = String::from_utf8_lossy(&failure.stderr);
+        assert!(
+            error.contains("missing escalation policy document"),
+            "{error}"
+        );
+    }
     let bytes = serde_json::to_vec_pretty(&document).unwrap();
     let digest = sha256_bytes(&bytes);
     fs::write(root.path().join("policy.json"), bytes).unwrap();
-    fs::write(&active, config(root.path(), Some(digest.as_str()))).unwrap();
+    let candidate = root.path().join("candidate.toml");
+    fs::write(&candidate, config(root.path(), Some(digest.as_str()))).unwrap();
+    // An instance without a document can preview and activate its first pin.
+    success(&run(
+        &active,
+        &["config", "diff", candidate.to_str().unwrap()],
+    ));
+    success(&run(
+        &active,
+        &["config", "apply", candidate.to_str().unwrap()],
+    ));
     let installed = success(&run(&active, &registry_args));
     assert_eq!(installed["source"], "installed");
     assert_eq!(installed["digest"], digest.as_str());
@@ -102,10 +132,7 @@ fn inspect_policy_check_registry_and_rollback_need_no_database() {
     fs::remove_file(root.path().join("policy.json")).unwrap();
     assert!(!run(&active, &["notification", "policy"]).status.success());
     fs::write(&active, config(root.path(), None)).unwrap();
-    assert_eq!(
-        success(&run(&active, &["notification", "policy"])),
-        fallback
-    );
+    assert_eq!(success(&run(&active, &["notification", "policy"])), missing);
     for path in [
         "absent.db",
         "absent.sock",
@@ -121,7 +148,7 @@ fn invalid_pinned_policy_stops_every_delivery_surface_before_effects() {
     let root = tempfile::tempdir().unwrap();
     let active = root.path().join("nq.toml");
     fs::write(&active, config(root.path(), None)).unwrap();
-    let valid = success(&run(&active, &["notification", "policy"]))["policy"].clone();
+    let valid = example();
     for invalid in ["digest", "oversize", "enum"] {
         let mut document = valid.clone();
         document["routes"][0]["handler"]["kind"] = json!("unsupported");
@@ -225,7 +252,7 @@ fn broken_policy_does_not_stop_observation_but_refuses_notification_admission() 
     let root = tempfile::tempdir().unwrap();
     let active = root.path().join("nq.toml");
     // Observation must also survive invalid approval metadata, not just bad JSON.
-    for broken in ["missing", "malformed", "pin", "relative"] {
+    for broken in ["unconfigured", "missing", "malformed", "pin", "relative"] {
         let bytes = b"{broken JSON";
         fs::write(root.path().join("policy.json"), bytes).unwrap();
         let digest = if broken == "pin" {
@@ -233,7 +260,14 @@ fn broken_policy_does_not_stop_observation_but_refuses_notification_admission() 
         } else {
             sha256_bytes(bytes).into_string()
         };
-        let mut configuration = config(root.path(), Some(&digest));
+        let mut configuration = config(
+            root.path(),
+            if broken == "unconfigured" {
+                None
+            } else {
+                Some(&digest)
+            },
+        );
         if broken == "missing" {
             fs::remove_file(root.path().join("policy.json")).unwrap();
         } else if broken == "relative" {
@@ -243,11 +277,20 @@ fn broken_policy_does_not_stop_observation_but_refuses_notification_admission() 
             );
         }
         fs::write(&active, configuration).unwrap();
-        if broken == "missing" {
-            success(&run(&active, &["init"]));
+        if broken == "unconfigured" {
+            let initialized = success(&run(&active, &["init"]));
+            assert_eq!(initialized["escalation_policy"]["state"], "missing");
         }
         let doctor = success(&run(&active, &["doctor"]));
-        assert_eq!(doctor["escalation_policy"]["state"], "failed", "{broken}");
+        assert_eq!(
+            doctor["escalation_policy"]["state"],
+            if broken == "unconfigured" {
+                "missing"
+            } else {
+                "failed"
+            },
+            "{broken}"
+        );
         let daemon = Command::new(env!("CARGO_BIN_EXE_nqd"))
             .args(["--config", active.to_str().unwrap(), "--once"])
             .output()
@@ -275,7 +318,9 @@ fn broken_policy_does_not_stop_observation_but_refuses_notification_admission() 
             ],
         );
         assert!(!output.status.success(), "{broken}");
-        assert!(String::from_utf8_lossy(&output.stderr).contains("escalation policy"));
+        if broken != "unconfigured" {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("escalation policy"));
+        }
         assert!(!run(&active, &["config", "check"]).status.success());
     }
 }

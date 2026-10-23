@@ -1582,6 +1582,10 @@ fn initialize(config_path: &Path, arguments: InitArgs, json_output: bool) -> Res
     print_value(
         &json!({
             "initialized": true,
+            "escalation_policy": match crate::escalation::Policy::load(&config) {
+                Ok(policy) => policy.status(),
+                Err(error) => json!({"state":"failed", "diagnostic":format!("{error:#}")}),
+            },
             "database": config.database_path,
             "schema_version": nq_store::SCHEMA_VERSION,
         }),
@@ -1596,7 +1600,7 @@ fn config_command(active: &Path, command: ConfigCommand, json_output: bool) -> R
             let config = NqConfig::load(&path)
                 .with_context(|| format!("cannot validate {}", path.display()))?;
             validate_compiled_profiles(&config)?;
-            crate::escalation::Policy::load(&config)?;
+            crate::escalation::Policy::load(&config)?.require_installed()?;
             let digest = semantic_digest(&config)?.to_string();
             print_value(
                 &json!({"valid": true, "path": path, "config_digest": digest}),
@@ -1610,7 +1614,7 @@ fn config_command(active: &Path, command: ConfigCommand, json_output: bool) -> R
                 .with_context(|| format!("cannot load candidate {}", candidate.display()))?;
             validate_compiled_profiles(&candidate_config)?;
             crate::escalation::Policy::load(&current)?;
-            crate::escalation::Policy::load(&candidate_config)?;
+            crate::escalation::Policy::load(&candidate_config)?.require_installed()?;
             let current_digest = semantic_digest(&current)?.to_string();
             let candidate_digest = semantic_digest(&candidate_config)?.to_string();
             print_value(
@@ -1626,7 +1630,7 @@ fn config_command(active: &Path, command: ConfigCommand, json_output: bool) -> R
             let loaded = LoadedConfig::load(&candidate)
                 .with_context(|| format!("cannot load candidate {}", candidate.display()))?;
             validate_compiled_profiles(loaded.config())?;
-            crate::escalation::Policy::load(loaded.config())?;
+            crate::escalation::Policy::load(loaded.config())?.require_installed()?;
             let config_digest = semantic_digest(loaded.config())?.to_string();
             activate_loaded_config(&loaded, active)
                 .with_context(|| format!("cannot activate candidate {}", candidate.display()))?;
@@ -2249,7 +2253,7 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
     let config = NqConfig::load(config_path)?;
     validate_compiled_profiles(&config)?;
     let escalation_policy = match crate::escalation::Policy::load(&config) {
-        Ok(policy) => json!({"state": "healthy", "digest": policy.digest()}),
+        Ok(policy) => policy.status(),
         Err(error) => json!({"state": "failed", "diagnostic": format!("{error:#}"),
             "notification_admission": "refused"}),
     };
