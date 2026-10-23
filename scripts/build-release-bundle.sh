@@ -349,6 +349,10 @@ install -Dm0644 "$root/examples/nq.toml" \
     "$stage/share/doc/nq-ng/examples/nq.toml"
 install -Dm0644 "$root/examples/nq-host.toml" \
     "$stage/share/doc/nq-ng/examples/nq-host.toml"
+install -Dm0644 "$root/examples/escalation-policy.example.json" \
+    "$stage/share/doc/nq-ng/examples/escalation-policy.example.json"
+install -Dm0644 "$root/docs/ESCALATION-POLICY.md" \
+    "$stage/share/doc/nq-ng/docs/ESCALATION-POLICY.md"
 
 for descriptor in "${descriptors[@]}"; do
     install -Dm0644 "$descriptor" "$stage/share/nq/profiles/$(basename -- "$descriptor")"

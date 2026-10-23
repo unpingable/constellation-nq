@@ -1,0 +1,374 @@
+{
+  "schema": "nq.escalation_policy.v1",
+  "anchors": [
+    {
+      "rule": "nq-no-fresh-acquisition",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "host-posture-unknown",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "nightshift-recurrence-missing",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "docket-unsettled",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "ag-executor-unavailable",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "service-down",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "host-disk",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "nq-latency-near-bound",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "nq-open-cost-growing",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "nq-pending-acquisition",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "host-posture-refusals",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "host-posture-retention",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "nightshift-evidence-stale",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "nightshift-cycle-slow",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "docket-reconciliation-lag",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "ag-repeated-refusals",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    },
+    {
+      "rule": "build-identity",
+      "components": [
+        "nq",
+        "host_posture",
+        "nightshift",
+        "docket",
+        "ag",
+        "service"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "reference": "operations",
+      "anchors": [
+        "nq-no-fresh-acquisition",
+        "host-posture-unknown",
+        "nightshift-recurrence-missing",
+        "docket-unsettled",
+        "ag-executor-unavailable",
+        "service-down",
+        "host-disk",
+        "nq-latency-near-bound",
+        "nq-open-cost-growing",
+        "nq-pending-acquisition",
+        "host-posture-refusals",
+        "host-posture-retention",
+        "nightshift-evidence-stale",
+        "nightshift-cycle-slow",
+        "docket-reconciliation-lag",
+        "ag-repeated-refusals",
+        "build-identity"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ],
+      "handler": {
+        "kind": "slack",
+        "timeout_ms": 10000,
+        "max_response_bytes": 4096
+      }
+    },
+    {
+      "reference": "operations-discord",
+      "anchors": [
+        "nq-no-fresh-acquisition",
+        "host-posture-unknown",
+        "nightshift-recurrence-missing",
+        "docket-unsettled",
+        "ag-executor-unavailable",
+        "service-down",
+        "host-disk",
+        "nq-latency-near-bound",
+        "nq-open-cost-growing",
+        "nq-pending-acquisition",
+        "host-posture-refusals",
+        "host-posture-retention",
+        "nightshift-evidence-stale",
+        "nightshift-cycle-slow",
+        "docket-reconciliation-lag",
+        "ag-repeated-refusals",
+        "build-identity"
+      ],
+      "response_classes": [
+        "informational",
+        "attention",
+        "page"
+      ],
+      "handler": {
+        "kind": "discord",
+        "timeout_ms": 10000,
+        "max_response_bytes": 4096
+      }
+    },
+    {
+      "reference": "pagerduty-ops",
+      "anchors": [
+        "nq-no-fresh-acquisition",
+        "host-posture-unknown",
+        "nightshift-recurrence-missing",
+        "docket-unsettled",
+        "ag-executor-unavailable",
+        "service-down",
+        "host-disk",
+        "nq-latency-near-bound",
+        "nq-open-cost-growing",
+        "nq-pending-acquisition",
+        "host-posture-refusals",
+        "host-posture-retention",
+        "nightshift-evidence-stale",
+        "nightshift-cycle-slow",
+        "docket-reconciliation-lag",
+        "ag-repeated-refusals",
+        "build-identity"
+      ],
+      "response_classes": [
+        "page"
+      ],
+      "handler": {
+        "kind": "pagerduty",
+        "timeout_ms": 10000,
+        "max_response_bytes": 4096,
+        "max_details_bytes": 4096
+      }
+    }
+  ]
+}

@@ -64,18 +64,22 @@ refused and nothing is sent, so the alert stays open until a resolve with
 `response_class` value outside the closed set is a malformed intent and is
 refused as a command error, with no retained record.
 
-Slack, Discord and local-inbox routes take any class, including `page`. The
+Slack, Discord and local-inbox routes take any class permitted by the installed
+policy, including `page`. Without a policy, notice classes keep flowing. The
 class is optional there and defaults to `attention`; the message starts with
 it, for example `[page] Attention required: ...` or, in a local-inbox
 message summary, `[attention] check storage`.
 
 ## Configure and inspect
 
-Escalation authorization can come from an operator-installed, digest-pinned
+Page escalation authorization requires an operator-installed, digest-pinned
 [`nq.escalation_policy.v1` document](ESCALATION-POLICY.md). Without a configured
-document, the bundled default preserves the former 17 anchors and six
-components. `nq --config FILE --json notification policy` shows the effective
-document and digest without opening the database or resolving credentials.
+document, v2 pages retain an `escalation_policy_missing` refusal and notices
+continue through the routes configuration. The 17-anchor by six-component
+example is packaged as documentation and is never loaded automatically.
+`nq --config FILE --json notification policy` shows the installed document and
+digest, or the missing-policy diagnostic, without opening the database or
+resolving credentials.
 
 Add a route to an explicit NQ configuration whose database, socket, admissions
 and helper-runtime paths are all selected by the operator:
@@ -301,8 +305,8 @@ may be up to 1024 bytes) and, with the same closed field set:
 | `response_class` | required in effect: must be `page`, or the record is retained as the refusal `response_class_not_page` (see [above](#sinks-are-not-interchangeable)) |
 | `action` | `trigger` or `resolve` |
 | `condition.site` | bounded site or installation id, 1..=64 of `[a-z0-9._-]` |
-| `condition.component` | permitted by the effective escalation policy for this anchor; default: `nq`, `host_posture`, `nightshift`, `docket`, `ag`, `service` |
-| `condition.rule` | an anchor in the effective escalation policy; the default is mapped in [`PAGERDUTY_ALERT_MAP.md`](PAGERDUTY_ALERT_MAP.md) |
+| `condition.component` | permitted by the effective escalation policy for this anchor; example: `nq`, `host_posture`, `nightshift`, `docket`, `ag`, `service` |
+| `condition.rule` | an anchor in the effective escalation policy; the example is mapped in [`PAGERDUTY_ALERT_MAP.md`](PAGERDUTY_ALERT_MAP.md) |
 | `condition.target_class` | optional, 1..=48 of `[a-z0-9._-]` |
 | `severity` | `critical`, `error`, `warning` or `info` |
 | `runbook_url` | optional `https://` URL, at most 1024 bytes |

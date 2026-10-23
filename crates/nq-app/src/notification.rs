@@ -1347,7 +1347,8 @@ where
     // A non-page intent is refused whatever its owner receipt would replay to,
     // so replay runs only for intents that could be sent.
     let not_page = pagerduty && !intent.is_page();
-    if !not_page {
+    let missing_policy = policy.is_missing() && intent.is_page();
+    if !not_page && !missing_policy {
         policy.authorize(
             route_ref,
             intent.response_class(),
@@ -1412,6 +1413,14 @@ where
                 "delivery_state": existing.delivery_state,
             }));
         }
+    }
+    if missing_policy {
+        return retain_refusal(
+            &mut store,
+            &notification_id,
+            now,
+            "escalation_policy_missing",
+        );
     }
     if not_page {
         return retain_refusal(&mut store, &notification_id, now, RESPONSE_CLASS_NOT_PAGE);
@@ -1724,13 +1733,13 @@ mod tests {
     use tempfile::TempDir;
 
     fn parse_submitted(value: Value) -> Result<(Intent, Option<PagerDutyFields>)> {
-        super::parse_submitted(value, &Policy::compiled(&[])?)
+        super::parse_submitted(value, &Policy::example(&[])?)
     }
 
     fn read_intent(
         path: &std::path::Path,
     ) -> Result<(Intent, Option<PagerDutyFields>, CanonicalDocument)> {
-        super::read_intent(path, &Policy::compiled(&[])?)
+        super::read_intent(path, &Policy::example(&[])?)
     }
 
     fn prepare_resubmission(
@@ -2822,6 +2831,11 @@ mod tests {
     fn pagerduty_config(root: &TempDir) -> NqConfig {
         let mut config = config(root);
         config.notification_routes.push(pagerduty_route());
+        let document = Policy::example(&config.notification_routes)
+            .unwrap()
+            .inspect()["policy"]
+            .clone();
+        installed_policy(root, &mut config, &document);
         config
     }
 
@@ -4019,7 +4033,7 @@ mod tests {
     }
 
     fn remediation_policy(config: &NqConfig) -> Value {
-        let mut document = Policy::compiled(&config.notification_routes)
+        let mut document = Policy::example(&config.notification_routes)
             .unwrap()
             .inspect()["policy"]
             .clone();
@@ -4036,7 +4050,7 @@ mod tests {
     }
 
     #[test]
-    fn compiled_policy_reproduces_exactly_the_legacy_anchor_component_set() {
+    fn installed_example_document_reproduces_exactly_the_legacy_anchor_component_set() {
         let rules = [
             "nq-no-fresh-acquisition",
             "host-posture-unknown",
@@ -4064,7 +4078,9 @@ mod tests {
             "ag",
             "service",
         ];
-        let policy = Policy::compiled(&[pagerduty_route()]).unwrap();
+        let root = TempDir::new().unwrap();
+        let config = pagerduty_config(&root);
+        let policy = Policy::load(&config).unwrap();
         let document = policy.inspect();
         let anchors = document["policy"]["anchors"].as_array().unwrap();
         assert_eq!(anchors.len(), 17);
@@ -4096,6 +4112,99 @@ mod tests {
                 .is_err()
         );
         assert!(policy.validate_condition("service-down", "kernel").is_err());
+    }
+
+    #[tokio::test]
+    async fn no_document_refuses_pages_before_replay_and_dispatch_and_retains_redacted_history() {
+        let root = TempDir::new().unwrap();
+        let mut config = pagerduty_config(&root);
+        let binding = config.escalation_policy.take().unwrap();
+        fs::remove_file(binding.path).unwrap();
+        let mut value = pagerduty_intent("trigger", "missing-policy", "inspect");
+        // This identity is not in the example. Absence must never grant it.
+        value["condition"]["rule"] = json!("operator-new-anchor");
+        value["condition"]["component"] = json!("operator-new-component");
+        let path = write_intent(&root, value);
+        let result = submit_with_dispatch(
+            &config,
+            &path,
+            "pd.ops",
+            true,
+            |_| panic!("missing policy must precede credential resolution"),
+            |_| Ok(|_, _, _| async { panic!("missing policy must precede dispatch") }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["delivery_state"], "refused");
+        let history = inspect(&config, None).unwrap();
+        assert_eq!(
+            history[0]["pagerduty"]["last_event"]["detail"]["reason"],
+            "escalation_policy_missing"
+        );
+        assert_routing_key_absent(&config);
+        assert_eq!(
+            submit(&config, &path, "pd.ops", true).await.unwrap(),
+            result
+        );
+        let resubmitted = resubmit(
+            &config,
+            result["notification_id"].as_str().unwrap(),
+            "missing-policy-retry",
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resubmitted["delivery_state"], "refused");
+        assert_eq!(inspect(&config, None).unwrap().as_array().unwrap().len(), 2);
+        for (action, digit) in [("trigger", 'a'), ("resolve", 'b')] {
+            let digest = format!("sha256:{}", digit.to_string().repeat(64));
+            let mut value = pagerduty_intent(action, &digest, "inspect");
+            value["attention_kind"] = json!("nightshift_receipt");
+            value["attention_receipt_digest"] = json!(digest);
+            value["transition_id"] = json!(digest);
+            value["owner_receipt"] = replay_bundle();
+            // With no verifier enrolled, any replay attempt would fail.
+            let path = write_intent(&root, value);
+            assert_eq!(
+                submit(&config, &path, "pd.ops", true).await.unwrap()["delivery_state"],
+                "refused"
+            );
+        }
+        assert_routing_key_absent(&config);
+    }
+
+    #[tokio::test]
+    async fn no_document_delivers_notices_through_each_existing_route_kind() {
+        for transport in [
+            NotificationTransportKind::Slack,
+            NotificationTransportKind::Discord,
+        ] {
+            let root = TempDir::new().unwrap();
+            let mut config = config(&root);
+            config.notification_routes[0].transport = transport;
+            assert!(config.escalation_policy.is_none());
+            for class in ["informational", "attention"] {
+                let mut value = intent("inspect", "operator_assertion", None);
+                value["stable_event_id"] = json!(class);
+                value["response_class"] = json!(class);
+                let path = write_intent(&root, value);
+                let result =
+                    submit_with_dispatch(&config, &path, "ops.primary", true, endpoint, |_| {
+                        Ok(|_, _, _| async { Ok(accepted()) })
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(result["delivery_state"], "accepted");
+            }
+        }
+        let root = TempDir::new().unwrap();
+        let config = local_config(&root);
+        assert!(config.escalation_policy.is_none());
+        let path = write_intent(&root, local_intent());
+        assert_eq!(
+            deliver_local(&config, &path, "local.ops").unwrap()["delivery_state"],
+            "accepted"
+        );
     }
 
     #[tokio::test]
@@ -4246,7 +4355,7 @@ mod tests {
                 config(&root)
             };
             config.notification_routes[0].transport = transport;
-            let mut document = Policy::compiled(&config.notification_routes)
+            let mut document = Policy::example(&config.notification_routes)
                 .unwrap()
                 .inspect()["policy"]
                 .clone();
