@@ -12336,12 +12336,17 @@ fn validate_evaluation_revision_shape(
             "evaluation/finding {identity} has impossible durable revision {revision}"
         )));
     }
-    if let Some(frontier) = scope.frontier() {
+    // A foreign expiry can retire the handle's entire validated prefix. In
+    // that case replay the surviving sequence from its declared floor instead
+    // of demanding contiguous rows from a frontier whose rows no longer exist.
+    let floor = retention::boundary(connection)?.evaluation_floor;
+    if let Some(frontier) = scope.frontier()
+        && frontier.evaluation_sequence >= floor
+    {
         return validate_evaluation_revision_shape_since(connection, frontier);
     }
     // Rows at or below the floor are declared islands or compact records,
     // proven by retention validation; the append sequence above it is exact.
-    let floor = retention::boundary(connection)?.evaluation_floor;
     let sequence_shape: (i64, i64, i64) = connection.query_row(
         "SELECT COALESCE(MIN(evaluation_sequence), 0),
                 COALESCE(MAX(evaluation_sequence), 0), COUNT(*)
@@ -15697,7 +15702,7 @@ mod tests {
                     "2026-07-17T00:00:00Z",
                     "fixture-engine-rules",
                     None,
-                    |_, _| Ok::<_, StoreError>(SemanticCertification::NotEstablished),
+                    |_, _, _| Ok::<_, StoreError>(SemanticCertification::NotEstablished),
                     None::<fn(&Store, &ExpiryCandidates) -> Result<(), StoreError>>,
                 )
                 .unwrap();

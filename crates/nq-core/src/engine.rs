@@ -8887,17 +8887,23 @@ fn validate_semantic_planes_in_full_with(
     store: &Store,
     evaluation: &mut Option<HistoryHeads>,
 ) -> Result<nq_store::SemanticState, EngineError> {
-    validate_semantic_planes_in_full_through(store, evaluation, certified_replay_bound(store)?)
+    validate_semantic_planes_in_full_through(
+        store,
+        evaluation,
+        certified_replay_bound(store)?,
+        store.prior_watermark(),
+    )
 }
 
 fn validate_semantic_planes_in_full_through(
     store: &Store,
     evaluation: &mut Option<HistoryHeads>,
     through: i64,
+    comparison: Option<&nq_store::ValidationWatermark>,
 ) -> Result<nq_store::SemanticState, EngineError> {
     // The evaluation history is replayed once, first; status and rejected
     // custody then read their runs' evaluations without replaying it again.
-    let (_, heads) = replay_evaluation_history_in_full_through(store, through)?;
+    let (_, heads) = replay_evaluation_history_in_full_through(store, through, comparison)?;
     *evaluation = Some(heads.clone());
     validate_admitted_report_history(store)?;
     validate_watcher_run_history(store)?;
@@ -9220,25 +9226,26 @@ fn expire_ordinary_batch(
         cutoff,
         engine_validation_rules(),
         Some(batch_runs),
-        |snapshot, bounds| {
+        |snapshot, bounds, comparison| {
             #[cfg(test)]
             concurrent_writer_for_test(snapshot);
             validate_core_history_since_open(snapshot)?;
             // The same validation an engine open performs beyond its
             // certification; the store promotes it into the certification
             // before carrying it across the expiry.
-            let state = match engine_semantic_state(snapshot) {
-                Some((frontier, state)) => validate_semantic_planes_since_through(
+            let state = match (comparison, engine_semantic_state(snapshot)) {
+                (None, Some((frontier, state))) => validate_semantic_planes_since_through(
                     snapshot,
                     &frontier,
                     &state,
                     &mut None,
                     Some(bounds),
                 )?,
-                None => validate_semantic_planes_in_full_through(
+                _ => validate_semantic_planes_in_full_through(
                     snapshot,
                     &mut None,
                     bounds.evaluation_sequence,
+                    comparison.or_else(|| snapshot.prior_watermark()),
                 )?,
             };
             Ok(nq_store::SemanticCertification::Established(state))
@@ -10532,10 +10539,10 @@ where
 fn replay_evaluation_history_in_full_through(
     store: &Store,
     bound: i64,
+    comparison: Option<&nq_store::ValidationWatermark>,
 ) -> Result<(usize, HistoryHeads), EngineError> {
     store.validate_evaluation_history_invariants()?;
-    let prior = store
-        .prior_watermark()
+    let prior = comparison
         .filter(|watermark| watermark.engine_rules == engine_validation_rules())
         .and_then(|watermark| {
             watermark
@@ -15026,6 +15033,97 @@ sys.stdout.write("\n")
                     "{error}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn foreign_expiry_full_replay_establishes_resident_certification() {
+        for (retire_resident_prefix, substitution) in [
+            (false, "none"),
+            (false, "row"),
+            (false, "semantic"),
+            (true, "none"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("foreign-recertification.db");
+            let (mut store, config) = holes_fixture(&path, &[1.0, 1.0], "foreign-recertification");
+            store
+                .append_genesis(&nq_store::GenesisInput {
+                    genesis_id: "genesis-foreign-recertification".into(),
+                    legacy_manifest_digest: None,
+                    created_at: timestamp(Utc::now()),
+                    detail: canonical(&json!({"source": "test"})).unwrap(),
+                })
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            let first_cutoff = timestamp(Utc::now());
+            if !retire_resident_prefix {
+                holes_collect(&mut store, &config, "resident-survives", 1.0);
+            }
+            drop(store);
+            let engine_config = holes_engine_config(&path);
+            let mut resident = CollectionEngine::open(&engine_config).unwrap();
+            {
+                let mut other = CollectionEngine::open(&engine_config).unwrap();
+                holes_collect(other.store_mut_for_test(), &config, "foreign-new-a", 8.0);
+                holes_collect(other.store_mut_for_test(), &config, "foreign-new-b", 1.0);
+                let cutoff = if retire_resident_prefix {
+                    std::thread::sleep(std::time::Duration::from_millis(1100));
+                    timestamp(Utc::now())
+                } else {
+                    first_cutoff
+                };
+                expire_ordinary_history(other.store_mut_for_test(), &cutoff).unwrap();
+                holes_collect(other.store_mut_for_test(), &config, "foreign-new-c", 1.0);
+            }
+            assert!(
+                engine_semantic_state(&resident.store).is_none(),
+                "foreign frontier exceeds resident validation"
+            );
+            let before = resident.store.retention_boundary().unwrap();
+            if substitution == "row" {
+                mutate_bypassing_triggers(
+                    &path,
+                    "status_events",
+                    "UPDATE status_events SET observed_at='2000-01-01T00:00:00.000Z' WHERE status_sequence=(SELECT MIN(status_sequence) FROM status_events)",
+                );
+            } else if substitution == "semantic" {
+                let mut prior = read_watermark_file(&engine_config);
+                prior.semantic.as_mut().unwrap().evaluation_heads[0].evaluation_revision += 1;
+                prior.commitment_digest = prior.computed_commitment();
+                write_watermark_file(&engine_config, &prior);
+            }
+            let prior_bytes = fs::read(nq_store::watermark_path(&path)).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            let attempt =
+                expire_ordinary_history(resident.store_mut_for_test(), &timestamp(Utc::now()));
+            if substitution != "none" {
+                let error = attempt.unwrap_err();
+                let expected = if substitution == "row" {
+                    "changed at or below the frontier certified"
+                } else {
+                    "certified semantic state"
+                };
+                assert!(
+                    error.to_string().contains(expected),
+                    "{substitution}: {error}"
+                );
+                assert_eq!(resident.store.retention_boundary().unwrap(), before);
+                assert_eq!(
+                    fs::read(nq_store::watermark_path(&path)).unwrap(),
+                    prior_bytes
+                );
+                continue;
+            }
+            let first = attempt.unwrap();
+            assert!(first.deleted_rows > 0);
+            assert!(
+                engine_semantic_state(&resident.store).is_some(),
+                "full snapshot replay must establish a reusable resident certificate"
+            );
+            drop(resident);
+            let full = Store::open_validating_fully(&path).unwrap();
+            validate_fully_and_record(&full).unwrap();
         }
     }
 

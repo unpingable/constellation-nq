@@ -1074,7 +1074,7 @@ impl Store {
             cutoff,
             None,
             None,
-            |store: &Self, _| validate(store).map(|()| None),
+            |store: &Self, _, _| validate(store).map(|()| None),
             validate_candidates,
         )
     }
@@ -1086,10 +1086,13 @@ impl Store {
     /// certification. Before the expiry carries the handle's certification
     /// forward, that validation is promoted into it: the store-level laws of
     /// the rows beyond the certified frontier are validated in the same
-    /// snapshot and the certification is extended to the snapshot frontier
-    /// (as [`Self::record_validation_watermark`] extends an applied
-    /// watermark), so the carried watermark covers the current frontier
-    /// rather than the one this handle certified when it opened.
+    /// snapshot and the certification is extended to the snapshot frontier.
+    /// A supplied comparison watermark requires a full semantic replay, including
+    /// comparison of its same-rule semantic heads at its frontier. This handles
+    /// a foreign expiry that advanced beyond this resident handle's validation.
+    /// As with [`Self::record_validation_watermark`], the carried watermark
+    /// covers the validated frontier rather than the one this handle originally
+    /// certified when it opened.
     ///
     /// With `max_candidate_runs`, the expiry is one batch: it selects at most
     /// that many aged runs beyond the floors (oldest first) besides the
@@ -1106,14 +1109,14 @@ impl Store {
     ) -> Result<RetentionResult, E>
     where
         E: From<StoreError>,
-        F: FnOnce(&Self, &crate::HistoryFrontier) -> Result<crate::SemanticCertification, E>,
+        F: FnOnce(&Self, &crate::HistoryFrontier, Option<&crate::ValidationWatermark>) -> Result<crate::SemanticCertification, E>,
         G: FnOnce(&Self, &ExpiryCandidates) -> Result<(), E>,
     {
         self.expire_ordinary_before_inner(
             cutoff,
             Some(engine_rules),
             max_candidate_runs,
-            |store: &Self, bounds| validate(store, bounds).map(Some),
+            |store: &Self, bounds, prior| validate(store, bounds, prior).map(Some),
             validate_candidates,
         )
     }
@@ -1128,7 +1131,7 @@ impl Store {
     ) -> Result<RetentionResult, E>
     where
         E: From<StoreError>,
-        F: FnOnce(&Self, &crate::HistoryFrontier) -> Result<Option<crate::SemanticCertification>, E>,
+        F: FnOnce(&Self, &crate::HistoryFrontier, Option<&crate::ValidationWatermark>) -> Result<Option<crate::SemanticCertification>, E>,
         G: FnOnce(&Self, &ExpiryCandidates) -> Result<(), E>,
     {
         chrono::DateTime::parse_from_rfc3339(cutoff)
@@ -1149,10 +1152,14 @@ impl Store {
             .map_err(StoreError::from)
             .map_err(E::from)?;
         let (proof, promoted) = self.with_read_snapshot(|store, bounds| {
-            let semantic = validate(store, bounds)?;
+            let comparison = match engine_rules {
+                Some(rules) => store.promotion_comparison(bounds, rules).map_err(E::from)?,
+                None => None,
+            };
+            let semantic = validate(store, bounds, comparison.as_deref())?;
             let promoted = match (semantic, engine_rules) {
                 (Some(semantic), Some(rules)) => {
-                    store.promoted_certification(bounds, semantic, rules).map_err(E::from)?
+                    store.promoted_certification(bounds, semantic, rules, comparison.as_deref()).map_err(E::from)?
                 }
                 _ => None,
             };
@@ -1236,27 +1243,37 @@ impl Store {
         bounds: &HistoryFrontier,
         semantic: crate::SemanticCertification,
         engine_rules: &str,
+        comparison: Option<&crate::ValidationWatermark>,
     ) -> Result<Option<crate::ValidationWatermark>, StoreError> {
         let current = witness(&self.connection)?;
-        let Some(certified) = self.carriable_watermark(&current) else {
-            return Ok(None);
-        };
-        if certified.engine_rules != engine_rules
-            || certified.frontier.tables.iter().any(|(table, frontier)| {
-                frontier.max_rowid > bounds.max_rowid(table)
-            })
-        {
-            return Ok(None);
-        }
         let Some(identity) = self.store_identity()? else {
             return Ok(None);
         };
         if identity.retention != current {
             return Ok(None);
         }
-        self.validate_history_since(&certified.frontier)?;
-        let frontier =
-            HistoryFrontier::certify(&self.connection, Some(&certified.frontier), bounds, None)?;
+        let frontier = if let Some(prior) = comparison {
+            // The callback replayed every semantic plane, comparing the current
+            // generation's semantic certificate. Independently revalidate every
+            // Store row and compare its complete certified content chains.
+            self.validate_history(Scope::FULL)?;
+            HistoryFrontier::certify(&self.connection, None, bounds, Some(prior))?
+        } else {
+            let Some(certified) = self.carriable_watermark(&current) else {
+                return Ok(None);
+            };
+            if certified.engine_rules != engine_rules
+                || certified
+                    .frontier
+                    .tables
+                    .iter()
+                    .any(|(table, frontier)| frontier.max_rowid > bounds.max_rowid(table))
+            {
+                return Ok(None);
+            }
+            self.validate_history_since(&certified.frontier)?;
+            HistoryFrontier::certify(&self.connection, Some(&certified.frontier), bounds, None)?
+        };
         Ok(Some(crate::history_scope::build_watermark(
             &identity,
             engine_rules,
@@ -1264,6 +1281,50 @@ impl Store {
             semantic,
             crate::now_utc(),
         )))
+    }
+
+    /// A resident handle may be behind a foreign expiry's frontier and unable
+    /// to adopt its certification. Preserve the current sidecar as a comparison
+    /// for a full snapshot replay rather than discarding that replay forever.
+    fn promotion_comparison(
+        &self,
+        bounds: &HistoryFrontier,
+        engine_rules: &str,
+    ) -> Result<Option<Box<crate::ValidationWatermark>>, StoreError> {
+        if !self.validation.may_record || self.validation.store_validated.is_none() {
+            return Ok(None);
+        }
+        let current = witness(&self.connection)?;
+        if self
+            .carriable_watermark(&current)
+            .is_some_and(|w| w.engine_rules == engine_rules)
+        {
+            return Ok(None);
+        }
+        let (Some(path), Some(identity)) = (self.path.as_ref(), self.store_identity()?) else {
+            return Ok(None);
+        };
+        let crate::history_scope::SidecarState::Present(prior) =
+            crate::history_scope::read_sidecar(path)
+        else {
+            return Ok(None);
+        };
+        crate::history_scope::refuse_foreign(path, &prior, Some(&identity))?;
+        if !crate::history_scope::applies(&prior, &identity) {
+            return Ok(None);
+        }
+        if prior
+            .frontier
+            .tables
+            .iter()
+            .any(|(table, frontier)| frontier.max_rowid > bounds.max_rowid(table))
+        {
+            return Err(StoreError::Refused(crate::Refusal::HistoryChanged(
+                "during",
+            )));
+        }
+        crate::history_scope::verify_watermark(&self.connection, &prior)?;
+        Ok(Some(prior))
     }
 
     /// The watermark this handle may carry across an expiry: one it verified

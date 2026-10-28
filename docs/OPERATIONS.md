@@ -922,6 +922,17 @@ than an ordinary bounded open; supervise the original validation to its terminal
 result. Verify fresh scheduled observations after producers resume. Neither a
 rule migration nor a successful validation repairs an unrelated stalled producer.
 
+A resident collector can also fall behind a retention generation committed by
+another writer. When the carried watermark lies beyond its locally validated
+frontier, the collector performs one full snapshot replay instead of adopting
+that ahead-of-validation certificate. The replay now establishes a reusable
+resident certification: it compares the current generation's sidecar semantic
+heads and row commitments before promoting the snapshot. Previously that work
+was discarded, so every later expiry could repeat the full history walk. A
+changed certified row or same-rule semantic head still refuses; concurrent
+writes still defer the expiry. This removes repeated full validation after a
+successful recertification, not the cost of the first full replay.
+
 ### Refusals and warnings
 
 - A watermark written for another store (another genesis) refuses every open
