@@ -8681,7 +8681,7 @@ pub fn engine_validation_rules() -> &'static str {
         }
         catalog.sort();
         format!(
-            "nq-core/{}/engine-rules.1/catalog:{}",
+            "nq-core/{}/engine-rules.2/catalog:{}",
             env!("CARGO_PKG_VERSION"),
             nq_protocol::sha256_bytes(catalog.join("\n").as_bytes()).as_str()
         )
@@ -8887,9 +8887,17 @@ fn validate_semantic_planes_in_full_with(
     store: &Store,
     evaluation: &mut Option<HistoryHeads>,
 ) -> Result<nq_store::SemanticState, EngineError> {
+    validate_semantic_planes_in_full_through(store, evaluation, certified_replay_bound(store)?)
+}
+
+fn validate_semantic_planes_in_full_through(
+    store: &Store,
+    evaluation: &mut Option<HistoryHeads>,
+    through: i64,
+) -> Result<nq_store::SemanticState, EngineError> {
     // The evaluation history is replayed once, first; status and rejected
     // custody then read their runs' evaluations without replaying it again.
-    let (_, heads) = replay_evaluation_history_in_full(store)?;
+    let (_, heads) = replay_evaluation_history_in_full_through(store, through)?;
     *evaluation = Some(heads.clone());
     validate_admitted_report_history(store)?;
     validate_watcher_run_history(store)?;
@@ -8962,6 +8970,22 @@ fn validate_semantic_planes_since_with(
     state: &nq_store::SemanticState,
     evaluation: &mut Option<HistoryHeads>,
 ) -> Result<nq_store::SemanticState, EngineError> {
+    validate_semantic_planes_since_through(
+        store,
+        frontier,
+        state,
+        evaluation,
+        store.open_frontier(),
+    )
+}
+
+fn validate_semantic_planes_since_through(
+    store: &Store,
+    frontier: &nq_store::HistoryFrontier,
+    state: &nq_store::SemanticState,
+    evaluation: &mut Option<HistoryHeads>,
+    through: Option<&nq_store::HistoryFrontier>,
+) -> Result<nq_store::SemanticState, EngineError> {
     store.validate_admitted_report_associations_since(frontier)?;
     for report_id in store.admitted_report_ids_since(frontier)? {
         validate_admitted_report_record(store, &report_id)?;
@@ -8972,14 +8996,15 @@ fn validate_semantic_planes_since_with(
         store,
         frontier,
         state,
-        certified_replay_bound(store)?,
+        match through {
+            Some(bounds) => bounds.evaluation_sequence,
+            None => store.latest_evaluation_sequence()?,
+        },
     )?;
     *evaluation = Some(heads.clone());
     // Status events read their runs' evaluations, which were replayed only
-    // through the open frontier; later events are validated by the next open.
-    let status_through = store
-        .open_frontier()
-        .and_then(|open| open.max_rowid("status_events"));
+    // through the selected frontier; later events belong to the next validation.
+    let status_through = through.and_then(|bounds| bounds.max_rowid("status_events"));
     validate_run_and_status_history_since(store, frontier, status_through)?;
     for row in store.rejected_custody_since(frontier)? {
         rejected_custody_from_row(store, row, EvaluationHistory::AlreadyValidated)?;
@@ -9195,7 +9220,7 @@ fn expire_ordinary_batch(
         cutoff,
         engine_validation_rules(),
         Some(batch_runs),
-        |snapshot| {
+        |snapshot, bounds| {
             #[cfg(test)]
             concurrent_writer_for_test(snapshot);
             validate_core_history_since_open(snapshot)?;
@@ -9203,8 +9228,18 @@ fn expire_ordinary_batch(
             // certification; the store promotes it into the certification
             // before carrying it across the expiry.
             let state = match engine_semantic_state(snapshot) {
-                Some((frontier, state)) => validate_semantic_planes_since(snapshot, &frontier, &state)?,
-                None => validate_semantic_planes_in_full(snapshot)?,
+                Some((frontier, state)) => validate_semantic_planes_since_through(
+                    snapshot,
+                    &frontier,
+                    &state,
+                    &mut None,
+                    Some(bounds),
+                )?,
+                None => validate_semantic_planes_in_full_through(
+                    snapshot,
+                    &mut None,
+                    bounds.evaluation_sequence,
+                )?,
             };
             Ok(nq_store::SemanticCertification::Established(state))
         },
@@ -10494,9 +10529,11 @@ where
 /// evaluation sequence must equal the ones it recorded. A substituted
 /// evaluation head (which the bounded status snapshot would otherwise
 /// trust) or finding head is refused here.
-fn replay_evaluation_history_in_full(store: &Store) -> Result<(usize, HistoryHeads), EngineError> {
+fn replay_evaluation_history_in_full_through(
+    store: &Store,
+    bound: i64,
+) -> Result<(usize, HistoryHeads), EngineError> {
     store.validate_evaluation_history_invariants()?;
-    let bound = certified_replay_bound(store)?;
     let prior = store
         .prior_watermark()
         .filter(|watermark| watermark.engine_rules == engine_validation_rules())
@@ -10511,7 +10548,11 @@ fn replay_evaluation_history_in_full(store: &Store) -> Result<(usize, HistoryHea
     // a lineage whose newest evaluation is an island keeps it as its head.
     let mut islands = Vec::new();
     visit_island_evaluations(store, |row, _, lineage| {
-        islands.push((lineage.to_vec(), row.evaluation_revision, row.evaluation_sequence));
+        islands.push((
+            lineage.to_vec(),
+            row.evaluation_revision,
+            row.evaluation_sequence,
+        ));
         Ok(())
     })?;
     let mut reopened = 0usize;
@@ -14871,6 +14912,121 @@ sys.stdout.write("\n")
         let full = Store::open_validating_fully(&path).expect("full open");
         assert_eq!(full.prior_certification(), "compared");
         validate_fully_and_record(&full).expect("full validation agrees with the carried certification");
+    }
+
+    /// A resident handle must certify semantic heads through the same snapshot
+    /// frontier that expiry promotes, including evaluations appended after open.
+    #[test]
+    fn long_lived_expiry_promotes_current_semantic_heads() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let path = directory.path().join("semantic-promotion.db");
+        let (mut store, config) = holes_fixture(&path, &[1.0, 1.0], "promotion");
+        store
+            .append_genesis(&nq_store::GenesisInput {
+                genesis_id: "genesis-promotion".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: timestamp(Utc::now()),
+                detail: canonical(&json!({"source": "test"})).unwrap(),
+            })
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let cutoff = timestamp(Utc::now());
+        holes_collect(&mut store, &config, "promotion-survives", 8.0);
+        drop(store);
+        let engine_config = holes_engine_config(&path);
+        let mut engine = CollectionEngine::open(&engine_config).unwrap();
+        let opened = engine.store.open_frontier().unwrap().evaluation_sequence;
+        {
+            let mut other = Store::open(&path).unwrap();
+            holes_collect(&mut other, &config, "promotion-appended", 1.0);
+        }
+        let latest = engine.store.latest_evaluation_sequence().unwrap();
+        assert!(latest > opened);
+        let result = expire_ordinary_history(engine.store_mut_for_test(), &cutoff).unwrap();
+        assert!(result.deleted_rows > 0);
+        let (frontier, state) = engine_semantic_state(&engine.store).unwrap();
+        assert_eq!(frontier.evaluation_sequence, latest);
+        assert_eq!(
+            state
+                .evaluation_heads
+                .iter()
+                .map(|h| h.evaluation_sequence)
+                .max(),
+            Some(latest)
+        );
+        drop(engine);
+        let full = Store::open_validating_fully(&path).unwrap();
+        validate_fully_and_record(&full).expect("full replay agrees with promoted semantic heads");
+    }
+
+    #[test]
+    fn retention_promotion_rule_upgrade_replays_heads_and_preserves_row_commitments() {
+        assert!(engine_validation_rules().contains("/engine-rules.2/"));
+        for changed_row in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("promotion-rule-upgrade.db");
+            let (mut store, _) = holes_fixture(&path, &[1.0, 8.0, 1.0], "rule-upgrade");
+            store
+                .append_genesis(&nq_store::GenesisInput {
+                    genesis_id: "genesis-rule-upgrade".into(),
+                    legacy_manifest_digest: None,
+                    created_at: timestamp(Utc::now()),
+                    detail: canonical(&json!({"source": "test"})).unwrap(),
+                })
+                .unwrap();
+            drop(store);
+            let config = holes_engine_config(&path);
+            full_validation_and_watermark(&config);
+            let mut prior = read_watermark_file(&config);
+            prior.engine_rules =
+                engine_validation_rules().replace("/engine-rules.2/", "/engine-rules.1/");
+            let head = &mut prior.semantic.as_mut().unwrap().evaluation_heads[0];
+            head.evaluation_sequence = 1;
+            head.evaluation_revision = 1;
+            prior.commitment_digest = prior.computed_commitment();
+            write_watermark_file(&config, &prior);
+            if changed_row {
+                mutate_bypassing_triggers(
+                    &path,
+                    "status_events",
+                    "UPDATE status_events SET observed_at='2000-01-01T00:00:00.000Z' WHERE status_sequence=(SELECT MIN(status_sequence) FROM status_events)",
+                );
+                let full = Store::open_validating_fully(&path).unwrap();
+                let error = validate_fully_and_record(&full).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("changed at or below the frontier certified"),
+                    "a rule migration must still refuse changed certified rows: {error}"
+                );
+                assert_eq!(read_watermark_file(&config), prior);
+            } else {
+                let full = Store::open_validating_fully(&path).unwrap();
+                assert_eq!(full.prior_certification(), "compared");
+                validate_fully_and_record(&full).expect("new rules recompute old semantic heads");
+                let current = read_watermark_file(&config);
+                assert_eq!(current.engine_rules, engine_validation_rules());
+                assert_eq!(
+                    current.semantic.as_ref().unwrap().evaluation_heads[0].evaluation_sequence,
+                    3
+                );
+                assert_eq!(
+                    current.frontier, prior.frontier,
+                    "all certified row commitments retained"
+                );
+                drop(full);
+                let mut substituted = current;
+                substituted.semantic.as_mut().unwrap().evaluation_heads[0].evaluation_sequence = 1;
+                substituted.commitment_digest = substituted.computed_commitment();
+                write_watermark_file(&config, &substituted);
+                let full = Store::open_validating_fully(&path).unwrap();
+                let error = validate_fully_and_record(&full).unwrap_err();
+                assert!(
+                    error.to_string().contains("certified semantic state"),
+                    "{error}"
+                );
+            }
+        }
     }
 
     /// Released islands are reclaimed even when no new row has aged.

@@ -1074,13 +1074,14 @@ impl Store {
             cutoff,
             None,
             None,
-            |store: &Self| validate(store).map(|()| None),
+            |store: &Self, _| validate(store).map(|()| None),
             validate_candidates,
         )
     }
 
     /// [`Self::expire_ordinary_before_certified`] for a caller whose
-    /// snapshot validation covers every semantic plane beyond this handle's
+    /// snapshot validation receives the exact append bounds it must certify and
+    /// covers every semantic plane beyond this handle's
     /// certification under `engine_rules` and returns the resulting
     /// certification. Before the expiry carries the handle's certification
     /// forward, that validation is promoted into it: the store-level laws of
@@ -1105,14 +1106,14 @@ impl Store {
     ) -> Result<RetentionResult, E>
     where
         E: From<StoreError>,
-        F: FnOnce(&Self) -> Result<crate::SemanticCertification, E>,
+        F: FnOnce(&Self, &crate::HistoryFrontier) -> Result<crate::SemanticCertification, E>,
         G: FnOnce(&Self, &ExpiryCandidates) -> Result<(), E>,
     {
         self.expire_ordinary_before_inner(
             cutoff,
             Some(engine_rules),
             max_candidate_runs,
-            |store: &Self| validate(store).map(Some),
+            |store: &Self, bounds| validate(store, bounds).map(Some),
             validate_candidates,
         )
     }
@@ -1127,7 +1128,7 @@ impl Store {
     ) -> Result<RetentionResult, E>
     where
         E: From<StoreError>,
-        F: FnOnce(&Self) -> Result<Option<crate::SemanticCertification>, E>,
+        F: FnOnce(&Self, &crate::HistoryFrontier) -> Result<Option<crate::SemanticCertification>, E>,
         G: FnOnce(&Self, &ExpiryCandidates) -> Result<(), E>,
     {
         chrono::DateTime::parse_from_rfc3339(cutoff)
@@ -1148,7 +1149,7 @@ impl Store {
             .map_err(StoreError::from)
             .map_err(E::from)?;
         let (proof, promoted) = self.with_read_snapshot(|store, bounds| {
-            let semantic = validate(store)?;
+            let semantic = validate(store, bounds)?;
             let promoted = match (semantic, engine_rules) {
                 (Some(semantic), Some(rules)) => {
                     store.promoted_certification(bounds, semantic, rules).map_err(E::from)?

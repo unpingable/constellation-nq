@@ -896,6 +896,32 @@ watermark and prints its commitment digest. An existing store has no
 watermark until its first engine open or explicit full validation; that first
 validation costs a full validation.
 
+### Retention promotion validation rules (engine-rules.2)
+
+A resident collector can outlive other writers. Retention now validates semantic
+heads through the exact read-snapshot frontier it promotes, including evaluations
+and status events appended after the collector opened. Earlier `engine-rules.1`
+could promote newer row commitments with older semantic heads; a subsequent full
+validation correctly refused that disagreement. This is a certificate-generation
+bug, not by itself evidence that the stored history was changed.
+
+The corrected engine uses `engine-rules.2`. Its first validation recomputes the
+semantic heads from surviving history instead of trusting the old-rule heads.
+This changes no profile identity, catalog, schema, or stored verdict. Full
+validation still compares all certified row commitments, and a disagreement in
+semantic heads certified under the new rules still refuses.
+
+For a store affected by this defect, preserve the original watermark and failure
+log as incident evidence. Stop the known writers using the owning deployment
+procedure, install the corrected evaluator, and run the documented
+`nq_helper_command --config /etc/nq/nq.toml --json admin validate --full` against
+the exact affected configuration before resuming producers. Keep the old sidecar
+in place during validation: do not delete it or rewrite its heads. A changed
+certified row must refuse migration. Full replay can take substantially longer
+than an ordinary bounded open; supervise the original validation to its terminal
+result. Verify fresh scheduled observations after producers resume. Neither a
+rule migration nor a successful validation repairs an unrelated stalled producer.
+
 ### Refusals and warnings
 
 - A watermark written for another store (another genesis) refuses every open
