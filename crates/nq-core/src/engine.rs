@@ -5969,7 +5969,7 @@ fn prepare_instance_evaluations(
     let reconstruction_timing = nq_store::operation_timing::PhaseTiming::start("core.profile_validation");
     let reports = selected_rows
         .iter()
-        .map(|row| reconstruct_admitted(row, profile))
+        .map(|row| reconstruct_admitted_cached(row, profile, profile_digest.as_str()))
         .collect::<Result<Vec<_>, _>>()?;
     drop(reconstruction_timing);
     let latest = matching_rows.iter().max_by_key(|row| row.report_sequence);
@@ -8134,6 +8134,8 @@ fn reconstruct_admitted(
     row: &nq_store::AdmittedReportRow,
     profile: &'static dyn ProfileModule,
 ) -> Result<DetectorReport, EngineError> {
+    #[cfg(test)]
+    RECONSTRUCTIONS.with(|count| count.set(count.get() + 1));
     let report: nq_protocol::EvidenceReport = serde_json::from_slice(&row.canonical_json)
         .map_err(|error| EngineError::Invariant(format!("stored report cannot decode: {error}")))?;
     let digest = Sha256Digest::parse(row.semantic_digest.clone())
@@ -8183,6 +8185,93 @@ fn reconstruct_admitted(
         report_sequence,
         report: validated,
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of full admitted-report reconstructions on this thread.
+    static RECONSTRUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Reconstruct an admitted report for detector input, reusing an exact prior
+/// result for an unchanged immutable row.
+///
+/// `reconstruct_admitted` is a pure function of the stored row and the compiled
+/// profile (its validation context is the row's own `received_at`; no clock is
+/// read). The memo returns a prior result only when every stored field of the
+/// row, including the full canonical bytes, is byte-equal to the row that
+/// produced it under the same compiled profile digest, so changed or tampered
+/// rows are always revalidated with the exact original refusal. Refusals are
+/// never memoized. The process-local memo is limited by an estimated row weight
+/// (not an exact allocation or RSS bound: it counts the row's variable fields and
+/// a fixed per-entry allowance, not the validated report). A row heavier than
+/// the limit is never
+/// stored, and the memo is cleared when full. A poisoned lock falls back to
+/// full reconstruction.
+fn reconstruct_admitted_cached(
+    row: &nq_store::AdmittedReportRow,
+    profile: &'static dyn ProfileModule,
+    profile_digest: &str,
+) -> Result<DetectorReport, EngineError> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type Entry = (nq_store::AdmittedReportRow, DetectorReport);
+    struct Memo {
+        entries: HashMap<(String, String), Entry>,
+        bytes: usize,
+    }
+    const MAX_BYTES: usize = 64 << 20;
+    static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
+    let weight = |row: &nq_store::AdmittedReportRow| {
+        [
+            &row.report_id,
+            &row.instance_id,
+            &row.profile_id,
+            &row.profile_version,
+            &row.profile_digest,
+            &row.observed_at,
+            &row.received_at,
+            &row.report_status,
+            &row.semantic_digest,
+        ]
+        .iter()
+        .fold(
+            row.canonical_json
+                .len()
+                .saturating_mul(3)
+                .saturating_add(512),
+            |sum, field| sum.saturating_add(field.len().saturating_mul(2)),
+        )
+    };
+    let memo = MEMO.get_or_init(|| {
+        Mutex::new(Memo {
+            entries: HashMap::new(),
+            bytes: 0,
+        })
+    });
+    let key = (profile_digest.to_owned(), row.report_id.clone());
+    if let Ok(guard) = memo.lock()
+        && let Some((cached_row, report)) = guard.entries.get(&key)
+        && cached_row == row
+    {
+        return Ok(report.clone());
+    }
+    let report = reconstruct_admitted(row, profile)?;
+    if let Ok(mut guard) = memo.lock() {
+        let size = weight(row);
+        if size > MAX_BYTES {
+            return Ok(report);
+        }
+        if guard.bytes.saturating_add(size) > MAX_BYTES {
+            guard.entries.clear();
+            guard.bytes = 0;
+        }
+        if let Some((old, _)) = guard.entries.insert(key, (row.clone(), report.clone())) {
+            guard.bytes = guard.bytes.saturating_sub(weight(&old));
+        }
+        guard.bytes = guard.bytes.saturating_add(size);
+    }
+    Ok(report)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -18219,6 +18308,144 @@ sys.stdout.write("\n")
         );
         assert_eq!(event.evidence.len(), 1);
         assert_eq!(event.evidence[0].report_id, matching.report_id);
+    }
+
+    fn reconstruction_fixture_row(
+        fixture: &SemanticLineageFixture,
+        report_id: &str,
+    ) -> nq_store::AdmittedReportRow {
+        let watcher = fixture.watcher();
+        let report = nq_protocol::EvidenceReport {
+            schema: nq_protocol::EVIDENCE_REPORT_SCHEMA.to_owned(),
+            profile: ProfileBinding {
+                id: ProfileId::new(fixture.profile.descriptor().profile.id.clone())
+                    .expect("profile id"),
+                version: ProfileVersion::new(
+                    fixture.profile.descriptor().profile.version.to_string(),
+                )
+                .expect("profile version"),
+                digest: Sha256Digest::parse(fixture.profile_digest.clone())
+                    .expect("profile digest"),
+            },
+            binding: SubjectBinding {
+                subject: SubjectId::new(watcher.subject.clone()).expect("subject"),
+                scope: ScopeBinding {
+                    kind: ScopeKind::new(watcher.scope.kind.clone()).expect("scope kind"),
+                    value: watcher.scope.value.clone(),
+                },
+                vantage: VantageBinding {
+                    kind: VantageKind::new(watcher.vantage.kind.clone()).expect("vantage kind"),
+                    value: watcher.vantage.value.clone(),
+                },
+            },
+            observed_at: fixture.observed_at,
+            status: nq_protocol::ReportStatus::Failed,
+            coverage: ["host_identity", "uptime", "load"]
+                .into_iter()
+                .map(|kind| nq_protocol::CoverageDeclaration {
+                    kind: nq_protocol::CoverageKind::new(kind).expect("coverage kind"),
+                    subject: None,
+                    state: nq_protocol::CoverageState::Unavailable,
+                    detail: None,
+                })
+                .collect(),
+            observations: Vec::new(),
+            errors: vec![nq_protocol::ReportError {
+                code: nq_protocol::ErrorCode::new("backend_failed").expect("error code"),
+                severity: nq_protocol::ErrorSeverity::Error,
+                message: "backend failed".to_owned(),
+                subject: None,
+                observation_ordinal: None,
+                retriable: true,
+            }],
+            used_capabilities: Vec::new(),
+            backend: nq_protocol::BackendProvenance {
+                implementation: nq_protocol::BackendIdentity {
+                    name: nq_protocol::ImplementationName::new("memo-row-fixture")
+                        .expect("implementation name"),
+                    version: Some("1".to_owned()),
+                    digest: None,
+                },
+                tools: Vec::new(),
+            },
+            next_checkpoint: None,
+        };
+        nq_protocol::validate_report(&report).expect("protocol-valid memo row");
+        nq_store::AdmittedReportRow {
+            report_sequence: 1,
+            report_id: report_id.to_owned(),
+            instance_id: watcher.instance_id.clone(),
+            profile_id: fixture.profile.descriptor().profile.id.clone(),
+            profile_version: fixture.profile_version.clone(),
+            profile_digest: fixture.profile_digest.clone(),
+            observed_at: timestamp(fixture.observed_at),
+            received_at: timestamp(fixture.observed_at),
+            report_status: "failed".to_owned(),
+            canonical_json: nq_protocol::canonical_json_bytes(&report).expect("canonical report"),
+            semantic_digest: nq_protocol::semantic_digest(&report)
+                .expect("report digest")
+                .to_string(),
+        }
+    }
+
+    #[test]
+    fn unchanged_admitted_rows_reuse_the_exact_prior_reconstruction() {
+        let fixture = SemanticLineageFixture::new();
+        let row = reconstruction_fixture_row(&fixture, &format!("report:memo-{}", Uuid::new_v4()));
+        let direct = reconstruct_admitted(&row, fixture.profile).expect("fixture row reconstructs");
+        let before = RECONSTRUCTIONS.with(std::cell::Cell::get);
+        let first = reconstruct_admitted_cached(&row, fixture.profile, &fixture.profile_digest)
+            .expect("first reconstruction");
+        let second =
+            reconstruct_admitted_cached(&row.clone(), fixture.profile, &fixture.profile_digest)
+                .expect("repeat reconstruction");
+        assert_eq!(first, direct);
+        assert_eq!(second, direct);
+        assert_eq!(
+            RECONSTRUCTIONS.with(std::cell::Cell::get) - before,
+            1,
+            "an unchanged immutable admitted row is validated once per process"
+        );
+    }
+
+    #[test]
+    fn changed_or_tampered_admitted_rows_are_revalidated_with_the_exact_refusal() {
+        let fixture = SemanticLineageFixture::new();
+        let row = reconstruction_fixture_row(&fixture, &format!("report:memo-{}", Uuid::new_v4()));
+        reconstruct_admitted_cached(&row, fixture.profile, &fixture.profile_digest)
+            .expect("valid row");
+
+        let mut tampered = row.clone();
+        tampered.canonical_json = b"{\"not\":\"a report\"}".to_vec();
+        let expected = reconstruct_admitted(&tampered, fixture.profile)
+            .expect_err("tampered bytes refuse")
+            .to_string();
+        let before = RECONSTRUCTIONS.with(std::cell::Cell::get);
+        let actual =
+            reconstruct_admitted_cached(&tampered, fixture.profile, &fixture.profile_digest)
+                .expect_err("a prior result never masks changed stored bytes")
+                .to_string();
+        assert_eq!(actual, expected);
+        assert_eq!(RECONSTRUCTIONS.with(std::cell::Cell::get) - before, 1);
+
+        let mut moved = row.clone();
+        moved.received_at = timestamp(fixture.observed_at + Duration::seconds(1));
+        let before = RECONSTRUCTIONS.with(std::cell::Cell::get);
+        let _ = reconstruct_admitted_cached(&moved, fixture.profile, &fixture.profile_digest);
+        assert_eq!(
+            RECONSTRUCTIONS.with(std::cell::Cell::get) - before,
+            1,
+            "any changed stored field is revalidated"
+        );
+
+        let before = RECONSTRUCTIONS.with(std::cell::Cell::get);
+        let other_profile = format!("sha256:{}", "0".repeat(64));
+        let _ = reconstruct_admitted_cached(&row, fixture.profile, &other_profile);
+        assert_eq!(
+            RECONSTRUCTIONS.with(std::cell::Cell::get) - before,
+            1,
+            "a different compiled profile identity is revalidated"
+        );
     }
 
     #[test]

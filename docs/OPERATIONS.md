@@ -1123,7 +1123,28 @@ is bounded by the new rows, the referenced closure, and the schema:
   about 0.2 s, 0.6 s, and 2.1 to 2.6 s with 500, 2,000, and 5,000 retained
   acquisitions, about 0.45 ms per retained report. At that slope an
   acquisition reaches a 60-second bound at roughly 100,000 retained
-  acquisitions, about 70 to 80 days at one acquisition per minute. Before a
+  acquisitions, about 70 to 80 days at one acquisition per minute.
+  Within one process, a report that was already reconstructed successfully
+  is reused instead of being decoded, canonicalized, hashed and validated
+  again. Reuse requires the complete stored row, including its canonical
+  bytes and every metadata field, to be equal to the row that produced the
+  earlier result, under the same compiled profile descriptor digest. A
+  changed or edited row is therefore reconstructed afresh and returns its
+  original refusal. Refusals are never reused. The memo is in memory only,
+  is not persisted, and starts empty at every process start. A one-shot
+  command (`collect`, `acquire-next-local`) therefore pays the full
+  per-report cost above on its first pass. The long-lived daemon's
+  collection engine benefits on later collections and sweeps. The memo is
+  limited to an estimated 64 MiB of row weight. The estimate is not an exact
+  allocation or RSS bound: it counts the row's variable fields and a fixed
+  per-entry allowance, not the validated report payload. A row heavier than
+  the limit is never stored, and the memo is cleared when it fills. When an
+  instance's retained reports exceed the memo, repeated clearing can
+  eliminate most reuse. Each miss then also clones the row and the
+  reconstructed report. Phase timing (`core.profile_validation`) shows
+  whether reuse is effective. The memo changes no validation rule, profile,
+  schema, `profile_semantic_id`, retention horizon or capacity policy.
+  Before a
   store approaches that size, archive it (`nq admin archive`) and initialize a
   new store. Archive with the binary that produced the store, before any
   package upgrade: a build whose compiled profile catalog differs (any change
