@@ -15720,6 +15720,78 @@ mod tests {
     }
 
     #[test]
+    fn changed_full_snapshot_declines_without_writer_admission_and_still_refuses_foreign_sidecars() {
+        for foreign in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("changed-full-snapshot.db");
+            certified_crash_fixture(&path);
+            let original = std::fs::read(watermark_path(&path)).unwrap();
+            let held = std::cell::RefCell::new(None);
+            let result = Store::validate_full_snapshot(
+                &path, "fixture-engine-rules",
+                |_| {
+                    let mut writer = Store::open(&path)?;
+                    writer.record_status(&StatusEventInput {
+                        status_event_id: "invalidate-full-proof".into(),
+                        component_kind: "daemon".into(), component_id: "fixture".into(),
+                        state: "healthy".into(), code: "observed".into(),
+                        detail: document(json!({})), observed_at: TIME.into(),
+                    })?;
+                    Ok::<_, StoreError>(((), SemanticCertification::NotEstablished))
+                },
+                |_| {
+                    *held.borrow_mut() = Some(capacity::operation_guard(&path)?);
+                    if foreign {
+                        let mut sidecar = sidecar(&path);
+                        sidecar.genesis_id = "different-genesis".into();
+                        sidecar.commitment_digest = sidecar.computed_commitment();
+                        std::fs::write(watermark_path(&path), serde_json::to_vec(&sidecar).unwrap())?;
+                    }
+                    Ok(true)
+                },
+            );
+            if foreign {
+                let error = result.err().expect("foreign sidecars still refuse on the changed-state path");
+                assert!(error.to_string().contains("does not belong to this database"), "{error}");
+                assert_eq!(sidecar(&path).genesis_id, "different-genesis");
+            } else {
+                let full = result.ok().expect("a known-invalidated proof needs no writer admission");
+                assert!(full.watermark.is_none());
+                assert_eq!(std::fs::read(watermark_path(&path)).unwrap(), original);
+            }
+            drop(held);
+        }
+    }
+
+    #[test]
+    fn full_snapshot_stable_proof_keeps_contention_refusal_and_incomplete_recovery_needs_no_guard() {
+        for recovered in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("stable-full-snapshot.db");
+            certified_crash_fixture(&path);
+            let original = std::fs::read(watermark_path(&path)).unwrap();
+            let held = std::cell::RefCell::new(None);
+            let result = Store::validate_full_snapshot(
+                &path, "fixture-engine-rules",
+                |_| Ok::<_, StoreError>(((), SemanticCertification::NotEstablished)),
+                |_| {
+                    *held.borrow_mut() = Some(capacity::operation_guard(&path)?);
+                    Ok(recovered)
+                },
+            );
+            if recovered {
+                let error = result.err().expect("an otherwise valid proof still needs writer admission");
+                assert!(error.to_string().contains("concurrent writer owns operation guard"), "{error}");
+            } else {
+                let full = result.ok().expect("incomplete recovery rules out publication before writer admission");
+                assert!(full.watermark.is_none());
+            }
+            assert_eq!(std::fs::read(watermark_path(&path)).unwrap(), original);
+            drop(held);
+        }
+    }
+
+    #[test]
     fn full_snapshot_validation_does_not_certify_recovery_writes() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("full-snapshot-recovery.db");

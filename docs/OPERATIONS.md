@@ -774,7 +774,11 @@ store identity and retention boundary still match the validated snapshot after
 successor recovery. A concurrent commit or a recovered completion leaves the
 existing sidecar unchanged and returns a null `commitment_digest`; the full
 snapshot's checks still succeeded. Run again on a stable store when a new
-certificate is required. A replaced database path or foreign sidecar refuses.
+certificate is required. When a changed database or incomplete recovery already
+rules out publication, the operation declines without writer admission and still
+checks path identity and foreign-sidecar ownership. A still-applicable proof
+retains the existing guarded publication checks and bounded contention refusal.
+A replaced database path or foreign sidecar refuses.
 A long read snapshot can retain WAL pages and cause the existing writer capacity
 or checkpoint admission to refuse; this is not an unconditional writer progress
 guarantee. Ordinary cold opens without an applicable watermark keep their

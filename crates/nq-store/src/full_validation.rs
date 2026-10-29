@@ -149,8 +149,23 @@ impl Store {
         frontier: HistoryFrontier,
         semantic: SemanticCertification,
     ) -> Result<Option<ValidationWatermark>, StoreError> {
-        let _publication_timing =
+        let publication_timing =
             operation_timing::PhaseTiming::start("full_validation.publication");
+        require_file_identity(path, file_identity)?;
+        let unchanged = self.connection.total_changes() == changes
+            && data_version(&self.connection)? == version;
+        publication_timing.value("database_unchanged", i64::from(unchanged));
+        if !recovered || !unchanged {
+            // This proof already cannot certify the current database. No
+            // writer admission is needed to decline publication, but path
+            // and foreign-sidecar refusal still apply. Nothing is written.
+            let current = self.store_identity()?;
+            if let history_scope::SidecarState::Present(sidecar) = history_scope::read_sidecar(path)
+            {
+                history_scope::refuse_foreign(path, &sidecar, current.as_ref())?;
+            }
+            return Ok(None);
+        }
         let _guard = self.serialization_guard().map_err(|error| match error {
             error @ StoreError::Refused(Refusal::Contention(_)) => {
                 StoreError::WatermarkWrite(error.to_string())
