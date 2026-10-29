@@ -1020,6 +1020,15 @@ independent; the existing writer queue serializes store operations. Sharing the
 store-wide replay and retention cadence prevents these watchers from repeatedly
 forcing each other into full replay after expiry.
 
+Default expiry at daemon startup and before ordinary collection uses a
+five-second soft attempt budget. This limits additional atomic batches in an
+opportunity so acquisition has more scheduling margin. A complete first batch,
+replay, planning or foreign-key check can exceed that budget. Pending work
+remains pending; explicit callers of `expire_ordinary_history_within` retain
+their chosen duration. The horizon, expiry quantum, candidate selection,
+validation and capacity checks are unchanged. Actual retirement and freshness
+still require observation; this is not a five-second maintenance latency bound.
+
 Already-ready stdio collections get a finite turn between pending retention
 continuation attempts. Each request registers before waiting for the writer.
 After an ordinary maintenance opportunity, the daemon captures the other ready

@@ -9231,11 +9231,12 @@ pub const EXPIRY_BATCH_RUNS: usize = 64;
 /// Consecutive refused batches retried within one attempt.
 const EXPIRY_BATCH_RETRIES: u32 = 3;
 
-/// Wall-clock budget of one expiry attempt: batches continue while
-/// candidates remain and the budget is not spent; the rest is deferred to
-/// the next attempt, which the collection path then makes at its next
-/// collection instead of waiting for the next quantum.
-pub const EXPIRY_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+/// Default soft wall-clock budget for startup and ordinary collection expiry.
+/// Batches continue while candidates remain and the budget is not spent; the
+/// rest stays pending for the next opportunity instead of the next quantum.
+/// The budget is checked between atomic batches, so one batch may overrun it.
+/// Explicit [`expire_ordinary_history_within`] callers choose their own budget.
+pub const EXPIRY_ATTEMPT_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Retire ordinary history only after typed semantic validation of every
 /// row the expiry relies on or retires: the history this handle's own
