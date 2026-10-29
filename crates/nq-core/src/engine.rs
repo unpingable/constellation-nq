@@ -1788,6 +1788,9 @@ pub enum RetentionAttempt {
         /// Seconds until the next scheduled attempt.
         next_attempt_in_seconds: u64,
     },
+    /// A ready daemon acquisition took its turn before pending continuation.
+    /// The normal expiry quantum and capacity bypass still take precedence.
+    DeferredForReadyCollections,
     /// Expiry was refused without effect.
     Refused {
         /// `capacity`, `contention`, `history_changed`, or `disk_full`.
@@ -2763,7 +2766,25 @@ impl CollectionEngine {
     /// Returns only local engine/storage failures. Expected helper, protocol,
     /// and admission outcomes are retained and returned as `CollectionOutcome`.
     pub fn collect(&mut self, watcher: &WatcherConfig) -> Result<CollectionOutcome, EngineError> {
-        self.collect_internal(watcher, false, None)
+        self.collect_internal(watcher, false, None, false)
+            .map(|execution| execution.outcome)
+    }
+
+    /// Collect a ready daemon request before resuming pending expiry work.
+    ///
+    /// This defers only continuation inside the normal expiry quantum, retaining
+    /// its pending state. Scheduled expiry and the existing capacity bypass
+    /// still run, and admission applies its own capacity check. Callers must
+    /// provide finite acquisition turns so pending maintenance resumes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same local engine/storage failures as [`Self::collect`].
+    pub fn collect_before_pending_expiry(
+        &mut self,
+        watcher: &WatcherConfig,
+    ) -> Result<CollectionOutcome, EngineError> {
+        self.collect_internal(watcher, false, None, true)
             .map(|execution| execution.outcome)
     }
 
@@ -2789,7 +2810,7 @@ impl CollectionEngine {
         &mut self,
         watcher: &WatcherConfig,
     ) -> Result<SupportedDiagnosticExecution, EngineError> {
-        let execution = self.collect_internal(watcher, true, None)?;
+        let execution = self.collect_internal(watcher, true, None, false)?;
         execution.diagnostic.ok_or_else(|| {
             EngineError::DiagnosticUnsupported(format!(
                 "collection for {} produced no admitted determinate diagnostic execution; inspect the retained collection outcome",
@@ -2840,7 +2861,7 @@ impl CollectionEngine {
             )?;
             return reopen_diagnostic_artifact(&self.store, &artifact);
         }
-        let execution = self.collect_internal(watcher, true, Some(acquisition_id))?;
+        let execution = self.collect_internal(watcher, true, Some(acquisition_id), false)?;
         let artifact = execution.diagnostic_artifact_id.ok_or_else(|| {
             EngineError::Invariant(
                 "local successor completed without a qualified diagnostic artifact".into(),
@@ -2903,6 +2924,7 @@ impl CollectionEngine {
         watcher: &WatcherConfig,
         emit_diagnostic: bool,
         local_successor_acquisition_id: Option<&str>,
+        defer_pending_expiry: bool,
     ) -> Result<CollectionExecution, EngineError> {
         let _timing = nq_store::operation_timing::PhaseTiming::start("core.collection");
         validate_compiled_watcher(watcher)?;
@@ -2924,13 +2946,14 @@ impl CollectionEngine {
         let cutoff = Utc::now().checked_sub_signed(horizon).ok_or_else(|| {
             EngineError::Invariant("retention cutoff exceeds timestamp range".into())
         })?;
-        // Expiry is maintenance and never costs the collection: a refusal is
-        // recorded and admission proceeds under its own capacity preflight.
-        // It runs at most once per quantum, plus one immediate attempt when
-        // the capacity preflight would refuse the admission.
+        // Expected expiry refusals are recorded and admission proceeds under
+        // its own capacity preflight. Pending work normally continues before
+        // collection; a daemon acquisition turn may defer only that retry.
+        // Scheduled expiry and the one-use capacity bypass still take precedence.
         let quantum = expiry_quantum(self.config.retention.horizon_seconds);
         let elapsed = self.last_expiry_attempt.map(|at| at.elapsed());
-        let due = self.expiry_continuation || elapsed.is_none_or(|elapsed| elapsed >= quantum);
+        let due = elapsed.is_none_or(|elapsed| elapsed >= quantum)
+            || (self.expiry_continuation && !defer_pending_expiry);
         let capacity_bypass =
             !due && !self.capacity_bypass_spent && self.capacity_preflight_refuses();
         let retention_timing = nq_store::operation_timing::PhaseTiming::start("core.retention");
@@ -2944,6 +2967,8 @@ impl CollectionEngine {
                 &mut self.store,
                 &cutoff.to_rfc3339(),
             ))?
+        } else if self.expiry_continuation && defer_pending_expiry {
+            RetentionAttempt::DeferredForReadyCollections
         } else {
             RetentionAttempt::Deferred {
                 next_attempt_in_seconds: quantum
@@ -14280,6 +14305,115 @@ sys.stdout.write("\n")
         assert!(!engine.expiry_continuation, "nothing remained");
         assert!(engine.collect(&watcher).is_ok());
         assert!(matches!(engine.last_retention_attempt(), Some(RetentionAttempt::Deferred { .. })));
+    }
+
+    #[test]
+    fn ready_collection_preserves_pending_expiry_and_normal_overrides() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut engine, watcher, _) = admitted_host_diagnostic_fixture(
+            root.path(),
+            "expiry-ready-collection",
+            b"ready-collection",
+        )
+        .expect("this regression requires an executable admitted-helper fixture");
+        assert!(engine.collect(&watcher).unwrap().is_success());
+        engine.expiry_continuation = true;
+        let attempted_at = engine.last_expiry_attempt;
+        let bypass_spent = engine.capacity_bypass_spent;
+        let boundary = engine.store.retention_boundary().unwrap();
+        assert!(
+            engine
+                .collect_before_pending_expiry(&watcher)
+                .unwrap()
+                .is_success()
+        );
+        assert_eq!(
+            engine.last_retention_attempt(),
+            Some(&RetentionAttempt::DeferredForReadyCollections)
+        );
+        assert!(engine.expiry_continuation);
+        assert_eq!(engine.last_expiry_attempt, attempted_at);
+        assert_eq!(engine.capacity_bypass_spent, bypass_spent);
+        assert_eq!(engine.store.retention_boundary().unwrap(), boundary);
+        assert!(engine.collect(&watcher).unwrap().is_success());
+        assert!(matches!(
+            engine.last_retention_attempt(),
+            Some(RetentionAttempt::Completed(_))
+        ));
+        assert!(
+            !engine.expiry_continuation,
+            "ordinary collection still retries pending work"
+        );
+
+        engine.expiry_continuation = true;
+        engine.last_expiry_attempt = None;
+        assert!(
+            engine
+                .collect_before_pending_expiry(&watcher)
+                .unwrap()
+                .is_success()
+        );
+        assert!(
+            matches!(
+                engine.last_retention_attempt(),
+                Some(RetentionAttempt::Completed(_))
+            ),
+            "the initial scheduled attempt is never deferred"
+        );
+        engine.expiry_continuation = true;
+        engine.last_expiry_attempt = Some(
+            std::time::Instant::now()
+                .checked_sub(
+                    expiry_quantum(engine.config.retention.horizon_seconds)
+                        + std::time::Duration::from_secs(1),
+                )
+                .unwrap(),
+        );
+        assert!(
+            engine
+                .collect_before_pending_expiry(&watcher)
+                .unwrap()
+                .is_success()
+        );
+        assert!(
+            matches!(
+                engine.last_retention_attempt(),
+                Some(RetentionAttempt::Completed(_))
+            ),
+            "an elapsed normal quantum takes precedence over the cohort"
+        );
+
+        struct ClearCapacityOverride;
+        impl Drop for ClearCapacityOverride {
+            fn drop(&mut self) {
+                CAPACITY_PREFLIGHT_REFUSES_FOR_TEST.with(|forced| forced.set(None));
+            }
+        }
+        let _clear = ClearCapacityOverride;
+        engine.expiry_continuation = true;
+        CAPACITY_PREFLIGHT_REFUSES_FOR_TEST.with(|forced| forced.set(Some(true)));
+        assert!(engine.collect_before_pending_expiry(&watcher).is_ok());
+        assert!(
+            matches!(
+                engine.last_retention_attempt(),
+                Some(RetentionAttempt::Completed(_))
+            ),
+            "the existing capacity bypass takes precedence over the cohort"
+        );
+        assert!(engine.capacity_bypass_spent);
+        let attempted_at = engine.last_expiry_attempt;
+        engine.expiry_continuation = true;
+        assert!(engine.collect_before_pending_expiry(&watcher).is_ok());
+        assert_eq!(
+            engine.last_retention_attempt(),
+            Some(&RetentionAttempt::DeferredForReadyCollections)
+        );
+        assert!(
+            engine.capacity_bypass_spent,
+            "deferral must not replenish the bypass"
+        );
+        assert!(engine.expiry_continuation);
+        assert_eq!(engine.last_expiry_attempt, attempted_at);
     }
 
     #[test]

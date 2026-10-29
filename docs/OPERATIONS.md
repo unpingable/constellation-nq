@@ -1018,9 +1018,24 @@ A daemon whose configured watchers all use stdio shares one resident engine
 for collections and freshness sweeps. Watcher schedules and retry backoff remain
 independent; the existing writer queue serializes store operations. Sharing the
 store-wide replay and retention cadence prevents these watchers from repeatedly
-forcing each other into full replay after expiry. Retention continuation and
-capacity checks still apply before collection. A foreign process can still
-require recertification; this does not bound the first full replay.
+forcing each other into full replay after expiry.
+
+Already-ready stdio collections get a finite turn between pending retention
+continuation attempts. Each request registers before waiting for the writer.
+After an ordinary maintenance opportunity, the daemon captures the other ready
+requests; collections defer only pending continuation until that cohort finishes
+or cancels. Later arrivals do not extend the captured cohort. Cancellation of an
+async observer does not retire work already submitted to the blocking pool:
+its request and writer ownership last until the operation ends. Sweeps remain
+serialized and do not create collection requests.
+
+An elapsed normal expiry quantum or the existing one-use capacity bypass still
+attempts maintenance during a cohort. Deferral preserves pending work and does
+not reset its attempt time or capacity allowance. Admission always applies its
+own capacity checks. This gives queued acquisitions a turn, not a latency
+bound: a single batch, capacity refusal or foreign writer can still delay or
+refuse collection. A foreign process can still require recertification; this
+does not bound the first full replay.
 
 Retention reopens adjacent candidate evaluations in bounded pages so their
 association checks share a database scan. It splits pages at sequence gaps,

@@ -1,5 +1,7 @@
 //! Resident scheduler, local API, and helper supervisor entry point.
 
+mod collection_queue;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,7 +76,9 @@ pub async fn run(options: Nqd) -> Result<()> {
                 "ordinary completed history expired"
             );
         }
-        nq_core::RetentionAttempt::Completed(_) | nq_core::RetentionAttempt::Deferred { .. } => {}
+        nq_core::RetentionAttempt::Completed(_)
+        | nq_core::RetentionAttempt::Deferred { .. }
+        | nq_core::RetentionAttempt::DeferredForReadyCollections => {}
         nq_core::RetentionAttempt::Refused { class, detail } => {
             warn!(class, %detail, "retention expiry refused at startup; continuing");
         }
@@ -270,7 +274,50 @@ async fn collect_once(config: NqConfig) -> Result<()> {
     }
 }
 
-type SharedEngine = Arc<Mutex<nq_core::CollectionEngine>>;
+type SharedEngine = Arc<SharedStdioEngine>;
+
+struct SharedStdioEngine {
+    engine: Mutex<nq_core::CollectionEngine>,
+    queue: collection_queue::CollectionQueue,
+}
+
+impl SharedStdioEngine {
+    fn blocking_lock(&self) -> tokio::sync::MutexGuard<'_, nq_core::CollectionEngine> {
+        self.engine.blocking_lock()
+    }
+
+    #[cfg(test)]
+    async fn lock(&self) -> tokio::sync::MutexGuard<'_, nq_core::CollectionEngine> {
+        self.engine.lock().await
+    }
+
+    // Called only inside store_operation, after acquiring the daemon writer.
+    // The ticket stays in the blocking closure even if its async observer is
+    // cancelled, and retires before store_operation releases that writer.
+    fn collect_under_writer(
+        &self,
+        ticket: collection_queue::CollectionTicket,
+        watcher: &WatcherConfig,
+    ) -> (
+        Result<nq_core::CollectionOutcome, nq_core::engine::EngineError>,
+        Option<nq_core::RetentionAttempt>,
+    ) {
+        let defer = ticket.should_defer_pending_expiry();
+        let mut engine = self.blocking_lock();
+        let outcome = if defer {
+            engine.collect_before_pending_expiry(watcher)
+        } else {
+            engine.collect(watcher)
+        };
+        let retention = engine.last_retention_attempt().cloned();
+        drop(engine);
+        if !defer {
+            ticket.finish_opportunity();
+        }
+        drop(ticket);
+        (outcome, retention)
+    }
+}
 
 /// A stdio-only daemon has no persistent helper to quiesce while another
 /// watcher collects. Share its store-wide replay and expiry state rather than
@@ -288,9 +335,10 @@ fn open_shared_stdio_engine(config: &NqConfig) -> Result<Option<SharedEngine>> {
     if config.watchers.is_empty() || config.watchers.iter().any(|w| w.carrier != Carrier::Stdio) {
         return Ok(None);
     }
-    Ok(Some(Arc::new(Mutex::new(nq_core::CollectionEngine::open(
-        config,
-    )?))))
+    Ok(Some(Arc::new(SharedStdioEngine {
+        engine: Mutex::new(nq_core::CollectionEngine::open(config)?),
+        queue: collection_queue::CollectionQueue::default(),
+    })))
 }
 
 /// Aborting async waiters does not abort a running blocking operation. Its
@@ -344,11 +392,13 @@ async fn schedule_instance(
         }
         let collection_watcher = watcher.clone();
         let shared = shared.clone();
+        let ticket = shared.as_ref().map(|shared| shared.queue.register());
         let (returned_engine, outcome, retention) = store_operation(writer.clone(), move || {
             if let Some(shared) = shared {
-                let mut engine = shared.blocking_lock();
-                let outcome = engine.collect(&collection_watcher);
-                let retention = engine.last_retention_attempt().cloned();
+                let (outcome, retention) = shared.collect_under_writer(
+                    ticket.expect("shared collection registered before writer wait"),
+                    &collection_watcher,
+                );
                 (None, outcome, retention)
             } else {
                 let mut engine = engine.expect("independent resident engine");
@@ -492,9 +542,15 @@ async fn collect_one(
     writer: Arc<Mutex<()>>,
     shared: Option<SharedEngine>,
 ) -> Result<nq_core::CollectionOutcome> {
+    let ticket = shared.as_ref().map(|shared| shared.queue.register());
     Ok(store_operation(writer, move || {
         if let Some(shared) = shared {
-            shared.blocking_lock().collect(&watcher)
+            shared
+                .collect_under_writer(
+                    ticket.expect("shared collection registered before writer wait"),
+                    &watcher,
+                )
+                .0
         } else {
             let mut engine = nq_core::CollectionEngine::open(&config)?;
             engine.collect(&watcher)
@@ -705,23 +761,39 @@ mod tests {
         })
         .await
         .unwrap();
+        // Register both real admitted acquisitions while the writer is held.
+        // One gets an ordinary opportunity; the captured peer gets its turn.
+        let permit = writer.clone().lock_owned().await;
+        let mut acquisitions = JoinSet::new();
         for watcher in &config.watchers {
-            assert!(
-                collect_one(
-                    config.clone(),
-                    watcher.clone(),
-                    writer.clone(),
-                    Some(shared.clone())
-                )
-                .await
-                .unwrap()
-                .is_success()
-            );
-            assert!(
-                shared.lock().await.last_retention_attempt().is_some(),
-                "the daemon collection path must use the supplied resident owner"
-            );
+            let config = config.clone();
+            let watcher = watcher.clone();
+            let writer = writer.clone();
+            let shared = shared.clone();
+            acquisitions
+                .spawn(async move { collect_one(config, watcher, writer, Some(shared)).await });
         }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while shared.queue.ready_count() != config.watchers.len() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both acquisitions must register before writer admission");
+        drop(permit);
+        while let Some(outcome) = acquisitions.join_next().await {
+            assert!(outcome.unwrap().unwrap().is_success());
+        }
+        assert_eq!(shared.queue.ready_count(), 0);
+        assert_eq!(
+            shared.queue.opportunities(),
+            1,
+            "the captured ready cohort runs before another continuation opportunity"
+        );
+        assert!(
+            shared.lock().await.last_retention_attempt().is_some(),
+            "the collection path must use the supplied resident owner"
+        );
         let mut work = Vec::new();
         for index in 0..24 {
             let engine = shared.clone();
@@ -772,6 +844,119 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn collection_tickets_follow_writer_cancellation_and_unwind() {
+        let queue = collection_queue::CollectionQueue::default();
+        let writer = Arc::new(Mutex::new(()));
+        let permit = writer.clone().lock_owned().await;
+        let ticket = queue.register();
+        let waiting_writer = writer.clone();
+        let waiting =
+            tokio::spawn(
+                async move { store_operation(waiting_writer, move || drop(ticket)).await },
+            );
+        tokio::task::yield_now().await;
+        waiting.abort();
+        assert!(waiting.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            queue.ready_count(),
+            0,
+            "cancelled writer waiter retires its ticket"
+        );
+        drop(permit);
+
+        let ticket = queue.register();
+        let running_writer = writer.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let running = tokio::spawn(async move {
+            store_operation(running_writer, move || {
+                let _ticket = ticket;
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        running.abort();
+        assert!(running.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            queue.ready_count(),
+            1,
+            "a cancelled async observer cannot retire a running acquisition"
+        );
+        assert!(writer.try_lock().is_err());
+        release_tx.send(()).unwrap();
+        let permit = writer.clone().lock_owned().await;
+        assert_eq!(
+            queue.ready_count(),
+            0,
+            "ticket retires before writer release"
+        );
+        drop(permit);
+
+        let ticket = queue.register();
+        let result = store_operation(writer.clone(), move || {
+            let _ticket = ticket;
+            panic!("bounded blocking acquisition failure fixture");
+        })
+        .await;
+        assert!(result.unwrap_err().is_panic());
+        let _permit = writer.lock().await;
+        assert_eq!(
+            queue.ready_count(),
+            0,
+            "unwinding cannot pin a cohort forever"
+        );
+    }
+
+    #[test]
+    fn collection_ticket_survives_cancelled_observer_in_blocking_pool_queue() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let queue = collection_queue::CollectionQueue::default();
+            let writer = Arc::new(Mutex::new(()));
+            let (occupied_tx, occupied_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                occupied_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            occupied_rx.await.unwrap();
+            let ticket = queue.register();
+            let operation_writer = writer.clone();
+            let queued = tokio::spawn(async move {
+                store_operation(operation_writer, move || drop(ticket)).await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if writer.try_lock().is_err() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            queued.abort();
+            assert!(queued.await.unwrap_err().is_cancelled());
+            assert_eq!(
+                queue.ready_count(),
+                1,
+                "spawned blocking work owns the ticket"
+            );
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            let _permit = writer.lock().await;
+            assert_eq!(queue.ready_count(), 0);
+        });
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
