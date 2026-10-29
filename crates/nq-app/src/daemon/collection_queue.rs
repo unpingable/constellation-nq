@@ -2,12 +2,15 @@
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 struct State {
     next: u64,
     ready: BTreeSet<u64>,
     cohort: BTreeSet<u64>,
+    continuation_interval: Duration,
+    last_opportunity_completed: Option<Instant>,
     #[cfg(test)]
     opportunities: usize,
 }
@@ -23,6 +26,16 @@ pub(super) struct CollectionTicket {
 }
 
 impl CollectionQueue {
+    pub(super) fn new(continuation_interval: Duration) -> Self {
+        assert!(!continuation_interval.is_zero());
+        Self {
+            state: Arc::new(Mutex::new(State {
+                continuation_interval,
+                ..State::default()
+            })),
+        }
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         // The only updates are set insert/remove or replacement. Recovering
         // the bookkeeping lock lets ticket Drop remove registrations during
@@ -60,22 +73,37 @@ impl CollectionQueue {
 impl CollectionTicket {
     /// Decide only after acquiring the daemon writer. A later nonmember may
     /// reach it before a cohort member; it must defer pending expiry too.
+    /// Empty cohorts still respect spacing from the last normal completion.
     pub(super) fn should_defer_pending_expiry(&self) -> bool {
+        self.should_defer_pending_expiry_at(Instant::now())
+    }
+
+    fn should_defer_pending_expiry_at(&self, now: Instant) -> bool {
         let state = self.queue.state();
         assert!(state.ready.contains(&self.id));
         !state.cohort.is_empty()
+            || state.last_opportunity_completed.is_some_and(|last| {
+                now.saturating_duration_since(last) < state.continuation_interval
+            })
     }
 
     /// After an ordinary maintenance opportunity, while still holding the
     /// writer, capture the other ready requests. Later arrivals never extend
-    /// this cohort. The current ticket retires before that writer is released.
+    /// this cohort. Spacing starts at completion, and deferred requests never
+    /// refresh it. A panic before this call leaves the previous time unchanged.
+    /// The current ticket retires before that writer is released.
     pub(super) fn finish_opportunity(&self) {
+        self.finish_opportunity_at(Instant::now());
+    }
+
+    fn finish_opportunity_at(&self, completed_at: Instant) {
         let mut state = self.queue.state();
         assert!(state.ready.contains(&self.id));
         assert!(
             state.cohort.is_empty(),
             "a ready acquisition cohort still has its turn"
         );
+        state.last_opportunity_completed = Some(completed_at);
         state.cohort = state
             .ready
             .iter()
@@ -100,6 +128,80 @@ impl Drop for CollectionTicket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staggered_arrivals_defer_until_interval_from_completion_expires() {
+        let interval = Duration::from_secs(30);
+        let queue = CollectionQueue::new(interval);
+        let completed = Instant::now();
+        let first = queue.register();
+        assert!(!first.should_defer_pending_expiry_at(completed));
+        first.finish_opportunity_at(completed);
+        drop(first);
+        for second in 0..30 {
+            let later = queue.register();
+            assert!(later.should_defer_pending_expiry_at(completed + Duration::from_secs(second)));
+            drop(later);
+        }
+        let next = queue.register();
+        assert!(!next.should_defer_pending_expiry_at(completed + interval));
+        next.finish_opportunity_at(completed + interval);
+        drop(next);
+        let later = queue.register();
+        assert!(
+            later.should_defer_pending_expiry_at(completed + interval + Duration::from_secs(29))
+        );
+        assert_eq!(queue.opportunities(), 2);
+    }
+
+    #[test]
+    fn elapsed_interval_does_not_displace_a_captured_cohort() {
+        let interval = Duration::from_secs(30);
+        let queue = CollectionQueue::new(interval);
+        let completed = Instant::now();
+        let first = queue.register();
+        let older = queue.register();
+        first.finish_opportunity_at(completed);
+        drop(first);
+        let after_interval = completed + interval;
+        let later = queue.register();
+        assert!(later.should_defer_pending_expiry_at(after_interval));
+        assert!(older.should_defer_pending_expiry_at(after_interval));
+        drop(older);
+        assert!(!later.should_defer_pending_expiry_at(after_interval));
+        later.finish_opportunity_at(after_interval);
+    }
+
+    #[test]
+    fn cancellation_and_unwind_do_not_postpone_the_continuation_deadline() {
+        let interval = Duration::from_secs(30);
+        let queue = CollectionQueue::new(interval);
+        let completed = Instant::now();
+        let first = queue.register();
+        first.finish_opportunity_at(completed);
+        drop(first);
+        let cancelled = queue.register();
+        assert!(cancelled.should_defer_pending_expiry_at(completed + Duration::from_secs(29)));
+        drop(cancelled);
+        let unwound = queue.register();
+        assert!(
+            std::panic::catch_unwind(move || {
+                let _ticket = unwound;
+                panic!("unfinished opportunity fixture");
+            })
+            .is_err()
+        );
+        let after_interval = completed + interval;
+        let next = queue.register();
+        assert!(!next.should_defer_pending_expiry_at(after_interval));
+        drop(next); // Eligible but cancelled before completion: no new timestamp.
+        assert!(
+            !queue
+                .register()
+                .should_defer_pending_expiry_at(after_interval)
+        );
+        assert_eq!(queue.opportunities(), 1);
+    }
 
     #[test]
     fn waiting_cohort_runs_before_another_maintenance_opportunity() {

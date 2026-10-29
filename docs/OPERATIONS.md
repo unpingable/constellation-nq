@@ -1032,14 +1032,18 @@ still require observation; this is not a five-second maintenance latency bound.
 Already-ready stdio collections get a finite turn between pending retention
 continuation attempts. Each request registers before waiting for the writer.
 After an ordinary maintenance opportunity, the daemon captures the other ready
-requests; collections defer only pending continuation until that cohort finishes
-or cancels. Later arrivals do not extend the captured cohort. Cancellation of an
+requests. Pending continuation becomes eligible only after that cohort finishes
+or cancels and the smallest configured watcher collection interval has elapsed
+since the previous normal opportunity completed. Deferred collections never
+extend that interval. This also gives staggered requests a turn when no peer
+was ready at completion. Later arrivals do not extend the captured cohort.
+Cancellation of an
 async observer does not retire work already submitted to the blocking pool:
 its request and writer ownership last until the operation ends. Sweeps remain
 serialized and do not create collection requests.
 
 An elapsed normal expiry quantum or the existing one-use capacity bypass still
-attempts maintenance during a cohort. Deferral preserves pending work and does
+attempts maintenance during a cohort or continuation-spacing interval. Deferral preserves pending work and does
 not reset its attempt time or capacity allowance. Admission always applies its
 own capacity checks. This gives queued acquisitions a turn, not a latency
 bound: a single batch, capacity refusal or foreign writer can still delay or

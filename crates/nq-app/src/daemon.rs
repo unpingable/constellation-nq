@@ -335,9 +335,19 @@ fn open_shared_stdio_engine(config: &NqConfig) -> Result<Option<SharedEngine>> {
     if config.watchers.is_empty() || config.watchers.iter().any(|w| w.carrier != Carrier::Stdio) {
         return Ok(None);
     }
+    let minimum_interval = config
+        .watchers
+        .iter()
+        .map(|watcher| watcher.schedule.interval_seconds)
+        .min()
+        .expect("nonempty stdio watcher configuration");
+    anyhow::ensure!(
+        minimum_interval > 0,
+        "collection intervals must be positive"
+    );
     Ok(Some(Arc::new(SharedStdioEngine {
         engine: Mutex::new(nq_core::CollectionEngine::open(config)?),
-        queue: collection_queue::CollectionQueue::default(),
+        queue: collection_queue::CollectionQueue::new(Duration::from_secs(minimum_interval)),
     })))
 }
 
@@ -676,6 +686,23 @@ mod tests {
         config
     }
 
+    #[test]
+    fn staggered_shared_collections_do_not_repeat_pending_maintenance_immediately() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = stdio_fixture(root.path());
+        config.watchers[0].schedule.interval_seconds = 30;
+        config.watchers[1].schedule.interval_seconds = 60;
+        let shared = open_shared_stdio_engine(&config).unwrap().unwrap();
+        let first = shared.queue.register();
+        assert!(!first.should_defer_pending_expiry());
+        first.finish_opportunity();
+        drop(first);
+        // No peer was ready at completion. The next staggered request still
+        // gets its acquisition before another pending-maintenance attempt.
+        let later = shared.queue.register();
+        assert!(later.should_defer_pending_expiry());
+    }
+
     #[tokio::test]
     async fn stdio_watchers_share_retention_cadence_even_when_admission_refuses() {
         let root = tempfile::tempdir().unwrap();
@@ -848,7 +875,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn collection_tickets_follow_writer_cancellation_and_unwind() {
-        let queue = collection_queue::CollectionQueue::default();
+        let queue = collection_queue::CollectionQueue::new(Duration::from_secs(30));
         let writer = Arc::new(Mutex::new(()));
         let permit = writer.clone().lock_owned().await;
         let ticket = queue.register();
@@ -876,6 +903,7 @@ mod tests {
                 let _ticket = ticket;
                 started_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
+                _ticket.finish_opportunity();
             })
             .await
         });
@@ -896,6 +924,10 @@ mod tests {
             "ticket retires before writer release"
         );
         drop(permit);
+        assert!(
+            queue.register().should_defer_pending_expiry(),
+            "cancelled observer must retain the completed blocking opportunity's spacing"
+        );
 
         let ticket = queue.register();
         let result = store_operation(writer.clone(), move || {

@@ -284,6 +284,16 @@ fails closed, as does a live root whose closure was compacted. A stale advisory
 watermark is not authority to delete. Reclaimed pages can be reused without
 reducing the main file's physical size.
 
+The shared stdio daemon spaces pending continuation opportunities by its
+smallest configured watcher collection interval, measured from completion of
+the previous normal opportunity. Its captured finite ready cohort must also
+finish or cancel. Deferred acquisitions do not postpone eligibility. The
+normal expiry quantum and capacity bypass still override that deferral;
+independent CLI and mixed/Unix engines keep their existing behavior. This
+spacing may reduce reclamation throughput and does not bound a single batch,
+writer contention or source-observation age. Observe committed retirement and
+freshness separately.
+
 ### What an expiry validates, and what it relies on
 
 Before retiring anything, an expiry validates, by type and by stored digest,
