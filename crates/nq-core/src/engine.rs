@@ -9259,8 +9259,47 @@ fn validate_expiry_candidates(
     store: &Store,
     candidates: &nq_store::ExpiryCandidates,
 ) -> Result<(), EngineError> {
-    for sequence in &candidates.evaluation_sequences {
-        validate_single_evaluation(store, *sequence)?;
+    let mut remaining = candidates.evaluation_sequences.as_slice();
+    if remaining.iter().any(|sequence| *sequence <= 0)
+        || remaining.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(EngineError::Invariant(
+            "expiry candidate evaluations must be positive and strictly ascending".into(),
+        ));
+    }
+    while let Some(&first) = remaining.first() {
+        // Share association scans only across consecutive candidates. Gaps
+        // must not cause unrelated history to enter this validation closure.
+        let count = remaining
+            .iter()
+            .take(nq_store::MAX_PUBLIC_QUERY_ROWS as usize)
+            .enumerate()
+            .take_while(|(offset, sequence)| {
+                first.checked_add(*offset as i64) == Some(**sequence)
+            })
+            .count();
+        let (page, rest) = remaining.split_at(count);
+        let rows = store.evaluation_refusal_history_bounded(
+            count as u32,
+            Some(first - 1),
+            page[count - 1],
+        )?;
+        if rows.len() != count {
+            return Err(EngineError::Invariant(format!(
+                "expiry candidate evaluations {first}..={} do not reopen exactly",
+                page[count - 1]
+            )));
+        }
+        for (row, sequence) in rows.into_iter().zip(page) {
+            if row.evaluation_sequence != *sequence {
+                return Err(EngineError::Invariant(format!(
+                    "expiry candidate evaluation {sequence} reopened as {}",
+                    row.evaluation_sequence
+                )));
+            }
+            validate_single_evaluation_row(store, row)?;
+        }
+        remaining = rest;
     }
     for report_id in &candidates.report_ids {
         validate_admitted_report_record(store, report_id)?;
@@ -10466,6 +10505,16 @@ fn validate_single_evaluation(
             row.evaluation_sequence
         )));
     }
+    validate_single_evaluation_row(store, row)
+}
+
+// Keep the exact typed and prior-finding transition checks shared by island
+// reads and paged expiry candidates; a page is not a contiguous replay seed.
+fn validate_single_evaluation_row(
+    store: &Store,
+    row: nq_store::EvaluationRefusalHistoryRow,
+) -> Result<(nq_store::EvaluationRefusalHistoryRow, EvaluationEnvelopeV2, Vec<u8>), EngineError> {
+    let sequence = row.evaluation_sequence;
     let envelope = validate_evaluation_refusal_row(store, &row, true)?;
     let lineage = evaluation_lineage_key(&envelope)?;
     let mut findings = BTreeMap::new();
@@ -15157,6 +15206,77 @@ sys.stdout.write("\n")
         drop(right);
         let full = Store::open_validating_fully(&path).unwrap();
         validate_fully_and_record(&full).unwrap();
+    }
+
+    #[test]
+    fn expiry_candidate_evaluations_share_association_scans() {
+        for (retained, count) in [(64, 4), (256, 4), (256, 16)] {
+            let directory = tempfile::tempdir().unwrap();
+            let loads: Vec<f64> = (0..retained).map(|i| if i % 2 == 0 { 8.0 } else { 1.0 }).collect();
+            let (store, _) = holes_fixture(&directory.path().join("candidate-pages.db"), &loads, "pages");
+            nq_store::start_sql_work_count();
+            store.count_sql_work_on_this_handle();
+            for sequence in 1..=count {
+                validate_single_evaluation(&store, sequence).unwrap();
+            }
+            let scalar = nq_store::stop_sql_work_count().unwrap();
+            nq_store::start_sql_work_count();
+            let candidates = nq_store::ExpiryCandidates {
+                evaluation_sequences: (1..=count).collect(),
+                ..Default::default()
+            };
+            validate_expiry_candidates(&store, &candidates).unwrap();
+            let batched = nq_store::stop_sql_work_count().unwrap();
+            eprintln!("candidate SQL work: retained={retained} candidates={count} scalar={scalar} batched={batched}");
+            if count == 16 {
+                assert!(batched * 4 < scalar * 3,
+                    "candidate validation must not repeat association scans for each adjacent evaluation");
+            }
+        }
+    }
+
+    #[test]
+    fn expiry_candidate_pages_keep_exact_closure_and_refusals() {
+        for mutation in ["none", "middle-detail", "association", "transition"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("candidate-closure.db");
+            let (store, _) = holes_fixture(&path, &[8.0, 1.0, 8.0], "closure");
+            let original_kind: String = rusqlite::Connection::open(&path).unwrap().query_row(
+                "SELECT event_kind FROM finding_events WHERE evaluation_id=(SELECT evaluation_id FROM evaluation_runs WHERE evaluation_sequence=3)",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(original_kind, "reopened");
+            match mutation {
+                "middle-detail" => mutate_bypassing_triggers(&path, "evaluation_runs",
+                    "UPDATE evaluation_runs SET detail_json=CAST('{}' AS BLOB) WHERE evaluation_sequence=2"),
+                "association" => mutate_bypassing_triggers(&path, "finding_events",
+                    "UPDATE finding_events SET evaluation_id=(SELECT evaluation_id FROM evaluation_runs WHERE evaluation_sequence=1) WHERE evaluation_id=(SELECT evaluation_id FROM evaluation_runs WHERE evaluation_sequence=3)"),
+                "transition" => mutate_bypassing_triggers(&path, "finding_events",
+                    "UPDATE finding_events SET event_kind='opened' WHERE evaluation_id=(SELECT evaluation_id FROM evaluation_runs WHERE evaluation_sequence=3)"),
+                _ => {}
+            }
+            let check = |sequences: Vec<i64>| validate_expiry_candidates(&store,
+                &nq_store::ExpiryCandidates { evaluation_sequences: sequences, ..Default::default() });
+            match mutation {
+                "none" => {
+                    check(vec![]).unwrap();
+                    check(vec![1, 2, 3]).unwrap();
+                    check(vec![1, 3]).unwrap();
+                    for invalid in [vec![4], vec![1, 2, 3, 4], vec![0], vec![2, 1], vec![1, 1]] {
+                        assert!(check(invalid.clone()).is_err(), "invalid closure {invalid:?}");
+                    }
+                }
+                "middle-detail" => {
+                    check(vec![1, 3]).expect("sparse candidates do not validate unrelated rows");
+                    assert!(check(vec![1, 2, 3]).is_err());
+                }
+                _ => {
+                    let error = check(vec![1, 2, 3]).expect_err("must refuse changed candidate");
+                    eprintln!("candidate {mutation} refusal: {error}");
+                    assert!(check(vec![1, 3]).is_err(), "sparse closure must refuse {mutation}");
+                }
+            }
+        }
     }
 
     /// Released islands are reclaimed even when no new row has aged.

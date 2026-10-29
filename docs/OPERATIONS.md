@@ -941,6 +941,14 @@ forcing each other into full replay after expiry. Retention continuation and
 capacity checks still apply before collection. A foreign process can still
 require recertification; this does not bound the first full replay.
 
+Retention reopens adjacent candidate evaluations in bounded pages so their
+association checks share a database scan. It splits pages at sequence gaps,
+requires every requested row to reopen exactly, and applies the same typed
+and prior-finding transition checks to each row. This reduces repeated scans
+without certifying unrelated history. Sparse candidates, expiry planning,
+and the remaining retention checks can still be expensive; this is not a
+collection latency bound.
+
 A configuration containing any persistent Unix helper retains independent
 resident engines. Its idle helper binding checks must remain able to quiesce a
 revoked helper while another watcher is collecting. Such configurations can
