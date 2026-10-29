@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use nq_core::config::{NqConfig, WatcherConfig};
+use nq_core::config::{Carrier, NqConfig, WatcherConfig};
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
@@ -148,17 +148,23 @@ pub async fn run(options: Nqd) -> Result<()> {
     // this daemon's own full operations fairly instead of making its workers
     // repeatedly consume that guard's bounded contention wait against peers.
     let writer = Arc::new(Mutex::new(()));
+    let shared = shared_stdio_engine(&config, writer.clone()).await?;
     for watcher in config.watchers.clone() {
         let config = config.clone();
         let shutdown = shutdown_rx.clone();
         let writer = writer.clone();
-        services.spawn(async move { schedule_instance(config, watcher, shutdown, writer).await });
+        let shared = shared.clone();
+        services.spawn(async move {
+            schedule_instance(config, watcher, shutdown, writer, shared).await
+        });
     }
     for watcher in config.watchers.clone() {
         let config = config.clone();
         let shutdown = shutdown_rx.clone();
         let writer = writer.clone();
-        services.spawn(async move { sweep_freshness(config, watcher, shutdown, writer).await });
+        let shared = shared.clone();
+        services
+            .spawn(async move { sweep_freshness(config, watcher, shutdown, writer, shared).await });
     }
 
     info!(instances = config.watchers.len(), "nqd started");
@@ -186,8 +192,8 @@ pub async fn run(options: Nqd) -> Result<()> {
         }
     }
     let _ = shutdown_tx.send(true);
-    services.abort_all();
-    while services.join_next().await.is_some() {}
+    let _drained_writer = drain_store_operations(&mut services, writer).await;
+    drop(shared);
     let mut stopped_store = open_configured_store(&config)?;
     nq_core::engine::record_component_status(
         &mut stopped_store,
@@ -223,10 +229,12 @@ fn open_configured_store(config: &NqConfig) -> Result<nq_store::Store> {
 async fn collect_once(config: NqConfig) -> Result<()> {
     let mut tasks = JoinSet::new();
     let writer = Arc::new(Mutex::new(()));
+    let shared = shared_stdio_engine(&config, writer.clone()).await?;
     for watcher in config.watchers.clone() {
         let config = config.clone();
         let writer = writer.clone();
-        tasks.spawn(async move { collect_one(config, watcher, writer).await });
+        let shared = shared.clone();
+        tasks.spawn(async move { collect_one(config, watcher, writer, shared).await });
     }
     let mut failures = 0;
     while let Some(result) = tasks.join_next().await {
@@ -262,11 +270,46 @@ async fn collect_once(config: NqConfig) -> Result<()> {
     }
 }
 
+type SharedEngine = Arc<Mutex<nq_core::CollectionEngine>>;
+
+/// A stdio-only daemon has no persistent helper to quiesce while another
+/// watcher collects. Share its store-wide replay and expiry state rather than
+/// repeatedly invalidating peer engines at each retention generation. Mixed
+/// configurations keep independent resident engines and Unix binding watches.
+async fn shared_stdio_engine(
+    config: &NqConfig,
+    writer: Arc<Mutex<()>>,
+) -> Result<Option<SharedEngine>> {
+    let config = config.clone();
+    store_operation(writer, move || open_shared_stdio_engine(&config)).await?
+}
+
+fn open_shared_stdio_engine(config: &NqConfig) -> Result<Option<SharedEngine>> {
+    if config.watchers.is_empty() || config.watchers.iter().any(|w| w.carrier != Carrier::Stdio) {
+        return Ok(None);
+    }
+    Ok(Some(Arc::new(Mutex::new(nq_core::CollectionEngine::open(
+        config,
+    )?))))
+}
+
+/// Aborting async waiters does not abort a running blocking operation. Its
+/// writer permit is the completion boundary before closing resident stores.
+async fn drain_store_operations(
+    services: &mut JoinSet<Result<()>>,
+    writer: Arc<Mutex<()>>,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    services.abort_all();
+    while services.join_next().await.is_some() {}
+    writer.lock_owned().await
+}
+
 async fn schedule_instance(
     config: NqConfig,
     watcher: WatcherConfig,
     mut shutdown: watch::Receiver<bool>,
     writer: Arc<Mutex<()>>,
+    shared: Option<SharedEngine>,
 ) -> Result<()> {
     let jitter_cap = watcher.schedule.jitter_seconds;
     let jitter = if jitter_cap == 0 {
@@ -284,25 +327,39 @@ async fn schedule_instance(
         }
     }
 
-    let mut engine = store_operation(writer.clone(), move || {
-        nq_core::CollectionEngine::open(&config)
-    })
-    .await??;
+    let mut engine = if shared.is_some() {
+        None
+    } else {
+        Some(
+            store_operation(writer.clone(), move || {
+                nq_core::CollectionEngine::open(&config)
+            })
+            .await??,
+        )
+    };
     let mut backoff = watcher.schedule.retry_backoff_seconds;
     loop {
         if *shutdown.borrow() {
             return Ok(());
         }
         let collection_watcher = watcher.clone();
-        let (returned_engine, outcome) = store_operation(writer.clone(), move || {
-            let outcome = engine.collect(&collection_watcher);
-            (engine, outcome)
+        let shared = shared.clone();
+        let (returned_engine, outcome, retention) = store_operation(writer.clone(), move || {
+            if let Some(shared) = shared {
+                let mut engine = shared.blocking_lock();
+                let outcome = engine.collect(&collection_watcher);
+                let retention = engine.last_retention_attempt().cloned();
+                (None, outcome, retention)
+            } else {
+                let mut engine = engine.expect("independent resident engine");
+                let outcome = engine.collect(&collection_watcher);
+                let retention = engine.last_retention_attempt().cloned();
+                (Some(engine), outcome, retention)
+            }
         })
         .await?;
         engine = returned_engine;
-        if let Some(nq_core::RetentionAttempt::Refused { class, detail }) =
-            engine.last_retention_attempt()
-        {
+        if let Some(nq_core::RetentionAttempt::Refused { class, detail }) = retention {
             warn!(
                 instance = %watcher.instance_id,
                 class,
@@ -351,12 +408,28 @@ async fn schedule_instance(
                 delay
             }
         };
-        let (returned_engine, shutdown_requested) =
-            wait_with_binding_watch(engine, &watcher, Duration::from_secs(delay), &mut shutdown)
-                .await?;
-        engine = returned_engine;
-        if shutdown_requested {
-            return Ok(());
+        if let Some(resident) = engine {
+            let (returned_engine, shutdown_requested) = wait_with_binding_watch(
+                resident,
+                &watcher,
+                Duration::from_secs(delay),
+                &mut shutdown,
+            )
+            .await?;
+            engine = Some(returned_engine);
+            if shutdown_requested {
+                return Ok(());
+            }
+        } else {
+            // Stdio helpers end with their request: no idle helper exists to
+            // quiesce, and waiting must not acquire the shared engine lock.
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_secs(delay)) => {}
+                changed = shutdown.changed() => {
+                    changed?;
+                    return Ok(());
+                }
+            }
         }
     }
 }
@@ -417,10 +490,15 @@ async fn collect_one(
     config: NqConfig,
     watcher: WatcherConfig,
     writer: Arc<Mutex<()>>,
+    shared: Option<SharedEngine>,
 ) -> Result<nq_core::CollectionOutcome> {
     Ok(store_operation(writer, move || {
-        let mut engine = nq_core::CollectionEngine::open(&config)?;
-        engine.collect(&watcher)
+        if let Some(shared) = shared {
+            shared.blocking_lock().collect(&watcher)
+        } else {
+            let mut engine = nq_core::CollectionEngine::open(&config)?;
+            engine.collect(&watcher)
+        }
     })
     .await??)
 }
@@ -430,6 +508,7 @@ async fn sweep_freshness(
     watcher: WatcherConfig,
     mut shutdown: watch::Receiver<bool>,
     writer: Arc<Mutex<()>>,
+    shared: Option<SharedEngine>,
 ) -> Result<()> {
     let profile = nq_profiles::resolve_profile(&watcher.profile.id, watcher.profile.version)
         .context("freshness sweep profile is not compiled")?;
@@ -445,9 +524,14 @@ async fn sweep_freshness(
         }
         let sweep_config = config.clone();
         let sweep_watcher = watcher.clone();
+        let shared = shared.clone();
         let result = store_operation(writer.clone(), move || {
-            let mut engine = nq_core::CollectionEngine::open(&sweep_config)?;
-            engine.freshness_sweep(&sweep_watcher)
+            if let Some(shared) = shared {
+                shared.blocking_lock().freshness_sweep(&sweep_watcher)
+            } else {
+                let mut engine = nq_core::CollectionEngine::open(&sweep_config)?;
+                engine.freshness_sweep(&sweep_watcher)
+            }
         })
         .await?;
         match result {
@@ -495,6 +579,248 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn stdio_fixture(root: &std::path::Path) -> NqConfig {
+        let mut config: NqConfig =
+            toml::from_str(include_str!("../../../examples/nq-host.toml")).unwrap();
+        config.database_path = root.join("store.db");
+        config.socket_path = root.join("socket");
+        config.admissions_dir = root.join("admissions");
+        config.helper_runtime_dir = root.join("helpers");
+        config.retention.horizon_seconds = 1;
+        config.retention.reserve_bytes = Some(0);
+        config.retention.auxiliary_bytes = Some(0);
+        let watcher = &mut config.watchers[0];
+        watcher.command.executable = PathBuf::from("/usr/bin/false");
+        watcher.command.execution_account = nix::unistd::geteuid().as_raw().to_string();
+        watcher.command.allow_same_identity_in_debug = true;
+        watcher.command.working_directory = root.to_path_buf();
+        let mut second = watcher.clone();
+        second.instance_id = "host-second".into();
+        config.watchers.push(second);
+        let mut store = nq_store::Store::initialize_with_capacity(
+            &config.database_path,
+            config.retention.horizon_seconds,
+            config.retention.byte_ceiling,
+            Some(0),
+            Some(0),
+        )
+        .unwrap();
+        nq_core::engine::append_genesis(&mut store, None).unwrap();
+        nq_core::engine::append_profile_descriptor(
+            &mut store,
+            nq_profiles::resolve_profile("nq.host", 1).unwrap(),
+        )
+        .unwrap();
+        config
+    }
+
+    #[tokio::test]
+    async fn stdio_watchers_share_retention_cadence_even_when_admission_refuses() {
+        let root = tempfile::tempdir().unwrap();
+        let config = stdio_fixture(root.path());
+        let writer = Arc::new(Mutex::new(()));
+        let shared = shared_stdio_engine(&config, writer.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        for (index, watcher) in config.watchers.into_iter().enumerate() {
+            let shared = shared.clone();
+            let (outcome, attempt) = store_operation(writer.clone(), move || {
+                let mut engine = shared.blocking_lock();
+                let outcome = engine.collect(&watcher).unwrap();
+                (outcome, engine.last_retention_attempt().cloned())
+            })
+            .await
+            .unwrap();
+            assert!(
+                !outcome.is_success(),
+                "unadmitted helper must remain refused"
+            );
+            if index == 0 {
+                assert!(matches!(
+                    attempt,
+                    Some(nq_core::RetentionAttempt::Completed(_))
+                ));
+            } else {
+                assert!(
+                    matches!(attempt, Some(nq_core::RetentionAttempt::Deferred { .. })),
+                    "the next watcher must reuse the store-wide retention cadence: {attempt:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_stdio_owner_collects_and_sweeps_after_expiry() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = stdio_fixture(root.path());
+        let script = root.path().join("helper.py");
+        let load = root.path().join("load");
+        std::fs::write(&script, include_str!("../tests/fixtures/host_load.py")).unwrap();
+        std::fs::write(&load, "1.0\n").unwrap();
+        std::fs::create_dir(&config.admissions_dir).unwrap();
+        for watcher in &mut config.watchers {
+            watcher.command.executable = PathBuf::from("/usr/bin/python3");
+            watcher.command.args = vec![script.to_string_lossy().into_owned()];
+            watcher.command.env.insert(
+                "NQ_TEST_LOAD_FILE".into(),
+                load.to_string_lossy().into_owned(),
+            );
+        }
+        let seed_config = config.clone();
+        store_operation(Arc::new(Mutex::new(())), move || {
+            let mut engine = nq_core::CollectionEngine::open(&seed_config).unwrap();
+            for watcher in &seed_config.watchers {
+                engine
+                    .watcher_action(watcher, "admit")
+                    .expect("fixture helper must execute, not skip");
+            }
+            for index in 0..8 {
+                assert!(
+                    engine
+                        .collect(&seed_config.watchers[index % 2])
+                        .unwrap()
+                        .is_success()
+                );
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let writer = Arc::new(Mutex::new(()));
+        // Install SQL accounting on the resident handle when it opens. Later
+        // operations can count on whichever blocking worker executes them.
+        let count_config = config.clone();
+        let shared = store_operation(writer.clone(), move || {
+            nq_store::start_sql_work_count();
+            let shared = open_shared_stdio_engine(&count_config).unwrap().unwrap();
+            nq_store::stop_sql_work_count();
+            shared
+        })
+        .await
+        .unwrap();
+        for watcher in &config.watchers {
+            assert!(
+                collect_one(
+                    config.clone(),
+                    watcher.clone(),
+                    writer.clone(),
+                    Some(shared.clone())
+                )
+                .await
+                .unwrap()
+                .is_success()
+            );
+            assert!(
+                shared.lock().await.last_retention_attempt().is_some(),
+                "the daemon collection path must use the supplied resident owner"
+            );
+        }
+        let mut work = Vec::new();
+        for index in 0..24 {
+            let engine = shared.clone();
+            let watcher = config.watchers[index % 2].clone();
+            let ticks = store_operation(writer.clone(), move || {
+                nq_store::start_sql_work_count();
+                let mut engine = engine.blocking_lock();
+                let outcome = engine.collect(&watcher).unwrap();
+                assert!(outcome.is_success());
+                engine.freshness_sweep(&watcher).unwrap();
+                let ticks = nq_store::stop_sql_work_count().unwrap();
+                assert!(
+                    !matches!(
+                        engine.last_retention_attempt(),
+                        Some(nq_core::RetentionAttempt::Refused { .. })
+                    ),
+                    "the shared owner must not contend with a peer or lose its certification"
+                );
+                ticks
+            })
+            .await
+            .unwrap();
+            work.push(ticks);
+            if index % 8 == 7 {
+                eprintln!(
+                    "shared owner completed {} admitted collections and sweeps",
+                    index + 1
+                );
+            }
+        }
+        let early: u64 = work[4..8].iter().sum();
+        let late: u64 = work[20..24].iter().sum();
+        eprintln!("shared stdio SQL work, early4={early}, late4={late}");
+        assert!(
+            late < early * 2,
+            "settled work must not replay growing retained history"
+        );
+        drop(shared);
+        let validation_config = config.clone();
+        store_operation(writer, move || {
+            let store =
+                nq_store::Store::open_validating_fully(&validation_config.database_path).unwrap();
+            assert!(
+                store.retention_generation().unwrap() > 0,
+                "fixture must actually expire history"
+            );
+            nq_core::engine::validate_fully_and_record(&store).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_drains_a_cancelled_waiters_blocking_operation() {
+        let writer = Arc::new(Mutex::new(()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut services = JoinSet::new();
+        let operation_writer = writer.clone();
+        services.spawn(async move {
+            store_operation(operation_writer, move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+            .await?;
+            Ok(())
+        });
+        started_rx.await.unwrap();
+        let (closed_tx, mut closed_rx) = tokio::sync::oneshot::channel();
+        let drain = tokio::spawn(async move {
+            let _permit = drain_store_operations(&mut services, writer).await;
+            closed_tx.send(()).unwrap();
+        });
+        let waiting = tokio::time::timeout(Duration::from_millis(50), &mut closed_rx)
+            .await
+            .is_err();
+        release_tx.send(()).unwrap();
+        assert!(
+            waiting,
+            "shutdown must not claim closed while blocking collection still runs"
+        );
+        drain.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mixed_and_empty_configurations_do_not_share_a_resident_engine() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = stdio_fixture(root.path());
+        config.watchers[1].carrier = nq_core::config::Carrier::Unix;
+        let writer = Arc::new(Mutex::new(()));
+        assert!(
+            shared_stdio_engine(&config, writer.clone())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        config.watchers.clear();
+        assert!(
+            shared_stdio_engine(&config, writer)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_waiter_keeps_running_store_operation_serialized() {

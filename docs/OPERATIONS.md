@@ -933,6 +933,22 @@ changed certified row or same-rule semantic head still refuses; concurrent
 writes still defer the expiry. This removes repeated full validation after a
 successful recertification, not the cost of the first full replay.
 
+A daemon whose configured watchers all use stdio shares one resident engine
+for collections and freshness sweeps. Watcher schedules and retry backoff remain
+independent; the existing writer queue serializes store operations. Sharing the
+store-wide replay and retention cadence prevents these watchers from repeatedly
+forcing each other into full replay after expiry. Retention continuation and
+capacity checks still apply before collection. A foreign process can still
+require recertification; this does not bound the first full replay.
+
+A configuration containing any persistent Unix helper retains independent
+resident engines. Its idle helper binding checks must remain able to quiesce a
+revoked helper while another watcher is collecting. Such configurations can
+still incur repeated foreign-expiry replay; the stdio improvement does not
+claim otherwise. On ordinary shutdown the daemon drains its blocking store
+operation before closing the shared engine and recording stopped status. The
+service manager's configured stop timeout remains an outer limit.
+
 ### Refusals and warnings
 
 - A watermark written for another store (another genesis) refuses every open

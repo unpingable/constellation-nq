@@ -15127,6 +15127,38 @@ sys.stdout.write("\n")
         }
     }
 
+    /// Characterize the daemon's separately resident writers: each can
+    /// invalidate the other's locally validated frontier again after recovery.
+    #[test]
+    fn alternating_residents_repeat_foreign_expiry_recertification() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("alternating-residents.db");
+        let (mut store, config) = holes_fixture(&path, &[1.0, 1.0], "alternating");
+        store.append_genesis(&nq_store::GenesisInput {
+            genesis_id: "genesis-alternating".into(),
+            legacy_manifest_digest: None,
+            created_at: timestamp(Utc::now()),
+            detail: canonical(&json!({"source": "test"})).unwrap(),
+        }).unwrap();
+        drop(store);
+        let engine_config = holes_engine_config(&path);
+        let mut left = CollectionEngine::open(&engine_config).unwrap();
+        let mut right = CollectionEngine::open(&engine_config).unwrap();
+        for turn in 0..3 {
+            holes_collect(left.store_mut_for_test(), &config, &format!("turn-{turn}"), 1.0);
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            let expired = expire_ordinary_history(left.store_mut_for_test(), &timestamp(Utc::now())).unwrap();
+            assert!(expired.deleted_rows > 0);
+            assert!(engine_semantic_state(&left.store).is_some());
+            assert!(engine_semantic_state(&right.store).is_none(), "other resident must replay again on turn {turn}");
+            std::mem::swap(&mut left, &mut right);
+        }
+        drop(left);
+        drop(right);
+        let full = Store::open_validating_fully(&path).unwrap();
+        validate_fully_and_record(&full).unwrap();
+    }
+
     /// Released islands are reclaimed even when no new row has aged.
     #[test]
     fn released_island_is_reclaimed_without_new_aged_history() {
