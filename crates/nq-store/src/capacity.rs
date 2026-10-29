@@ -434,8 +434,28 @@ pub fn checkpoint_or_bound_before_write(
     path: &Path,
     envelope: &OperatingEnvelope,
 ) -> Result<(), StoreError> {
+    checkpoint_or_bound_using(connection, path, envelope, truncate_checkpoint_busy)
+}
+
+// Store owns these connections and configures busy_timeout itself. Keep this
+// private: replacing a timeout cannot restore an arbitrary caller busy handler.
+// Strict checkpoints and the public connection helper retain their wait policy.
+pub(super) fn checkpoint_or_bound_before_store_write(
+    connection: &Connection,
+    path: &Path,
+    envelope: &OperatingEnvelope,
+) -> Result<(), StoreError> {
+    checkpoint_or_bound_using(connection, path, envelope, truncate_checkpoint_without_wait)
+}
+
+fn checkpoint_or_bound_using(
+    connection: &Connection,
+    path: &Path,
+    envelope: &OperatingEnvelope,
+    checkpoint: fn(&Connection) -> Result<bool, StoreError>,
+) -> Result<(), StoreError> {
     envelope.preflight(path)?;
-    let ceiling = if truncate_checkpoint_busy(connection)? {
+    let ceiling = if checkpoint(connection)? {
         contended_page_ceiling(connection, path, envelope)?
             .ok_or_else(|| contention(CHECKPOINT_CONTENTION))?
     } else {
@@ -485,6 +505,18 @@ pub(crate) fn classify_sqlite_error(error: rusqlite::Error) -> StoreError {
 }
 
 const CHECKPOINT_CONTENTION: &str = "reader or writer prevents bounded WAL checkpoint";
+
+// Avoid spending the write-lock timeout on an optional reset before the
+// existing bounded-WAL fallback. Copying checkpoint pages may still take IO.
+// Restore before propagating either query outcome; a restoration error refuses
+// admission rather than proceeding with an altered actual write-lock timeout.
+fn truncate_checkpoint_without_wait(connection: &Connection) -> Result<bool, StoreError> {
+    let timeout_ms: u64 = connection.pragma_query_value(None, "busy_timeout", |row| row.get(0))?;
+    connection.busy_timeout(std::time::Duration::ZERO)?;
+    let checkpoint = truncate_checkpoint_busy(connection);
+    connection.busy_timeout(std::time::Duration::from_millis(timeout_ms))?;
+    checkpoint
+}
 
 fn truncate_checkpoint_busy(connection: &Connection) -> Result<bool, StoreError> {
     let (busy, _, _): (i64, i64, i64) =
@@ -866,6 +898,104 @@ mod tests {
             .unwrap()
             .set_len(target)
             .unwrap();
+    }
+
+    #[test]
+    fn held_reader_ordinary_write_does_not_wait_for_opportunistic_checkpoint() {
+        let (_root, path, mut store) = tiny_store();
+        let envelope = store.capacity.clone().unwrap();
+        store.record_status(&status(0, 1024)).unwrap();
+        let reader = hold_reader(&path);
+        let before: i64 = reader
+            .query_row("SELECT COUNT(*) FROM status_events", [], |r| r.get(0))
+            .unwrap();
+        store
+            .connection
+            .busy_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let started = std::time::Instant::now();
+        store.record_status(&status(1, 1024)).unwrap();
+        let elapsed = started.elapsed();
+        let timeout: u64 = store
+            .connection
+            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            timeout, 1000,
+            "actual write-lock waits retain their configured policy"
+        );
+        assert_eq!(
+            reader
+                .query_row::<i64, _, _>("SELECT COUNT(*) FROM status_events", [], |r| r.get(0))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            stored_status_ids(&store).len(),
+            usize::try_from(before).unwrap() + 1
+        );
+        assert!(max_page_count(&store) < envelope.max_pages);
+        assert!(std::fs::metadata(sidecar(&path, "-wal")).unwrap().len() <= envelope.wal_bytes);
+        assert!(observe(&path).unwrap().occupied_bytes <= envelope.aggregate_bytes);
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "the optional checkpoint must not consume the one-second busy wait: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn nonwaiting_checkpoint_restores_timeout_after_query_error() {
+        let (_root, _path, store) = tiny_store();
+        store
+            .connection
+            .busy_timeout(std::time::Duration::from_millis(731))
+            .unwrap();
+        store.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(
+            truncate_checkpoint_without_wait(&store.connection).is_err(),
+            "checkpointing inside this connection's transaction must fail"
+        );
+        let timeout: u64 = store
+            .connection
+            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 731, "restore before propagating the query error");
+        store.connection.execute_batch("ROLLBACK").unwrap();
+    }
+
+    #[test]
+    fn ordinary_write_retains_its_actual_writer_lock_wait() {
+        let (_root, path, mut store) = tiny_store();
+        store.record_status(&status(0, 1024)).unwrap();
+        store
+            .connection
+            .busy_timeout(std::time::Duration::from_millis(100))
+            .unwrap();
+        let other_writer = Connection::open(&path).unwrap();
+        other_writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let before = stored_status_ids(&store);
+        let started = std::time::Instant::now();
+        let error = store.record_status(&status(1, 1024)).unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(error, StoreError::Sqlite(rusqlite::Error::SqliteFailure(ref code, _))
+            if code.code == rusqlite::ErrorCode::DatabaseBusy),
+            "{error:?}"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(75),
+            "only the checkpoint hint skips waiting, not actual writer contention: {elapsed:?}"
+        );
+        assert_eq!(stored_status_ids(&store), before);
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value::<u64, _>(None, "busy_timeout", |r| r.get(0))
+                .unwrap(),
+            100
+        );
+        other_writer.execute_batch("ROLLBACK").unwrap();
+        store.record_status(&status(1, 1024)).unwrap();
     }
 
     #[test]

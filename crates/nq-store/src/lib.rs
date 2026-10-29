@@ -5172,7 +5172,7 @@ impl Store {
                 StoreError::Invariant("writable operation requires persisted capacity envelope".into())
             })?;
             let _checkpoint_timing = operation_timing::PhaseTiming::start("store.checkpoint_capacity");
-            capacity::checkpoint_or_bound_before_write(&self.connection, path, envelope)?;
+            capacity::checkpoint_or_bound_before_store_write(&self.connection, path, envelope)?;
         }
         Ok(guard)
     }

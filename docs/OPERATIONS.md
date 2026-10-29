@@ -1461,7 +1461,15 @@ new incident Store semantics is claimed. Source/report context: cartography
 
 ### Writes while a reader holds the WAL
 
-Every write transaction first attempts a `TRUNCATE` checkpoint. When a
+Every write transaction first attempts a `TRUNCATE` checkpoint. On the
+Store's ordinary write path, this optional attempt does not wait for a
+conflicting reader or writer: it uses the existing bounded-WAL fallback below.
+The Store restores its configured busy timeout before actual write admission,
+including when the checkpoint query fails. Actual write-lock waits, the public
+connection helper and strict explicit checkpoints retain their existing policy.
+Checkpoint page copying and filesystem IO can still take time.
+
+When a
 concurrent reader (status export, saved checks, the telemetry exporter,
 Nightshift) keeps the checkpoint from resetting the WAL, the write is no
 longer refused outright. It is admitted when it provably cannot take the WAL
