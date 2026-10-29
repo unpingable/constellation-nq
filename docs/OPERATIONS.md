@@ -803,8 +803,16 @@ Without such a certification (no watermark, a withdrawn certification, or one
 recorded under other engine rules, as after every package upgrade until the
 first engine open), the status snapshot reopens the complete history as
 before, which is linear in retained evaluations. The stable-snapshot rule is
-the same on both paths: status rows are read before the evaluation bound, and
-the capture is retried up to eight times while status history moves. The
+the same on both paths: the whole capture (certification check, status rows
+read before the evaluation bound, history validation and projections) runs in
+one SQLite read transaction. Status events committed while it runs are not
+part of that snapshot and do not force a retry; the next export reports them.
+Validation is unchanged, and no earlier result is reused. While the export
+runs, its read transaction keeps a checkpoint from resetting the WAL; a
+concurrent write is then admitted only within the envelope's WAL allowance
+(see [Writes while a reader holds the WAL](#writes-while-a-reader-holds-the-wal))
+and is otherwise refused as contention. This is not an unconditional reader
+or writer progress guarantee. The
 complete history stays available explicitly through `evaluations export`
 pages and `admin validate --full`.
 

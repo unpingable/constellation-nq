@@ -9601,6 +9601,23 @@ fn concurrent_writer_for_test(snapshot: &Store) {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Concurrent-writer fixture: while armed, every status capture attempt
+    /// on this thread commits a status event through a second connection
+    /// after selecting its evaluations, as a busy daemon would (tests only).
+    static STATUS_CAPTURE_CONCURRENT_WRITER_FOR_TEST: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn status_capture_concurrent_writer_for_test(store: &Store) {
+    if STATUS_CAPTURE_CONCURRENT_WRITER_FOR_TEST.with(std::cell::Cell::get) {
+        EXPIRY_CONCURRENT_WRITER_FOR_TEST.with(|armed| armed.set(true));
+        concurrent_writer_for_test(store);
+    }
+}
+
 /// Exhaustively reopen the complete persisted semantic chain.
 ///
 /// This is the shared fail-closed boundary for operations that may disclose or
@@ -10200,12 +10217,16 @@ type LatestEvaluations = BTreeMap<Vec<u8>, (i64, i64, EvaluationEnvelopeV2)>;
 /// Returns when status history, evaluation history, a canonical carrier, or a
 /// projection/linkage invariant cannot be proved exactly.
 pub fn status_snapshot_v3(store: &Store) -> Result<StatusSnapshotV3, EngineError> {
-    match engine_semantic_state(store) {
+    // One SQLite read transaction: the certification check, status rows,
+    // evaluation bound, history validation and projections all read one
+    // committed state, so status commits that land during the capture
+    // cannot invalidate it; they belong to the next snapshot.
+    store.with_read_snapshot(|store, _| match engine_semantic_state(store) {
         Some((frontier, state)) => status_snapshot_v3_with(store, |status_through, through| {
             latest_evaluations_since(store, &frontier, &state, status_through, through)
         }),
         None => status_snapshot_v3_from_complete_history(store),
-    }
+    })
 }
 
 /// [`status_snapshot_v3`] over the complete immutable history, whatever the
@@ -10327,9 +10348,11 @@ fn reopen_certified_evaluation_head(
 }
 
 /// Capture one stable status/evaluation snapshot: status rows are read before
-/// the evaluation bound, and the capture is retried while status history
-/// moves. `select_latest` validates what the snapshot reads and returns each
-/// lineage's newest evaluation through the bound; it receives the status
+/// the evaluation bound. The caller holds one read transaction
+/// ([`Store::with_read_snapshot`]), so status history cannot move during the
+/// capture; that is still checked. `select_latest` validates what the
+/// snapshot reads and returns each lineage's newest evaluation through the
+/// bound; it receives the status
 /// sequence read before the status rows and the evaluation bound.
 fn status_snapshot_v3_with<F>(
     store: &Store,
@@ -10338,27 +10361,20 @@ fn status_snapshot_v3_with<F>(
 where
     F: FnMut(i64, i64) -> Result<LatestEvaluations, EngineError>,
 {
-    const SNAPSHOT_ATTEMPTS: usize = 8;
-    let mut captured = None;
-    for _ in 0..SNAPSHOT_ATTEMPTS {
-        let status_before = store.latest_status_sequence()?;
-        // Collection commits evaluations before its admitted status row.
-        // Reading current status before the evaluation bound prevents a
-        // component from embedding an evaluation beyond that declared bound.
-        let status_rows = store.status_snapshots()?;
-        let through = store.latest_evaluation_sequence()?;
-        let latest = select_latest(status_before, through)?;
-        let status_after = store.latest_status_sequence()?;
-        if status_before == status_after {
-            captured = Some((status_rows, through, latest));
-            break;
-        }
-    }
-    let Some((status_rows, through, latest)) = captured else {
+    let status_before = store.latest_status_sequence()?;
+    // Collection commits evaluations before its admitted status row.
+    // Reading current status before the evaluation bound prevents a
+    // component from embedding an evaluation beyond that declared bound.
+    let status_rows = store.status_snapshots()?;
+    let through = store.latest_evaluation_sequence()?;
+    let latest = select_latest(status_before, through)?;
+    #[cfg(test)]
+    status_capture_concurrent_writer_for_test(store);
+    if store.latest_status_sequence()? != status_before {
         return Err(EngineError::Invariant(
-            "could not capture one stable status/evaluation snapshot after 8 attempts".into(),
+            "status history moved inside one status/evaluation read snapshot".into(),
         ));
-    };
+    }
     // Every evaluation a captured status row reads precedes the bound, and
     // `select_latest` validated the history through it.
     let mut components = status_rows
@@ -23116,6 +23132,52 @@ sys.stdout.write("\n")
                     "the newest revision beyond the watermark supersedes the certified head"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn status_snapshot_is_one_read_snapshot_under_a_concurrent_status_writer() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (engine, watcher) = admitted_operator_beta_systemd_freshness_fixture(directory.path());
+        let config = engine.config.clone();
+        drop(engine);
+        append_freshness_history(&config, &watcher, 2);
+        for certify in [false, true] {
+            if certify {
+                full_validation_and_watermark(&config);
+                append_freshness_history(&config, &watcher, 1);
+            }
+            let store = Store::open_read_only(&config.database_path).expect("read-only");
+            if certify {
+                assert!(
+                    engine_semantic_state(&store).is_some(),
+                    "bounded path applies"
+                );
+            }
+            let quiet = status_snapshot_v3(&store).expect("quiet status");
+            let sequence_before = store.latest_status_sequence().expect("status sequence");
+            STATUS_CAPTURE_CONCURRENT_WRITER_FOR_TEST.with(|armed| armed.set(true));
+            let captured = status_snapshot_v3(&store);
+            STATUS_CAPTURE_CONCURRENT_WRITER_FOR_TEST.with(|armed| armed.set(false));
+            let captured =
+                captured.expect("one read snapshot is stable under a concurrent status writer");
+            assert_eq!(
+                snapshot_content(&captured),
+                snapshot_content(&quiet),
+                "the snapshot excludes commits after it began"
+            );
+            assert!(
+                store.latest_status_sequence().expect("status sequence") > sequence_before,
+                "the concurrent writes committed durably"
+            );
+            let later = status_snapshot_v3(&store).expect("status after the writer");
+            assert!(
+                later
+                    .components
+                    .iter()
+                    .any(|component| component.id == "concurrent-writer"),
+                "the next snapshot reports the committed status"
+            );
         }
     }
 
