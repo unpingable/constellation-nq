@@ -876,6 +876,31 @@ not interrupted: the process exits after it finishes, which can follow the
 `stopped` record, and systemd's `TimeoutStopSec` (45 s in the packaged unit)
 bounds the wait, after which SIGKILL rolls back any open transaction.
 
+### Operational phase timing
+
+For a bounded investigation of a slow collector, the exact environment opt-in
+`NQ_DIAGNOSTIC_PHASE_TIMING=1` emits `nq_phase` records to stderr. Apply it only
+to the selected daemon through its owning deployment procedure. It is off by
+default. New spans stop automatically thirty minutes after the process first
+enables timing; existing spans may still emit their finish records. Retire the
+opt-in after identifying the dominant phase and verifying
+the resulting fix; do not leave diagnostic capture running indefinitely.
+
+Records contain static phase names, process-local span IDs, start/finish,
+monotonic elapsed nanoseconds and already computed numeric results. They contain
+no report contents, SQL or bind values and add no counting scans. A finish means
+that the scope ended, including error exits; it is not a success or validation
+verdict. These operational records are not admitted evidence.
+
+Durations are inclusive. Nested phases overlap, and concurrent IDs are separate
+spans rather than a parent operation tree; do not sum them into a total. Outer
+operation records expose gaps, while queue, blocking-pool, capacity/checkpoint,
+transaction, retention and evaluation phases locate delays. Context timing also
+includes selection and cloning. Logging errors are ignored, but stderr writes
+can block and diagnostic overhead is part of the observation. Limits, validation
+rules, scheduling and detector decisions remain governed by their existing
+contracts.
+
 ### Full validation
 
 Full validation runs when no watermark exists, when it cannot be decoded, when

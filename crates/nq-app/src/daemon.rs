@@ -551,9 +551,14 @@ async fn store_operation<T: Send + 'static>(
     writer: Arc<Mutex<()>>,
     operation: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, tokio::task::JoinError> {
+    let queue_timing = nq_store::operation_timing::PhaseTiming::start("daemon.writer_queue");
     let permit = writer.lock_owned().await;
+    drop(queue_timing);
+    let pool_timing = nq_store::operation_timing::PhaseTiming::start("daemon.blocking_pool_queue");
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        drop(pool_timing);
+        let _timing = nq_store::operation_timing::PhaseTiming::start("daemon.store_operation");
         operation()
     })
     .await

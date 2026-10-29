@@ -2315,6 +2315,7 @@ impl CollectionEngine {
     ///
     /// Returns a version, integrity, or database-opening error.
     pub fn open(config: &NqConfig) -> Result<Self, EngineError> {
+        let _timing = nq_store::operation_timing::PhaseTiming::start("core.engine_open");
         validate_compiled_config(config)?;
         let store = Store::open_with_capacity(
             &config.database_path,
@@ -2341,6 +2342,7 @@ impl CollectionEngine {
 
     /// Whether the admission's capacity preflight would refuse the next write.
     fn capacity_preflight_refuses(&self) -> bool {
+        let _timing = nq_store::operation_timing::PhaseTiming::start("core.capacity_preflight");
         #[cfg(test)]
         if let Some(forced) = CAPACITY_PREFLIGHT_REFUSES_FOR_TEST.with(std::cell::Cell::get) {
             return forced;
@@ -2886,9 +2888,12 @@ impl CollectionEngine {
         emit_diagnostic: bool,
         local_successor_acquisition_id: Option<&str>,
     ) -> Result<CollectionExecution, EngineError> {
+        let _timing = nq_store::operation_timing::PhaseTiming::start("core.collection");
         validate_compiled_watcher(watcher)?;
+        let guard_timing = nq_store::operation_timing::PhaseTiming::start("core.instance_guard");
         let _guard =
             InstanceGuard::acquire(&self.config.database_path, &watcher.instance_id, "collect")?;
+        drop(guard_timing);
         // Fail closed before any persistence: a collection stamps evaluator
         // identity onto its finding events, so refuse up front when it is
         // unavailable rather than commit an admitted report and only then refuse
@@ -2912,6 +2917,10 @@ impl CollectionEngine {
         let due = self.expiry_continuation || elapsed.is_none_or(|elapsed| elapsed >= quantum);
         let capacity_bypass =
             !due && !self.capacity_bypass_spent && self.capacity_preflight_refuses();
+        let retention_timing = nq_store::operation_timing::PhaseTiming::start("core.retention");
+        retention_timing.value("due", i64::from(due));
+        retention_timing.value("continuation", i64::from(self.expiry_continuation));
+        retention_timing.value("capacity_bypass", i64::from(capacity_bypass));
         let attempt = if due || capacity_bypass {
             self.capacity_bypass_spent = capacity_bypass;
             self.last_expiry_attempt = Some(std::time::Instant::now());
@@ -2947,7 +2956,10 @@ impl CollectionEngine {
             }
         }
         self.retention_attempt = Some(attempt);
+        drop(retention_timing);
+        let binding_timing = nq_store::operation_timing::PhaseTiming::start("core.binding_reconcile");
         self.reconcile_pending_binding(watcher)?;
+        drop(binding_timing);
         let profile = resolve(watcher)?;
         let diagnostic_node_id = emit_diagnostic
             .then(|| self.store.sole_genesis_id())
@@ -3604,6 +3616,7 @@ impl CollectionEngine {
     /// Returns when the profile is unavailable, admitted evidence cannot be
     /// reconstructed, or the evaluation cannot be committed atomically.
     pub fn freshness_sweep(&mut self, watcher: &WatcherConfig) -> Result<usize, EngineError> {
+        let _timing = nq_store::operation_timing::PhaseTiming::start("core.freshness_sweep");
         validate_compiled_watcher(watcher)?;
         let _guard = InstanceGuard::acquire(
             &self.config.database_path,
@@ -4026,6 +4039,7 @@ impl CollectionEngine {
         binding_digest: Option<&str>,
         launch: VerifiedLaunch,
     ) -> RunCapture {
+        let _timing = nq_store::operation_timing::PhaseTiming::start("core.helper");
         let deadline = StdDuration::from_millis(watcher.schedule.deadline_ms);
         match watcher.carrier {
             Carrier::Stdio => {
@@ -4271,6 +4285,7 @@ impl CollectionEngine {
         profile: &'static dyn ProfileModule,
         trigger_run_id: Option<&str>,
     ) -> Result<Vec<EvaluationEnvelopeV2>, EngineError> {
+        let _timing = nq_store::operation_timing::PhaseTiming::start("core.evaluate_instance");
         let evaluator_artifact_digest = self
             .require_evaluator_identity()?
             .artifact_digest()
@@ -4282,10 +4297,17 @@ impl CollectionEngine {
         // so the evaluations build on exactly the history just validated.
         self.store
             .commit_evaluations_validated(|store, view, bounds| {
+                let snapshot_timing = nq_store::operation_timing::PhaseTiming::start("core.evaluation_snapshot");
                 let snapshot =
                     view.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
+                drop(snapshot_timing);
+                let replay_timing = nq_store::operation_timing::PhaseTiming::start("core.evaluation_replay");
                 advance_engine_cursor(store, replay, bounds)?;
+                drop(replay_timing);
+                let findings_timing = nq_store::operation_timing::PhaseTiming::start("core.evaluation_findings");
                 let current_findings = view.finding_snapshots()?;
+                drop(findings_timing);
+                let prepare_timing = nq_store::operation_timing::PhaseTiming::start("core.evaluation_prepare");
                 let prepared = prepare_instance_evaluations(
                     watcher,
                     profile,
@@ -4295,6 +4317,7 @@ impl CollectionEngine {
                     &evaluator_artifact_digest,
                     EvaluationReportSelection::AllMatching,
                 )?;
+                drop(prepare_timing);
                 Ok(prepared
                     .into_iter()
                     .map(|prepared| (prepared.commit, prepared.envelope))
@@ -5880,6 +5903,7 @@ fn prepare_instance_evaluations(
     evaluator_artifact_digest: &str,
     selection: EvaluationReportSelection<'_>,
 ) -> Result<Vec<PreparedEvaluation>, EngineError> {
+    let _timing = nq_store::operation_timing::PhaseTiming::start("core.prepare_evaluations");
     let profile_version = watcher.profile.version.to_string();
     let profile_digest = profile
         .descriptor()
@@ -5887,6 +5911,7 @@ fn prepare_instance_evaluations(
         .map_err(|error| EngineError::Canonical(error.to_string()))?;
     let profile_semantic = profile_semantic_id(profile.descriptor())
         .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    let context_timing = nq_store::operation_timing::PhaseTiming::start("core.context_and_selection");
     let matching_rows =
         evaluation_context_rows(&snapshot.reports, watcher, profile_digest.as_str())?;
     let selected_rows = match selection {
@@ -5905,10 +5930,13 @@ fn prepare_instance_evaluations(
             vec![(*selected).clone()]
         }
     };
+    drop(context_timing);
+    let reconstruction_timing = nq_store::operation_timing::PhaseTiming::start("core.profile_validation");
     let reports = selected_rows
         .iter()
         .map(|row| reconstruct_admitted(row, profile))
         .collect::<Result<Vec<_>, _>>()?;
+    drop(reconstruction_timing);
     let latest = matching_rows.iter().max_by_key(|row| row.report_sequence);
     let evaluation_watermark = nq_store::EvaluationWatermark {
         instance_id: watcher.instance_id.clone(),
@@ -5932,7 +5960,9 @@ fn prepare_instance_evaluations(
             reports: &reports,
             threshold_policy: watcher.threshold_policy.as_ref(),
         };
+        let detector_timing = nq_store::operation_timing::PhaseTiming::start("core.detector");
         let mut result = detector.evaluate(&detector_input);
+        drop(detector_timing);
         // Evidence timestamps are persisted at the schema's millisecond
         // precision. Seal the canonical evaluation from that same durable
         // value so a helper's finer clock precision cannot create a result
@@ -9171,6 +9201,7 @@ pub fn expire_ordinary_history_within(
     batch_runs: usize,
     budget: std::time::Duration,
 ) -> Result<nq_store::RetentionResult, EngineError> {
+    let timing = nq_store::operation_timing::PhaseTiming::start("core.expiry_attempt");
     let started = std::time::Instant::now();
     let mut total: Option<nq_store::RetentionResult> = None;
     let mut refused = 0;
@@ -9192,6 +9223,7 @@ pub fn expire_ordinary_history_within(
                     && started.elapsed() < budget =>
             {
                 refused += 1;
+                timing.value("refused_retries", i64::from(refused));
                 continue;
             }
             Err(EngineError::Store(error)) if error.is_refusal() && total.is_some() => {

@@ -24,6 +24,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub mod capacity;
+#[doc(hidden)]
+pub mod operation_timing;
 mod history_scope;
 mod retention;
 pub use retention::{
@@ -4207,6 +4209,7 @@ impl Store {
             &CollectionReceipt,
         ) -> Result<AdmittedCollectionCompletion<T>, E>,
     {
+        let _timing = operation_timing::PhaseTiming::start("store.admitted_commit");
         validate_collection(collection).map_err(E::from)?;
         if !is_admitted_collection(collection) {
             return Err(E::from(StoreError::Invariant(
@@ -4232,19 +4235,26 @@ impl Store {
             });
         }
         let bounds = HistoryFrontier::capture_bounds(&transaction).map_err(E::from)?;
+        let prevalidation_timing = operation_timing::PhaseTiming::start("store.admitted_prevalidation");
         validate(self, &bounds)?;
+        drop(prevalidation_timing);
+        let insertion_timing = operation_timing::PhaseTiming::start("store.collection_insert");
         let receipt = insert_collection(&transaction, collection).map_err(E::from)?;
         if receipt.report_sequence.is_none() || receipt.semantic_digest.is_none() {
             return Err(E::from(StoreError::Invariant(
                 "admitted collection did not allocate its report identity".into(),
             )));
         }
+        drop(insertion_timing);
+        let build_timing = operation_timing::PhaseTiming::start("store.admitted_build");
         let completion = {
             let view = AdmittedCollectionView {
                 transaction: &transaction,
             };
             build(&view, &receipt)?
         };
+        drop(build_timing);
+        let validation_timing = operation_timing::PhaseTiming::start("store.admitted_insert_validate");
         validate_admitted_completion(collection, &receipt, &completion).map_err(E::from)?;
         for input in &completion.evaluations {
             insert_evaluation(&transaction, &input.evaluation, input.finding.as_ref())
@@ -4277,10 +4287,13 @@ impl Store {
             .then(|| HistoryFrontier::capture_bounds(&transaction))
             .transpose()
             .map_err(E::from)?;
+        drop(validation_timing);
+        let commit_timing = operation_timing::PhaseTiming::start("store.admitted_sql_commit");
         transaction
             .commit()
             .map_err(StoreError::from)
             .map_err(E::from)?;
+        drop(commit_timing);
         if committed.is_some() {
             self.validation.store_validated = committed;
         }
@@ -5116,17 +5129,22 @@ impl Store {
     /// a concurrent reader refuses only when the write could exceed the
     /// envelope's WAL bound (see `capacity::checkpoint_or_bound_before_write`).
     fn write_guard(&self) -> Result<Option<capacity::OperationGuard>, StoreError> {
+        let _timing = operation_timing::PhaseTiming::start("store.write_guard");
+        let lock_timing = operation_timing::PhaseTiming::start("store.serialization");
         let guard = self.serialization_guard()?;
+        drop(lock_timing);
         if let Some(path) = &self.path {
             let envelope = self.capacity.as_ref().ok_or_else(|| {
                 StoreError::Invariant("writable operation requires persisted capacity envelope".into())
             })?;
+            let _checkpoint_timing = operation_timing::PhaseTiming::start("store.checkpoint_capacity");
             capacity::checkpoint_or_bound_before_write(&self.connection, path, envelope)?;
         }
         Ok(guard)
     }
 
     fn immediate_transaction(&mut self) -> Result<capacity::GuardedTransaction<'_>, StoreError> {
+        let _timing = operation_timing::PhaseTiming::start("store.transaction_acquire");
         self.require_current_schema()?;
         let ceiling = capacity::CeilingScope::begin();
         let guard = self.write_guard()?;
@@ -5140,6 +5158,7 @@ impl Store {
     }
 
     fn shared_immediate_transaction(&self) -> Result<capacity::GuardedTransaction<'_>, StoreError> {
+        let _timing = operation_timing::PhaseTiming::start("store.transaction_acquire");
         self.require_current_schema()?;
         let ceiling = capacity::CeilingScope::begin();
         let guard = self.write_guard()?;
@@ -7262,17 +7281,21 @@ impl Store {
             &HistoryFrontier,
         ) -> Result<(Vec<EvaluationCommitInput>, T), E>,
     {
+        let _timing = operation_timing::PhaseTiming::start("store.evaluation_commit");
         self.observe_retention_boundary().map_err(E::from)?;
         let validated = self.validation.store_validated.clone();
         let scope = validated.as_ref().map_or(Scope::FULL, Scope::after);
         let transaction = self.shared_immediate_transaction().map_err(E::from)?;
         let bounds = HistoryFrontier::capture_bounds(&transaction).map_err(E::from)?;
+        let build_timing = operation_timing::PhaseTiming::start("store.evaluation_build");
         let (evaluations, value) = {
             let view = AdmittedCollectionView {
                 transaction: &transaction,
             };
             build(self, &view, &bounds)?
         };
+        drop(build_timing);
+        let validation_timing = operation_timing::PhaseTiming::start("store.evaluation_insert_validate");
         for input in &evaluations {
             if input.evaluation.trigger_run_id.is_some() {
                 return Err(E::from(StoreError::Invariant(
@@ -7296,10 +7319,13 @@ impl Store {
                 .transpose()
         })()
         .map_err(E::from)?;
+        drop(validation_timing);
+        let commit_timing = operation_timing::PhaseTiming::start("store.evaluation_sql_commit");
         transaction
             .commit()
             .map_err(StoreError::from)
             .map_err(E::from)?;
+        drop(commit_timing);
         if committed.is_some() {
             self.validation.store_validated = committed;
         }

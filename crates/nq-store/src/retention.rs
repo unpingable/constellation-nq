@@ -3,6 +3,7 @@
 use crate::history_scope::{ExpiryDelta, OpenValidation, RetentionWitness};
 use crate::{CanonicalDocument, HistoryFrontier, Scope, Store, StoreError, ValidationState};
 use rusqlite::{Connection, OptionalExtension, params};
+use crate::operation_timing::PhaseTiming;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -544,6 +545,7 @@ fn prefix_may_advance(
     cutoff: &str,
     b: &RetentionBoundary,
 ) -> Result<bool, StoreError> {
+    let _timing = PhaseTiming::start("expiry.prefix_probe");
     Ok(connection.query_row(
         "WITH first_runs(run_id) AS (
             SELECT run_id FROM raw_submissions WHERE submission_id=(SELECT submission_id FROM admitted_reports WHERE report_sequence>?2 ORDER BY report_sequence LIMIT 1)
@@ -1168,6 +1170,7 @@ impl Store {
             .query_row("PRAGMA data_version", [], |r| r.get(0))
             .map_err(StoreError::from)
             .map_err(E::from)?;
+        let snapshot_timing = PhaseTiming::start("expiry.snapshot_validation");
         let (proof, promoted) = self.with_read_snapshot(|store, bounds| {
             let comparison = match engine_rules {
                 Some(rules) => store.promotion_comparison(bounds, rules).map_err(E::from)?,
@@ -1189,6 +1192,8 @@ impl Store {
                 promoted.map(|watermark| (watermark, bounds.clone())),
             ))
         })?;
+        drop(snapshot_timing);
+        let promotion_timing = PhaseTiming::start("expiry.promotion");
         if let Some((watermark, bounds)) = promoted {
             // The handle has now validated, by the same rules as an open,
             // everything through the snapshot frontier: it certifies it.
@@ -1210,6 +1215,7 @@ impl Store {
                 run_evaluations: std::cell::RefCell::new(None),
             };
         }
+        drop(promotion_timing);
         let after: i64 = self
             .connection
             .query_row("PRAGMA data_version", [], |r| r.get(0))
@@ -1399,6 +1405,8 @@ impl Store {
         {
             return result;
         }
+        let retry_timing = PhaseTiming::start("expiry.scalar_retry");
+        retry_timing.value("retry", 1);
         #[cfg(test)]
         expiry_test_hook(&self.connection, "before_scalar_retry")?;
         // Re-enter through normal capacity admission, transaction acquisition,
@@ -1419,6 +1427,7 @@ impl Store {
         use_lookup: bool,
         attempt: &mut ExpiryAttempt,
     ) -> Result<RetentionResult, StoreError> {
+        let phase_timing = PhaseTiming::start("expiry.attempt");
         chrono::DateTime::parse_from_rfc3339(cutoff)
             .map_err(|e| StoreError::Invariant(format!("invalid expiry cutoff: {e}")))?;
         self.require_current_schema()?;
@@ -1436,6 +1445,7 @@ impl Store {
         self.connection.pragma_update(None, "synchronous", "FULL")?;
         let store: &Self = self;
         let tx = store.shared_immediate_transaction()?;
+        let locked_timing = PhaseTiming::start("expiry.locked_validation");
         let current = validate_boundary_header(&tx)?;
         if !prefix_may_advance(&tx, cutoff, &current)? {
             tx.rollback()?;
@@ -1477,7 +1487,16 @@ impl Store {
             }
         }
         let before = boundary(&tx)?;
+        drop(locked_timing);
+        let plan_timing = PhaseTiming::start("expiry.planning");
         let plan = plan_expiry(&tx, cutoff, &before, max_candidate_runs)?;
+        plan_timing.value("generation_before", before.generation);
+        plan_timing.value("report_floor_before", before.report_floor);
+        plan_timing.value("report_floor_after", plan.report_floor);
+        plan_timing.value("affected_runs", plan.affected_runs);
+        plan_timing.value("affected_evaluations", plan.affected_evaluations);
+        plan_timing.value("candidates_remaining", i64::from(plan.candidates_remaining));
+        drop(plan_timing);
         let (ef, rf, inf, sf) = (plan.evaluation_floor, plan.report_floor, plan.intake_floor, plan.status_floor);
         let floors_moved = (ef, rf, inf, sf)
             != (
@@ -1495,6 +1514,7 @@ impl Store {
             });
         }
         if let Some(validate_candidates) = validate_candidates {
+            let _candidate_timing = PhaseTiming::start("expiry.candidate_validation");
             let candidates = expiry_candidates(&tx)?;
             validate_candidate_digests(&tx)?;
             validate_candidates(store, &candidates)?;
@@ -1510,6 +1530,7 @@ impl Store {
             .generation
             .checked_add(1)
             .ok_or_else(|| StoreError::Invariant("retention generation exhausted".into()))?;
+        let mutation_timing = PhaseTiming::start("expiry.mutations");
         let old: Vec<u8> = tx.query_row(
             "SELECT lineage_floors_json FROM retention_state WHERE singleton=1",
             [],
@@ -1640,6 +1661,8 @@ impl Store {
             delta.as_mut(),
         )?;
         tx.execute("UPDATE retention_state SET generation=?1,evaluation_floor=?2,report_floor=?3,intake_floor=?4,status_floor=?5,cutoff=?6,lineage_floors_json=?7,delete_enabled=0 WHERE singleton=1",params![next.generation,ef,rf,inf,sf,cutoff,document.as_bytes()])?;
+        drop(mutation_timing);
+        let boundary_timing = PhaseTiming::start("expiry.final_boundary_validation");
         // The resulting boundary is validated in full except for retired
         // commitments: with a scoped validation, only those retired by this
         // transaction are recomputed (the rest were certified unchanged).
@@ -1648,10 +1671,13 @@ impl Store {
         } else {
             validate_boundary(&tx)?;
         }
+        drop(boundary_timing);
+        let fk_timing = PhaseTiming::start("expiry.foreign_key_check");
         let violations: i64 =
             tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
                 r.get(0)
             })?;
+        drop(fk_timing);
         if violations != 0 {
             return Err(StoreError::Integrity(
                 "expiry closure has surviving foreign-key references".into(),
@@ -1659,6 +1685,7 @@ impl Store {
         }
         // Carry the certification forward inside the transaction, where the
         // surviving rows at or below each bound cannot change underneath.
+        let carry_timing = PhaseTiming::start("expiry.certificate_carry");
         let after_witness = witness(&tx)?;
         let carried = match (&carry, &delta) {
             // An inconsistent carry-forward withdraws the shortcut (the next
@@ -1679,10 +1706,16 @@ impl Store {
         };
         #[cfg(test)]
         crash_phase_for_test("inside_transaction", 72);
+        drop(carry_timing);
+        let commit_timing = PhaseTiming::start("expiry.commit");
         attempt.commit_started = true;
         #[cfg(test)]
         expiry_test_hook(&tx, "commit_boundary")?;
         tx.commit()?;
+        drop(commit_timing);
+        let _after_commit_timing = PhaseTiming::start("expiry.after_commit");
+        phase_timing.value("deleted_rows", i64::try_from(deleted).unwrap_or(i64::MAX));
+        phase_timing.value("generation_after", next.generation);
         #[cfg(test)]
         crash_phase_for_test("after_commit", 73);
         let written = match (carried, self.path.clone(), self.store_identity()?) {
