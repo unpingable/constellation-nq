@@ -695,6 +695,7 @@ pub(crate) fn live_finding_event_sql(e: &str) -> String {
 /// disposition: island, compact, or delete), `expiry_compact_reports`, and
 /// `expiry_dead_runs` (runs whose closure retires; `anchor=1` keeps the run
 /// row because a compact report names it).
+#[derive(Debug, Eq, PartialEq)]
 struct ExpiryPlan {
     evaluation_floor: i64,
     report_floor: i64,
@@ -711,6 +712,7 @@ fn plan_expiry(
     cutoff: &str,
     before: &RetentionBoundary,
     max_candidate_runs: Option<usize>,
+    indexed: bool,
 ) -> Result<ExpiryPlan, StoreError> {
     tx.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS expiry_runs(run_id TEXT PRIMARY KEY); DELETE FROM expiry_runs;
@@ -744,7 +746,7 @@ fn plan_expiry(
         let rf: i64 = tx.query_row("SELECT MAX(?1, COALESCE((SELECT MIN(a.report_sequence)-1 FROM admitted_reports a JOIN raw_submissions r ON r.submission_id=a.submission_id WHERE a.report_sequence>?1 AND r.run_id NOT IN (SELECT run_id FROM expiry_runs)),(SELECT MAX(report_sequence) FROM admitted_reports),?1))", [before.report_floor], |r| r.get(0))?;
         let inf: i64 = tx.query_row("SELECT MAX(?1, COALESCE((SELECT MIN(p.intake_sequence)-1 FROM provider_intake_attempts p LEFT JOIN local_watcher_provider_intakes l ON l.intake_id=p.intake_id WHERE p.intake_sequence>?1 AND p.history_expired=0 AND (l.run_id IS NULL OR l.run_id NOT IN (SELECT run_id FROM expiry_runs))),(SELECT MAX(intake_sequence) FROM provider_intake_attempts),?1))", [before.intake_floor], |r| r.get(0))?;
         let sf: i64 = tx.query_row("SELECT MAX(?1, COALESCE((SELECT MIN(status_sequence)-1 FROM status_events WHERE status_sequence>?1 AND run_id IS NOT NULL AND run_id NOT IN (SELECT run_id FROM expiry_runs)),(SELECT MAX(status_sequence) FROM status_events WHERE run_id IS NOT NULL),?1))", [before.status_floor], |r| r.get(0))?;
-        tx.execute("DELETE FROM expiry_runs WHERE run_id IN(SELECT trigger_run_id FROM evaluation_runs WHERE evaluation_sequence>?1 UNION SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE a.report_sequence>?2 UNION SELECT l.run_id FROM local_watcher_provider_intakes l JOIN provider_intake_attempts p ON p.intake_id=l.intake_id WHERE p.intake_sequence>?3 UNION SELECT run_id FROM status_events WHERE status_sequence>?4)", params![ef, rf, inf, sf])?;
+        prune_expiry_runs(tx, (ef, rf, inf, sf), indexed)?;
         let after: i64 = tx.query_row("SELECT COUNT(*) FROM expiry_runs", [], |r| r.get(0))?;
         if after == run_count {
             break (ef, rf, inf, sf);
@@ -805,6 +807,27 @@ fn plan_expiry(
         affected_evaluations,
         candidates_remaining,
     })
+}
+
+const INDEXED_EXPIRY_PRUNE_SQL: &str = "DELETE FROM expiry_runs AS x WHERE
+            EXISTS(SELECT 1 FROM evaluation_runs e INDEXED BY expiry_evaluation_runs_trigger_lookup WHERE e.trigger_run_id=x.run_id AND e.evaluation_sequence>?1)
+            OR EXISTS(SELECT 1 FROM raw_submissions r CROSS JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE r.run_id=x.run_id AND a.report_sequence>?2)
+            OR EXISTS(SELECT 1 FROM local_watcher_provider_intakes l CROSS JOIN provider_intake_attempts p ON p.intake_id=l.intake_id WHERE l.run_id=x.run_id AND p.intake_sequence>?3)
+            OR EXISTS(SELECT 1 FROM status_events s WHERE s.run_id=x.run_id AND s.status_sequence>?4)";
+
+fn prune_expiry_runs(
+    tx: &Connection,
+    (ef, rf, inf, sf): (i64, i64, i64, i64),
+    indexed: bool,
+) -> Result<usize, StoreError> {
+    if indexed {
+        // Probe each candidate's indexed links. Enumerating all retained
+        // rows above the floors repeats a whole-history scan per batch.
+        return Ok(tx.execute(INDEXED_EXPIRY_PRUNE_SQL, params![ef,rf,inf,sf])?);
+    }
+    // Allocation/contention fallback deliberately uses the original scan;
+    // correlated evaluation probes without the lookup would scan per run.
+    Ok(tx.execute("DELETE FROM expiry_runs WHERE run_id IN(SELECT trigger_run_id FROM evaluation_runs WHERE evaluation_sequence>?1 UNION SELECT r.run_id FROM raw_submissions r JOIN admitted_reports a ON a.submission_id=r.submission_id WHERE a.report_sequence>?2 UNION SELECT l.run_id FROM local_watcher_provider_intakes l JOIN provider_intake_attempts p ON p.intake_id=l.intake_id WHERE p.intake_sequence>?3 UNION SELECT run_id FROM status_events WHERE status_sequence>?4)", params![ef, rf, inf, sf])?)
 }
 
 /// Operator-facing retention state (`nq doctor`): the expired-through
@@ -1488,8 +1511,22 @@ impl Store {
         }
         let before = boundary(&tx)?;
         drop(locked_timing);
+        // The lookup also bounds planning's candidate-link probes. Build it
+        // only after the original proof and scoped/full history validation.
+        // A failed allocation unwinds the whole transaction before the
+        // existing scalar retry; no candidate has been accepted at this point.
+        let indexed = use_lookup;
+        if indexed {
+            attempt.lookup_started = true;
+            #[cfg(test)]
+            expiry_test_hook(&tx, "before_lookup_creation")?;
+            let _lookup_timing = PhaseTiming::start("expiry.lookup_creation");
+            tx.execute_batch("CREATE INDEX expiry_evaluation_runs_trigger_lookup ON evaluation_runs(trigger_run_id)")?;
+            #[cfg(test)]
+            crash_phase_for_test("after_lookup_creation", 74);
+        }
         let plan_timing = PhaseTiming::start("expiry.planning");
-        let plan = plan_expiry(&tx, cutoff, &before, max_candidate_runs)?;
+        let plan = plan_expiry(&tx, cutoff, &before, max_candidate_runs, indexed)?;
         plan_timing.value("generation_before", before.generation);
         plan_timing.value("report_floor_before", before.report_floor);
         plan_timing.value("report_floor_after", plan.report_floor);
@@ -1571,17 +1608,8 @@ impl Store {
         // the end of the transaction (and by the explicit foreign-key check
         // below) instead of between the two statements.
         tx.execute_batch("PRAGMA defer_foreign_keys=ON")?;
-        // SQLite checks the child key for every parent deletion/repacking.
-        // Without this lookup each parent scans all retained evaluations.
-        // The index exists only in this transaction; the persisted schema
-        // remains unchanged and foreign-key enforcement stays enabled.
-        let indexed = use_lookup && plan.affected_runs >= 2;
-        if indexed {
-            attempt.lookup_started = true;
-            tx.execute_batch("CREATE INDEX expiry_evaluation_runs_trigger_lookup ON evaluation_runs(trigger_run_id)")?;
-            #[cfg(test)]
-            crash_phase_for_test("after_lookup_creation", 74);
-        }
+        // Keep the same lookup through parent deletion/repacking, then drop
+        // it before final validation/commit. Foreign keys remain enabled.
         let mut deleted = 0usize;
         // Evaluations at or below the floor that are neither islands nor
         // compact decision records retire with their watermarks and refusals.
@@ -1976,6 +2004,111 @@ impl Mutation {
                 delta.added(table, &after);
                 Ok(changed)
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod planning_tests {
+    use super::*;
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    #[test]
+    fn indexed_and_scalar_expiry_plans_keep_the_same_closure() {
+        fn tables(c: &Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+            ["expiry_runs","expiry_protected","expiry_evaluations","expiry_compact_reports","expiry_dead_runs"]
+                .iter().map(|table| c.prepare(&format!("SELECT * FROM {table} ORDER BY 1")).unwrap()
+                    .query_map([], |row| (0..row.as_ref().column_count()).map(|col|row.get(col)).collect::<rusqlite::Result<Vec<_>>>())
+                    .unwrap().collect::<Result<Vec<_>,_>>().unwrap()).collect()
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("plan-equality.db");
+        crate::tests::certified_crash_fixture(&path);
+        let store = Store::open(&path).unwrap();
+        let c = &store.connection;
+        let before = boundary(c).unwrap();
+        c.execute_batch("BEGIN IMMEDIATE; CREATE INDEX expiry_evaluation_runs_trigger_lookup ON evaluation_runs(trigger_run_id)").unwrap();
+        c.execute_batch("CREATE TEMP TABLE expiry_runs(run_id TEXT PRIMARY KEY)").unwrap();
+        let plan: Vec<String> = c.prepare(&format!("EXPLAIN QUERY PLAN {INDEXED_EXPIRY_PRUNE_SQL}")).unwrap()
+            .query_map(params![0,0,0,0], |r|r.get(3)).unwrap().collect::<Result<_,_>>().unwrap();
+        for alias in ["e","r","a","l","p","s"] {
+            assert!(plan.iter().any(|step|step.contains(&format!("SEARCH {alias} "))),"candidate link {alias} must use its production indexed lookup: {plan:?}");
+        }
+        assert!(plan.iter().any(|step|step.contains("INDEX expiry_evaluation_runs_trigger_lookup")));
+        for cutoff in ["2026-07-17T00:00:00Z","2100-01-01T00:00:00Z"] {
+            for limit in [Some(0),Some(1),Some(2),Some(64),None] {
+                let scalar = plan_expiry(c,cutoff,&before,limit,false).unwrap();
+                let expected = tables(c);
+                let indexed = plan_expiry(c,cutoff,&before,limit,true).unwrap();
+                assert_eq!(indexed,scalar,"cutoff={cutoff} limit={limit:?}");
+                assert_eq!(tables(c),expected,"all candidate, protected, evaluation disposition, compact and dead-run rows");
+            }
+        }
+        c.execute_batch("ROLLBACK").unwrap();
+        store.validate().unwrap();
+    }
+
+    #[test]
+    fn expiry_pruning_work_depends_on_candidates_not_unrelated_tail() {
+        fn probe(tail: usize, indexed: bool, floors: (i64,i64,i64,i64)) -> (Vec<String>, usize) {
+            let c = Connection::open_in_memory().unwrap();
+            // Isolated query fixture with production link keys, not an
+            // admitted Store or a history-validation verdict.
+            c.execute_batch("CREATE TABLE expiry_runs(run_id TEXT PRIMARY KEY NOT NULL);
+                CREATE TABLE evaluation_runs(evaluation_sequence INTEGER PRIMARY KEY,trigger_run_id TEXT);
+                CREATE INDEX expiry_evaluation_runs_trigger_lookup ON evaluation_runs(trigger_run_id);
+                CREATE TABLE raw_submissions(submission_id TEXT PRIMARY KEY,run_id TEXT UNIQUE);
+                CREATE TABLE admitted_reports(report_sequence INTEGER PRIMARY KEY,submission_id TEXT UNIQUE);
+                CREATE TABLE local_watcher_provider_intakes(intake_id TEXT PRIMARY KEY,run_id TEXT UNIQUE);
+                CREATE TABLE provider_intake_attempts(intake_sequence INTEGER PRIMARY KEY,intake_id TEXT UNIQUE);
+                CREATE TABLE status_events(status_sequence INTEGER PRIMARY KEY,run_id TEXT);
+                CREATE UNIQUE INDEX status_events_run ON status_events(run_id) WHERE run_id IS NOT NULL;
+                INSERT INTO evaluation_runs VALUES(10,'below'),(11,'evaluation'),(12,NULL);
+                INSERT INTO raw_submissions VALUES('below','below'),('report','report');
+                INSERT INTO admitted_reports VALUES(10,'below'),(11,'report');
+                INSERT INTO local_watcher_provider_intakes VALUES('below','below'),('intake','intake');
+                INSERT INTO provider_intake_attempts VALUES(10,'below'),(11,'intake');
+                INSERT INTO status_events VALUES(10,'below'),(11,'status'),(12,NULL);").unwrap();
+            let candidates = ["evaluation", "report", "intake", "status", "below", "unlinked"];
+            for run in candidates {
+                c.execute("INSERT INTO expiry_runs VALUES(?1)", [run]).unwrap();
+            }
+            for n in 0..tail {
+                let id = format!("unrelated-{n}");
+                let seq = n as i64 + 20;
+                c.execute("INSERT INTO evaluation_runs VALUES(?1,?2)", params![seq,id]).unwrap();
+                c.execute("INSERT INTO raw_submissions VALUES(?1,?1)", [&id]).unwrap();
+                c.execute("INSERT INTO admitted_reports VALUES(?1,?2)", params![seq,id]).unwrap();
+                c.execute("INSERT INTO local_watcher_provider_intakes VALUES(?1,?1)", [&id]).unwrap();
+                c.execute("INSERT INTO provider_intake_attempts VALUES(?1,?2)", params![seq,id]).unwrap();
+                c.execute("INSERT INTO status_events VALUES(?1,?2)", params![seq,id]).unwrap();
+            }
+            let work = Arc::new(AtomicUsize::new(0));
+            let observed = work.clone();
+            c.progress_handler(100, Some(move || { observed.fetch_add(1, Ordering::Relaxed); false }));
+            prune_expiry_runs(&c, floors, indexed).unwrap();
+            c.progress_handler(100, None::<fn()->bool>);
+            let rows = c.prepare("SELECT run_id FROM expiry_runs ORDER BY run_id").unwrap()
+                .query_map([], |r|r.get(0)).unwrap().collect::<Result<Vec<String>,_>>().unwrap();
+            (rows,work.load(Ordering::Relaxed))
+        }
+        for floors in [(0,0,0,0),(10,10,10,10),(11,11,11,11),(100000,100000,100000,100000),
+            (0,11,11,11),(11,0,11,11),(11,11,0,11),(11,11,11,0)] {
+            let (small,small_work) = probe(32,true,floors);
+            let (large,large_work) = probe(4096,true,floors);
+            let (legacy,legacy_work) = probe(4096,false,floors);
+            assert_eq!(small,large); assert_eq!(large,legacy);
+            let (ef,rf,inf,sf) = floors;
+            let mut expected = vec!["unlinked".to_owned()];
+            for (run,floor) in [("evaluation",ef),("report",rf),("intake",inf),("status",sf)] {
+                if floor>=11 { expected.push(run.to_owned()); }
+            }
+            if [ef,rf,inf,sf].iter().all(|floor|*floor>=10) { expected.push("below".to_owned()); }
+            expected.sort();
+            assert_eq!(large,expected,"each plane uses its own strict floor; nulls do not name a candidate");
+            println!("prune floors={floors:?} small={small_work} large={large_work} scalar={legacy_work}");
+            assert!(large_work<=small_work*2+4,"candidate pruning enumerates unrelated retained history");
+            if floors==(10,10,10,10) { assert!(legacy_work>large_work*10+10,"scalar negative control must enumerate the tail"); }
         }
     }
 }

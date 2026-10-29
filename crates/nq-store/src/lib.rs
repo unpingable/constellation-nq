@@ -15594,7 +15594,7 @@ mod tests {
     }
 
     /// A crash fixture whose writer handle recorded a validation watermark.
-    fn certified_crash_fixture(path: &Path) -> RetentionBoundary {
+    pub(super) fn certified_crash_fixture(path: &Path) -> RetentionBoundary {
         let mut store = Store::initialize_with_capacity(path, 604800,
             Some(16 * 1024 * 1024), Some(1024 * 1024), Some(1024 * 1024)).expect("small admitted file store");
         store
@@ -15904,6 +15904,25 @@ mod tests {
     }
 
     #[test]
+    fn expiry_lookup_noop_rolls_back_the_early_index() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("lookup-noop.db");
+        let before = certified_crash_fixture(&path);
+        let mut store = Store::open(&path).unwrap();
+        let fingerprint = schema_fingerprint(&store.connection).unwrap();
+        let result = store.expire_ordinary_before_promoting(
+            "2100-01-01T00:00:00Z", "fixture-engine-rules", Some(0),
+            |_,_,_| Ok::<_,StoreError>(SemanticCertification::NotEstablished),
+            Some(|_: &Store,_: &ExpiryCandidates| -> Result<(),StoreError> { panic!("no-op plan has no candidate callback") }),
+        ).unwrap();
+        assert_eq!(result.deleted_rows,0);
+        assert_eq!(result.boundary,before);
+        assert!(store.connection.is_autocommit());
+        assert_eq!(schema_fingerprint(&store.connection).unwrap(),fingerprint);
+        store.validate().unwrap();
+    }
+
+    #[test]
     fn expiry_lookup_capacity_failure_retries_scalar_with_identical_proof() {
         use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
         use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
@@ -15920,16 +15939,21 @@ mod tests {
             }
             Authorization::Allow
         }));
+        retention::EXPIRY_TEST_HOOK.with(|slot| *slot.borrow_mut() = Some(("before_lookup_creation", Box::new(|connection| {
+            let pages: i64 = connection.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+            let free: i64 = connection.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+            assert_eq!(free, 0, "fixture leaves no free index pages");
+            connection.pragma_update(None, "max_page_count", pages)?;
+            Ok(())
+        }))));
         let mut validations = 0;
         let result = store.expire_ordinary_before_promoting(
             "2100-01-01T00:00:00Z", "fixture-engine-rules", Some(64),
             |_, _, _| Ok::<_, StoreError>(SemanticCertification::NotEstablished),
             Some(|snapshot: &Store, _: &ExpiryCandidates| {
                 validations += 1;
-                let pages: i64 = snapshot.connection.query_row("PRAGMA page_count", [], |r| r.get(0))?;
-                let free: i64 = snapshot.connection.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
-                assert_eq!(free, 0, "fixture leaves no free index pages");
-                snapshot.connection.pragma_update(None, "max_page_count", pages)?;
+                let lookup: i64 = snapshot.connection.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE name='expiry_evaluation_runs_trigger_lookup'", [], |r|r.get(0))?;
+                assert_eq!(lookup, 0, "allocation failed before candidate validation; only the scalar retry calls it");
                 Ok::<_, StoreError>(())
             }),
         ).expect("scalar retry after real index allocation exhaustion");
@@ -16026,40 +16050,49 @@ mod tests {
 
     #[test]
     fn expiry_lookup_retry_refuses_concurrent_commit() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("lookup-concurrent.db");
-        let old = certified_crash_fixture(&path);
-        let mut store = Store::open(&path).unwrap();
-        let fingerprint = schema_fingerprint(&store.connection).unwrap();
-        let foreign_path = path.clone();
-        retention::EXPIRY_TEST_HOOK.with(|slot| *slot.borrow_mut() = Some(("before_scalar_retry", Box::new(move |connection| {
-            assert!(connection.is_autocommit());
-            let mut other = Store::open(&foreign_path)?;
-            other.record_status(&StatusEventInput {
-                status_event_id: "between-expiry-attempts".into(), component_kind: "daemon".into(),
-                component_id: "fixture".into(), state: "healthy".into(), code: "observed".into(),
-                detail: document(json!({})), observed_at: TIME.into(),
-            })?;
-            Ok(())
-        }))));
-        let mut validations = 0;
-        let result = store.expire_ordinary_before_promoting(
-            "2100-01-01T00:00:00Z", "fixture-engine-rules", Some(64),
-            |_, _, _| Ok::<_, StoreError>(SemanticCertification::NotEstablished),
-            Some(|snapshot: &Store, _: &ExpiryCandidates| {
-                validations += 1;
-                let pages: i64 = snapshot.connection.query_row("PRAGMA page_count", [], |r| r.get(0))?;
-                snapshot.connection.pragma_update(None, "max_page_count", pages)?;
-                Ok::<_, StoreError>(())
-            }),
-        );
-        assert!(matches!(result, Err(StoreError::Refused(Refusal::HistoryChanged("after")))));
-        assert_eq!(validations, 1);
-        assert_eq!(store.retention_boundary().unwrap(), old);
-        let foreign: i64 = store.connection.query_row("SELECT COUNT(*) FROM status_events WHERE status_event_id='between-expiry-attempts'", [], |r| r.get(0)).unwrap();
-        assert_eq!(foreign, 1);
-        assert_eq!(schema_fingerprint(&store.connection).unwrap(), fingerprint);
-        store.validate().unwrap();
+        for early in [true,false] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("lookup-concurrent.db");
+            let old = certified_crash_fixture(&path);
+            let mut store = Store::open(&path).unwrap();
+            let fingerprint = schema_fingerprint(&store.connection).unwrap();
+            let foreign_path = path.clone();
+            let phase = if early { "before_lookup_creation" } else { "after_mutation" };
+            retention::EXPIRY_TEST_HOOK.with(|slot| *slot.borrow_mut() = Some((phase, Box::new(move |connection| {
+                retention::EXPIRY_TEST_HOOK.with(|slot| *slot.borrow_mut() = Some(("before_scalar_retry", Box::new(move |connection| {
+                    assert!(connection.is_autocommit());
+                    let mut other = Store::open(&foreign_path)?;
+                    other.record_status(&StatusEventInput {
+                        status_event_id: "between-expiry-attempts".into(), component_kind: "daemon".into(),
+                        component_id: "fixture".into(), state: "healthy".into(), code: "observed".into(),
+                        detail: document(json!({})), observed_at: TIME.into(),
+                    })?;
+                    Ok(())
+                }))));
+                if early {
+                    let pages: i64 = connection.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+                    connection.pragma_update(None, "max_page_count", pages)?;
+                    Ok(())
+                } else {
+                    Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),None)))
+                }
+            }))));
+            let mut validations = 0;
+            let result = store.expire_ordinary_before_promoting(
+                "2100-01-01T00:00:00Z", "fixture-engine-rules", Some(64),
+                |_, _, _| Ok::<_, StoreError>(SemanticCertification::NotEstablished),
+                Some(|_: &Store, _: &ExpiryCandidates| { validations += 1; Ok::<_, StoreError>(()) }),
+            );
+            assert!(matches!(result, Err(StoreError::Refused(Refusal::HistoryChanged("after")))));
+            assert_eq!(validations, if early {0} else {1}, "pending and already successful candidate validation both require the original proof");
+            assert_eq!(store.retention_boundary().unwrap(), old);
+            let foreign: i64 = store.connection.query_row("SELECT COUNT(*) FROM status_events WHERE status_event_id='between-expiry-attempts'", [], |r| r.get(0)).unwrap();
+            assert_eq!(foreign, 1);
+            assert!(retention::EXPIRY_TEST_HOOK.with(|slot| slot.borrow().is_none()));
+            assert!(store.connection.is_autocommit());
+            assert_eq!(schema_fingerprint(&store.connection).unwrap(), fingerprint);
+            store.validate().unwrap();
+        }
     }
 
     /// An expiry by a handle that verified the watermark at open carries it

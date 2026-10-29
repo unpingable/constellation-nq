@@ -923,11 +923,14 @@ validation costs a full validation.
 
 ### Retention lookup allocation
 
-Proof-bearing expiry batches with at least two affected watcher runs build a
-transaction-scoped lookup for evaluation trigger references. It avoids scanning
-all retained evaluations for each parent run deletion or repacking. The lookup
-is dropped before final validation and commit, so the committed schema remains
-unchanged. Foreign-key enforcement and the final foreign-key check still apply.
+Proof-bearing expiry batches build a transaction-scoped lookup for evaluation
+trigger references after validating the original history proof and before
+planning. Planning probes each candidate's linked evaluation, report, intake
+and status rows instead of enumerating the entire retained tail. The same lookup
+avoids scanning retained evaluations for each parent run deletion or repacking.
+The lookup is dropped before final validation and commit; a no-op plan rolls it
+back. The committed schema remains unchanged. Foreign-key enforcement and the
+full final foreign-key check still apply.
 
 The lookup needs temporary main-database pages and can leave reusable free pages
 in the committed file. If an indexed attempt fails with a capacity or contention
@@ -937,8 +940,10 @@ same snapshot frontier, retention boundary and data version. Successfully
 validated typed candidates are reused only when the exact candidate set matches;
 changed history refuses. A failed candidate validation is never reused. Commit
 and post-commit errors receive no scalar retry. This is an allocation fallback,
-not a guarantee that every capacity failure can be recovered. The two-run cutoff
-is an optimization heuristic, not a measured break-even promise.
+not a guarantee that every capacity failure can be recovered. The scalar retry
+uses the original global planning scan when the lookup could not be allocated.
+An allocation failure before candidate validation leaves that validation pending
+for the scalar attempt; it never treats unvalidated candidates as certified.
 
 Current compact-evidence lookup starts with current finding events and their
 current evidence references, then looks up the matching report identities.
