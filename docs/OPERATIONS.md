@@ -758,7 +758,27 @@ watermark covers it:
 - collection re-verifies the digest of every admitted report it evaluates,
   so an edited covered report is refused rather than evaluated.
 
+### Full validation during collection
+
 `admin validate --full` remains the one explicit whole-store operation.
+It validates SQLite, store history, semantic replay, provider intake, diagnostic
+artifacts, and content accumulators in one query-only WAL read snapshot. Its
+retention report describes that same snapshot. The operation guard is released
+while those checks run, so ordinary admitted writers can proceed. Bootstrap and
+certificate publication still use short serialized sections. A non-WAL database
+retains full serialized validation before WAL conversion; hot-journal recovery,
+capacity and identity refusal remain unchanged.
+
+A certificate is published only if the database file, connection change counters,
+store identity and retention boundary still match the validated snapshot after
+successor recovery. A concurrent commit or a recovered completion leaves the
+existing sidecar unchanged and returns a null `commitment_digest`; the full
+snapshot's checks still succeeded. Run again on a stable store when a new
+certificate is required. A replaced database path or foreign sidecar refuses.
+A long read snapshot can retain WAL pages and cause the existing writer capacity
+or checkpoint admission to refuse; this is not an unconditional writer progress
+guarantee. Ordinary cold opens without an applicable watermark keep their
+existing serialized validation behavior.
 
 ### Status and findings exports
 

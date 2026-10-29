@@ -26,6 +26,8 @@ use thiserror::Error;
 pub mod capacity;
 #[doc(hidden)]
 pub mod operation_timing;
+mod full_validation;
+pub use full_validation::FullValidation;
 mod history_scope;
 mod retention;
 pub use retention::{
@@ -2118,6 +2120,15 @@ impl Store {
     }
 
     fn open_writable(path: &Path, require_full: bool) -> Result<Self, StoreError> {
+        Self::prepare_writable(path, Some(require_full)).map(|(store, _)| store)
+    }
+
+    // None is private to the owned full-snapshot operation: no unvalidated
+    // handle escapes. Existing open paths retain their validation order.
+    fn prepare_writable(
+        path: &Path,
+        require_full: Option<bool>,
+    ) -> Result<(Self, (u64, u64)), StoreError> {
         if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
             return Err(StoreError::NotInitialized(path.to_path_buf()));
         }
@@ -2178,10 +2189,22 @@ impl Store {
             validation: ValidationState::default(),
             capacity: Some(envelope),
         };
-        store.validate_on_open(require_full)?;
-        store.validation.may_record = true;
+        if let Some(full) = require_full {
+            store.validate_on_open(full)?;
+            store.validation.may_record = true;
+        } else {
+            let journal: String = store.connection.query_row(
+                "PRAGMA journal_mode", [], |row| row.get(0),
+            )?;
+            // A non-WAL store retains the original full refusal checks before
+            // converting its journal. The concurrent read path is for WAL.
+            if !journal.eq_ignore_ascii_case("wal") {
+                store.validate_on_open(true)?;
+            }
+        }
         configure_connection(&store.connection, true)?;
-        Ok(store)
+        let metadata = std::fs::metadata(path)?;
+        Ok((store, (metadata.dev(), metadata.ino())))
     }
 
     /// Open an exactly compatible store for verification without permitting
@@ -2372,12 +2395,24 @@ impl Store {
     /// frontier after proving the covered prefix still ends where it was
     /// certified. A watermark written for another store refuses the open.
     fn validate_on_open(&mut self, require_full: bool) -> Result<(), StoreError> {
+        let path = self.path.as_deref().ok_or_else(|| {
+            StoreError::Invariant("an opened store has a backing path".into())
+        })?;
+        self.validation = self.inspect_open_validation(
+            require_full, history_scope::read_sidecar(path),
+        )?;
+        Ok(())
+    }
+
+    fn inspect_open_validation(
+        &self,
+        require_full: bool,
+        sidecar: history_scope::SidecarState,
+    ) -> Result<ValidationState, StoreError> {
         history_scope::install_sql_work_counter(&self.connection);
-        let path = self
-            .path
-            .clone()
-            .ok_or_else(|| StoreError::Invariant("an opened store has a backing path".into()))?;
-        let sidecar = history_scope::read_sidecar(&path);
+        let path = self.path.as_deref().ok_or_else(|| {
+            StoreError::Invariant("an opened store has a backing path".into())
+        })?;
         // Version, application, and schema refusal precede reading any
         // history table.
         self.validate_identity()?;
@@ -2390,7 +2425,7 @@ impl Store {
                 Err(FullValidationReason::UnreadableWatermark)
             }
             history_scope::SidecarState::Present(watermark) => {
-                history_scope::refuse_foreign(&path, &watermark, identity.as_ref())?;
+                history_scope::refuse_foreign(path, &watermark, identity.as_ref())?;
                 if identity
                     .as_ref()
                     .is_some_and(|identity| history_scope::applies(&watermark, identity))
@@ -2436,7 +2471,7 @@ impl Store {
             OpenValidation::SinceWatermark(watermark) => Some(watermark.clone()),
             OpenValidation::Full(_) => None,
         };
-        self.validation = ValidationState {
+        Ok(ValidationState {
             opened,
             open_frontier: Some(frontier.clone()),
             store_validated: Some(frontier),
@@ -2450,8 +2485,7 @@ impl Store {
             observed_retention: None,
             certified: std::cell::RefCell::new(certified),
             run_evaluations: std::cell::RefCell::new(None),
-        };
-        Ok(())
+        })
     }
 
     /// Re-anchor this handle's frontiers after another handle's expiry
@@ -15621,6 +15655,250 @@ mod tests {
 
     fn sidecar(path: &Path) -> ValidationWatermark {
         serde_json::from_slice(&std::fs::read(history_scope::watermark_path(path)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn full_snapshot_validation_certifies_a_stable_store() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("full-snapshot-stable.db");
+        certified_crash_fixture(&path);
+        let prior = sidecar(&path);
+        let result = Store::validate_full_snapshot(
+            &path,
+            "fixture-engine-rules",
+            |store| {
+                assert_eq!(store.prior_certification(), "compared");
+                Ok::<_, StoreError>(((), SemanticCertification::NotEstablished))
+            },
+            |_| Ok(true),
+        ).unwrap();
+        let written = result.watermark.expect("an unchanged sole-genesis store records");
+        assert_eq!(written.frontier, prior.frontier);
+        assert_eq!(sidecar(&path).commitment_digest, written.commitment_digest);
+        assert_eq!(result.prior_certification, "compared");
+    }
+
+    #[test]
+    fn full_snapshot_validation_allows_a_writer_and_does_not_publish_a_stale_proof() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("full-snapshot-writer.db");
+        certified_crash_fixture(&path);
+        let prior_bytes = std::fs::read(watermark_path(&path)).unwrap();
+        let result = Store::validate_full_snapshot(
+            &path,
+            "fixture-engine-rules",
+            |store| {
+                let before: i64 = store.connection.query_row(
+                    "SELECT COUNT(*) FROM status_events", [], |row| row.get(0))?;
+                let writer_path = path.clone();
+                std::thread::spawn(move || {
+                    let mut writer = Store::open(&writer_path)?;
+                    writer.record_status(&StatusEventInput {
+                        status_event_id: "during-full-validation".into(),
+                        component_kind: "daemon".into(), component_id: "fixture".into(),
+                        state: "healthy".into(), code: "observed".into(),
+                        detail: document(json!({})), observed_at: TIME.into(),
+                    })?;
+                    let error = writer.checkpoint_wal()
+                        .expect_err("the pinned snapshot retains the existing WAL checkpoint bound");
+                    assert!(error.is_refusal(), "{error}");
+                    Ok::<_, StoreError>(())
+                }).join().unwrap().expect("a normal writer completes while validation is paused");
+                let after: i64 = store.connection.query_row(
+                    "SELECT COUNT(*) FROM status_events", [], |row| row.get(0))?;
+                assert_eq!(before, after, "all reads stay on the original snapshot");
+                Ok::<_, StoreError>((before, SemanticCertification::NotEstablished))
+            },
+            |_| Ok(true),
+        ).unwrap();
+        assert!(result.watermark.is_none(), "a concurrent commit invalidates publication");
+        assert_eq!(std::fs::read(watermark_path(&path)).unwrap(), prior_bytes);
+        let current = Store::open(&path).unwrap();
+        let now: i64 = current.connection.query_row(
+            "SELECT COUNT(*) FROM status_events", [], |row| row.get(0)).unwrap();
+        assert_eq!(now, result.value + 1);
+    }
+
+    #[test]
+    fn full_snapshot_validation_does_not_certify_recovery_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("full-snapshot-recovery.db");
+        certified_crash_fixture(&path);
+        let prior = std::fs::read(watermark_path(&path)).unwrap();
+        let result = Store::validate_full_snapshot(
+            &path, "fixture-engine-rules",
+            |_| Ok::<_, StoreError>(((), SemanticCertification::NotEstablished)),
+            |store| {
+                store.connection.execute(
+                    "INSERT INTO status_events (status_event_id, component_kind,
+                     component_id, state, code, detail_json, observed_at)
+                     VALUES ('recovered', 'daemon', 'fixture', 'healthy', 'observed', X'7B7D', ?1)",
+                    [TIME],
+                )?;
+                store.connection.execute(
+                    "INSERT INTO status_current (component_kind, component_id, latest_status_event_id)
+                     VALUES ('daemon', 'fixture', 'recovered')
+                     ON CONFLICT(component_kind, component_id)
+                     DO UPDATE SET latest_status_event_id=excluded.latest_status_event_id", [],
+                )?;
+                Ok(true)
+            },
+        ).unwrap();
+        assert!(result.watermark.is_none());
+        assert_eq!(std::fs::read(watermark_path(&path)).unwrap(), prior);
+        let result = Store::validate_full_snapshot(
+            &path, "fixture-engine-rules",
+            |_| Ok::<_, StoreError>(((), SemanticCertification::NotEstablished)),
+            |_| Ok(true),
+        ).unwrap();
+        assert!(result.watermark.is_some(), "the next stable pass includes recovery");
+    }
+
+    #[test]
+    fn full_snapshot_validation_is_query_only_and_releases_on_error() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("full-snapshot-error.db");
+        certified_crash_fixture(&path);
+        let result = Store::validate_full_snapshot(
+            &path, "fixture-engine-rules",
+            |store| {
+                let error = store.connection.execute("DELETE FROM status_events", [])
+                    .expect_err("validation cannot write");
+                assert!(error.to_string().contains("readonly"), "{error}");
+                Err::<((), SemanticCertification), _>(StoreError::Invariant("fixture read failure".into()))
+            },
+            |_| panic!("recovery does not run after failed validation"),
+        );
+        assert!(result.err().unwrap().to_string().contains("fixture read failure"));
+        let mut writer = Store::open(&path).unwrap();
+        writer.record_status(&StatusEventInput {
+            status_event_id: "after-error".into(), component_kind: "daemon".into(),
+            component_id: "fixture".into(), state: "healthy".into(), code: "observed".into(),
+            detail: document(json!({})), observed_at: TIME.into(),
+        }).expect("reader and guard released after error");
+    }
+
+    #[test]
+    fn full_snapshot_validation_keeps_retention_and_certification_in_one_view() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("full-snapshot-expiry.db");
+        let original = certified_crash_fixture(&path);
+        let carried = std::cell::RefCell::new(Vec::new());
+        let result = Store::validate_full_snapshot(
+            &path, "fixture-engine-rules",
+            |store| {
+                let mut writer = Store::open(&path)?;
+                let expired = writer.expire_ordinary_before("2100-01-01T00:00:00Z")?;
+                assert!(expired.deleted_rows > 0);
+                assert!(expired.boundary.generation > original.generation);
+                *carried.borrow_mut() = std::fs::read(watermark_path(&path))?;
+                assert_eq!(store.retention_boundary()?.generation, original.generation);
+                Ok::<_, StoreError>(((), SemanticCertification::NotEstablished))
+            },
+            |_| Ok(true),
+        ).unwrap();
+        assert_eq!(result.retention.generation, original.generation);
+        assert!(result.watermark.is_none());
+        assert_eq!(std::fs::read(watermark_path(&path)).unwrap(), *carried.borrow());
+    }
+
+    #[test]
+    fn full_snapshot_validation_refuses_foreign_sidecar_at_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("full-snapshot-foreign.db");
+        certified_crash_fixture(&path);
+        let mut foreign = sidecar(&path);
+        foreign.genesis_id = "different-genesis".into();
+        foreign.commitment_digest = foreign.computed_commitment();
+        let bytes = serde_json::to_vec(&foreign).unwrap();
+        let result = Store::validate_full_snapshot(
+            &path, "fixture-engine-rules",
+            |_| Ok::<_, StoreError>(((), SemanticCertification::NotEstablished)),
+            |_| { std::fs::write(watermark_path(&path), &bytes)?; Ok(true) },
+        );
+        let error = result.err().unwrap();
+        assert!(error.to_string().contains("does not belong to this database"), "{error}");
+        assert_eq!(std::fs::read(watermark_path(&path)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn full_snapshot_validation_refuses_path_replacement_before_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("full-snapshot-before-recovery.db");
+        certified_crash_fixture(&path);
+        let recovery_called = std::cell::Cell::new(false);
+        let result = Store::validate_full_snapshot(
+            &path, "fixture-engine-rules",
+            |_| {
+                let moved = path.with_extension("original");
+                std::fs::rename(&path, &moved)?;
+                std::fs::copy(&moved, &path)?;
+                Ok::<_, StoreError>(((), SemanticCertification::NotEstablished))
+            },
+            |_| { recovery_called.set(true); Ok(true) },
+        );
+        assert!(result.err().unwrap().to_string().contains("database path changed"));
+        assert!(!recovery_called.get(), "replacement refuses before writable recovery");
+    }
+
+    #[test]
+    fn full_snapshot_validation_refuses_replaced_database_at_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("full-snapshot-replaced.db");
+        certified_crash_fixture(&path);
+        let prior = std::fs::read(watermark_path(&path)).unwrap();
+        let result = Store::validate_full_snapshot(
+            &path, "fixture-engine-rules",
+            |_| Ok::<_, StoreError>(((), SemanticCertification::NotEstablished)),
+            |_| {
+                let moved = path.with_extension("original");
+                std::fs::rename(&path, &moved)?;
+                std::fs::copy(&moved, &path)?;
+                Ok(true)
+            },
+        );
+        assert!(result.err().unwrap().to_string().contains("database path changed"));
+        assert_eq!(std::fs::read(watermark_path(&path)).unwrap(), prior);
+    }
+
+    #[test]
+    fn full_snapshot_validation_recomputes_prior_chains() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("full-snapshot-prior.db");
+        certified_crash_fixture(&path);
+        let mut forged = sidecar(&path);
+        forged.frontier.tables.get_mut("watcher_runs").unwrap().accumulator = "0".repeat(64);
+        forged.commitment_digest = forged.computed_commitment();
+        let bytes = serde_json::to_vec(&forged).unwrap();
+        std::fs::write(watermark_path(&path), &bytes).unwrap();
+        let result = Store::validate_full_snapshot(
+            &path, "fixture-engine-rules",
+            |_| Ok::<_, StoreError>(((), SemanticCertification::NotEstablished)),
+            |_| panic!("recovery does not run after chain refusal"),
+        );
+        let error = result.err().expect("full chains must compare with prior");
+        assert!(error.to_string().contains("changed at or below the frontier"), "{error}");
+        assert_eq!(std::fs::read(watermark_path(&path)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn full_snapshot_validation_preserves_non_wal_refusal_order() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("full-snapshot-non-wal.db");
+        certified_crash_fixture(&path);
+        let connection = Connection::open(&path).unwrap();
+        connection.pragma_update(None, "journal_mode", "DELETE").unwrap();
+        connection.pragma_update(None, "application_id", 0).unwrap();
+        drop(connection);
+        let result = Store::validate_full_snapshot(
+            &path, "fixture-engine-rules",
+            |_| Ok::<_, StoreError>(((), SemanticCertification::NotEstablished)),
+            |_| Ok(true),
+        );
+        assert!(matches!(result, Err(StoreError::ApplicationIdMismatch { .. })));
+        let connection = Connection::open(&path).unwrap();
+        let journal: String = connection.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        assert_eq!(journal, "delete", "a refused store is not converted");
     }
 
     #[test]

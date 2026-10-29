@@ -859,6 +859,7 @@ pub fn watermark_path(database: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct StoreIdentity {
     pub genesis_id: String,
     pub schema_version: i64,

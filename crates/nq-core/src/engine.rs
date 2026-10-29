@@ -8986,6 +8986,38 @@ pub fn validate_fully_and_record(
     Ok((verification, watermark))
 }
 
+/// Validate the complete history in one read snapshot, allowing governed WAL
+/// writers to proceed during the scan. Record only if the same database and
+/// retention generation remain unchanged after successor recovery.
+///
+/// # Errors
+///
+/// As [`validate_fully_and_record`], or if the database path is replaced.
+pub fn validate_full_snapshot_and_record(
+    path: &std::path::Path,
+) -> Result<nq_store::FullValidation<DiagnosticArtifactHistoryVerification>, EngineError> {
+    Store::validate_full_snapshot(
+        path,
+        engine_validation_rules(),
+        |store| {
+            let state = validate_semantic_planes_in_full(store)?;
+            validate_provider_intake_history(store)?;
+            let verification = validate_diagnostic_artifact_history(store)?;
+            Ok((verification, nq_store::SemanticCertification::Established(state)))
+        },
+        |store| {
+            let recovered = recover_local_successor_completions(store)?;
+            if !recovered {
+                eprintln!(
+                    "nq: warning: full validation passed but is not recorded while a recovered \
+                     local successor completion is unrecorded; run it again"
+                );
+            }
+            Ok(recovered)
+        },
+    )
+}
+
 /// Every semantic plane other than provider intake and diagnostic artifacts,
 /// for rows beyond `frontier`; returns the finding-lineage replay state at
 /// the end of history.
@@ -14946,6 +14978,35 @@ sys.stdout.write("\n")
             auxiliary_bytes: Some(0),
         };
         config
+    }
+
+    #[test]
+    fn full_snapshot_validation_matches_full_semantics_and_refuses_substitution() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("full-snapshot-core.db");
+        let (mut store, _) = holes_fixture(&path, &[8.0, 1.0, 8.0], "full-snapshot");
+        store.append_genesis(&nq_store::GenesisInput {
+            genesis_id: "genesis-full-snapshot".into(), legacy_manifest_digest: None,
+            created_at: timestamp(Utc::now()),
+            detail: canonical(&json!({"source": "test"})).unwrap(),
+        }).unwrap();
+        drop(store);
+        let full = Store::open_validating_fully(&path).unwrap();
+        let (_, expected) = validate_fully_and_record(&full).unwrap();
+        let expected = expected.unwrap();
+        drop(full);
+        let actual = validate_full_snapshot_and_record(&path).unwrap();
+        let actual = actual.watermark.unwrap();
+        assert_eq!(actual.frontier, expected.frontier);
+        assert_eq!(actual.semantic, expected.semantic);
+        let mut substituted = actual;
+        substituted.semantic.as_mut().unwrap().evaluation_heads.clear();
+        substituted.commitment_digest = substituted.computed_commitment();
+        let config = holes_engine_config(&path);
+        write_watermark_file(&config, &substituted);
+        let error = validate_full_snapshot_and_record(&path).err().expect("full semantic comparison refuses");
+        assert!(error.to_string().contains("certified semantic state"), "{error}");
+        assert_eq!(read_watermark_file(&config), substituted);
     }
 
     /// NQ #27 D4: a generation transition committed by an engine carries its
@@ -21370,6 +21431,13 @@ sys.stdout.write("\n")
             successor_phases(&config, acquisition_id),
             ["provider_invocation_started"]
         );
+        let first = validate_full_snapshot_and_record(&config.database_path)
+            .expect("snapshot validates and recovers completion");
+        assert!(first.watermark.is_none(), "recovery writes invalidate the pre-recovery proof");
+        assert_eq!(successor_phases(&config, acquisition_id),
+            ["provider_invocation_started", "provider_intake_completed"]);
+        assert!(validate_full_snapshot_and_record(&config.database_path)
+            .expect("the next stable snapshot includes completion").watermark.is_some());
         full_validation_and_watermark(&config);
         let phases = successor_phases(&config, acquisition_id);
         assert_eq!(

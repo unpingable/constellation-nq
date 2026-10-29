@@ -337,6 +337,12 @@ compared` claim rests on it.
 `nq admin validate --full` always validates every row. It compares the
 previous certification only when it holds under the same retention boundary
 and otherwise reports `"prior_certification": "superseded_by_generation"`.
+The command's history checks and retention report use one read snapshot.
+An expiry or append that commits during that scan prevents publication of its
+certificate; the already validated snapshot remains the reported result and
+the newer sidecar is preserved. Full validation does not hold the operation
+guard throughout those scans. The [operations guide](OPERATIONS.md#full-validation-during-collection)
+describes publication and WAL capacity limits.
 
 Expiry is maintenance. A refused expiry (capacity, checkpoint contention, or
 history changed by a concurrent writer during validation) is logged with its

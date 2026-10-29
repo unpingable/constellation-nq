@@ -2786,11 +2786,10 @@ fn record_full_validation(
     nq_core::DiagnosticArtifactHistoryVerification,
     Option<nq_store::ValidationWatermark>,
     &'static str,
+    nq_store::RetentionReport,
 )> {
-    let store = Store::open_validating_fully(database_path)?;
-    let prior = store.prior_certification();
-    let (verification, watermark) = nq_core::engine::validate_fully_and_record(&store)?;
-    Ok((verification, watermark, prior))
+    let full = nq_core::engine::validate_full_snapshot_and_record(database_path)?;
+    Ok((full.value, full.watermark, full.prior_certification, full.retention))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2802,9 +2801,8 @@ fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -
             }
             let config = NqConfig::load(config_path)?;
             let started = std::time::Instant::now();
-            let (verification, watermark, prior_certification) =
+            let (verification, watermark, prior_certification, retention) =
                 record_full_validation(&config.database_path)?;
-            let retention = Store::open_read_only(&config.database_path)?.retention_report()?;
             print_value(
                 &json!({
                     "validated": "full",
