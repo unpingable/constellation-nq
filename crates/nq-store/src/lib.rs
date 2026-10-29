@@ -10157,6 +10157,20 @@ fn validate_local_diagnostic_artifact_provenance_history(
     Ok(())
 }
 
+// Start with current references so historical citations and unrelated reports
+// cannot drive this lookup. Inner-join predicates and result ordering stay exact.
+const EXPIRED_CITATIONS_SQL: &str = "SELECT DISTINCT report.report_sequence, report.report_id, report.instance_id,
+                        report.profile_id, report.profile_version, report.profile_digest,
+                        report.observed_at, report.received_at, report.report_status,
+                        report.canonical_json, report.semantic_digest
+                 FROM finding_current AS current
+                 CROSS JOIN finding_evidence AS evidence ON evidence.event_id = current.latest_event_id
+                 CROSS JOIN admitted_reports AS report
+                   ON report.report_id = evidence.report_id
+                  AND report.semantic_digest = evidence.report_semantic_digest
+                 WHERE report.instance_id = ?1 AND report.source_expired = 1
+                 ORDER BY report.report_sequence";
+
 fn evidence_snapshot_from_connection(
     connection: &Connection,
     instance_ids: &[String],
@@ -10217,17 +10231,7 @@ fn evidence_snapshot_from_connection(
         reports.extend(rows.collect::<Result<Vec<_>, _>>()?);
         if retention::holes_schema(connection)? {
             let mut statement = connection.prepare(
-                "SELECT DISTINCT report.report_sequence, report.report_id, report.instance_id,
-                        report.profile_id, report.profile_version, report.profile_digest,
-                        report.observed_at, report.received_at, report.report_status,
-                        report.canonical_json, report.semantic_digest
-                 FROM finding_current AS current
-                 JOIN finding_evidence AS evidence ON evidence.event_id = current.latest_event_id
-                 JOIN admitted_reports AS report
-                   ON report.report_id = evidence.report_id
-                  AND report.semantic_digest = evidence.report_semantic_digest
-                 WHERE report.instance_id = ?1 AND report.source_expired = 1
-                 ORDER BY report.report_sequence",
+                EXPIRED_CITATIONS_SQL,
             )?;
             let rows = statement.query_map([&instance_id], |row| {
                 Ok(AdmittedReportRow {
@@ -15826,6 +15830,51 @@ mod tests {
             .expect("the older handle still holds its own certification");
         assert!(own.frontier.evaluation_sequence < shared.frontier.evaluation_sequence);
         assert_eq!(sidecar(&path), shared, "the shared sidecar was not moved backwards");
+    }
+
+    #[test]
+    fn expired_citation_lookup_is_bounded_by_current_references() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        fn probe(sql: &str, reports: usize, history: usize, mode: u8) -> (Vec<Vec<rusqlite::types::Value>>, usize) {
+            let c = Connection::open_in_memory().unwrap();
+            // Isolated query fixture with the production lookup keys/indexes;
+            // not an admitted Store or a historical validation verdict.
+            c.execute_batch("CREATE TABLE admitted_reports(report_sequence INTEGER PRIMARY KEY,report_id TEXT UNIQUE,instance_id TEXT,profile_id TEXT,profile_version TEXT,profile_digest TEXT,observed_at TEXT,received_at TEXT,report_status TEXT,canonical_json BLOB,semantic_digest TEXT,source_expired INTEGER,UNIQUE(report_id,semantic_digest)); CREATE INDEX admitted_reports_by_instance ON admitted_reports(instance_id,report_sequence); CREATE INDEX admitted_reports_by_semantic_digest ON admitted_reports(semantic_digest); CREATE TABLE finding_current(finding_id TEXT PRIMARY KEY,latest_event_id TEXT UNIQUE); CREATE TABLE finding_evidence(event_id TEXT,ordinal INTEGER,report_id TEXT,report_semantic_digest TEXT,PRIMARY KEY(event_id,ordinal)); CREATE INDEX finding_evidence_by_report ON finding_evidence(report_id);").unwrap();
+            for n in (0..reports+5).rev() {
+                c.execute("INSERT INTO admitted_reports VALUES(?1,?2,?3,'profile','1','digest','observed','received','complete',X'7B7D','semantic',?4)",params![n as i64+1,format!("r{n}"),if n==2 {"other"} else {"wanted"},if n<4 {1} else {0}]).unwrap();
+            }
+            for n in 0..history {
+                // Repeated old events all cite the same compact identity.
+                c.execute("INSERT INTO finding_evidence VALUES(?1,0,'r0','semantic')",[format!("old-{n}")]).unwrap();
+            }
+            if mode!=2 { c.execute_batch("INSERT INTO finding_current VALUES('f','now');").unwrap(); }
+            if mode==0 {
+                c.execute_batch("INSERT INTO finding_evidence VALUES('now',0,'r1','semantic'),('now',1,'r0','semantic'),('now',2,'r0','semantic'),('now',3,'r2','semantic'),('now',4,'r3','wrong-digest'),('now',5,'r4','semantic');").unwrap();
+            } else {
+                // Current findings exist in mode1 but no current compact
+                // citation matches. Mode2 has no current findings at all.
+                c.execute_batch("INSERT INTO finding_evidence VALUES('now',0,'r2','semantic'),('now',1,'r4','semantic');").unwrap();
+            }
+            let work=Arc::new(AtomicUsize::new(0));let observed=work.clone();c.progress_handler(100,Some(move || {observed.fetch_add(1,Ordering::Relaxed);false}));
+            let rows=c.prepare(sql).unwrap().query_map(["wanted"],|r|(0..11).map(|col|r.get(col)).collect::<rusqlite::Result<Vec<rusqlite::types::Value>>>()).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+            (rows,work.load(Ordering::Relaxed))
+        }
+        let legacy=EXPIRED_CITATIONS_SQL.replace("CROSS JOIN", "JOIN");
+        for mode in 0..3 {
+            let (small,small_work)=probe(EXPIRED_CITATIONS_SQL,32,32,mode);
+            let (reports,reports_work)=probe(EXPIRED_CITATIONS_SQL,4096,32,mode);
+            let (citations,citations_work)=probe(EXPIRED_CITATIONS_SQL,32,4096,mode);
+            let (old_rows,old_work)=probe(&legacy,4096,4096,mode);
+            assert_eq!(reports,small);assert_eq!(citations,small);assert_eq!(old_rows,small,"complete rows preserve all legacy predicates");
+            if mode==0 {
+                assert_eq!(small.len(),2);
+                assert_eq!(small[0][1],rusqlite::types::Value::Text("r0".into()));
+                assert_eq!(small[1][1],rusqlite::types::Value::Text("r1".into()));
+                assert!(old_work>small_work*10+10,"negative control must exercise history fanout");
+            } else { assert!(small.is_empty()); }
+            println!("expired citation mode={mode} small={small_work} reports={reports_work} citations={citations_work} legacy={old_work}");
+            assert!(reports_work<=small_work*2+4 && citations_work<=small_work*2+4,"current-reference lookup rescans history");
+        }
     }
 
     #[test]

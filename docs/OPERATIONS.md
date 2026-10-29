@@ -915,6 +915,14 @@ and post-commit errors receive no scalar retry. This is an allocation fallback,
 not a guarantee that every capacity failure can be recovered. The two-run cutoff
 is an optimization heuristic, not a measured break-even promise.
 
+Current compact-evidence lookup starts with current finding events and their
+current evidence references, then looks up the matching report identities.
+Its access path avoids scanning retained reports or historical citations to
+find those references. The result keeps the same instance, digest and
+source-expired predicates, deduplication and sequence order. Compact identities
+remain retained decision references and never become detector evidence. This
+query optimization changes neither stored verdicts nor full validation.
+
 ### Retention promotion validation rules (engine-rules.2)
 
 A resident collector can outlive other writers. Retention now validates semantic
