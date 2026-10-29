@@ -1051,6 +1051,29 @@ continuation is not carried between processes. If an attempt ends with work
 pending, successor CLIs alone defer that work until another quantum or the
 capacity-refusal bypass, rather than continuing it on their next invocation.
 
+`nq admin expire-due` runs that same scheduled expiry on its own, so a caller
+can perform due maintenance before it begins a time-critical acquisition. When
+the store's last committed expiry is younger than the quantum, it reports
+`deferred` with scope `schedule_hint_only` from a read-only schedule read; it
+opens no engine and validates nothing. When due, it opens the engine and runs
+the unchanged expiry (scope `engine_validated_expiry`): candidate selection,
+typed validation, final boundary validation, the full foreign-key check and
+capacity refusals are unchanged, and integrity failures exit non-zero. The
+capacity bypass remains with collection. Output is one
+`nq.admin.expire_due.v1` document with `attempt` `deferred`, `completed` or
+`refused`. Only an expiry that commits records a cutoff and advances the
+retention generation (`generation_after` > `generation_before`); after it, a
+fresh `acquire-next-local` defers its own scheduled expiry for one quantum. A
+commit can delete zero rows when only retention floors move, so commitment is
+read from the generation, not `deleted_rows`. A completion with an unchanged
+generation, or a refusal, commits nothing: `scheduled_expiry_pending` stays
+`true` and the next acquisition would attempt again, including any validation
+that attempt performs. A partial attempt that commits a batch records the
+cutoff; the remaining candidates wait for the next quantum. The report format
+is pinned by `crates/nq-app/tests/fixtures/expire_due_report_v1.json`. The command does not change
+`acquire-next-local` and is not a latency bound: a due batch takes as long as
+it takes, and a caller that stops it loses only that uncommitted batch.
+
 Already-ready stdio collections get a finite turn between pending retention
 continuation attempts. Each request registers before waiting for the writer.
 After an ordinary maintenance opportunity, the daemon captures the other ready

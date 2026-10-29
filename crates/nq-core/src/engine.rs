@@ -1791,6 +1791,41 @@ fn committed_expiry_elapsed(
     now.signed_duration_since(committed).to_std().ok()
 }
 
+/// Time until the scheduled expiry of a fresh local successor acquisition is
+/// due, derived from the store's last committed expiry alone (the same hint
+/// that acquisition adopts); `None` when it is due now. A scheduling hint,
+/// not a validation of the store.
+#[must_use]
+pub fn scheduled_expiry_wait(
+    cutoff: Option<&str>,
+    horizon_seconds: u64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<std::time::Duration> {
+    let quantum = expiry_quantum(horizon_seconds);
+    let elapsed = committed_expiry_elapsed(cutoff, horizon_seconds, now)?;
+    (elapsed < quantum).then(|| quantum - elapsed)
+}
+
+/// What [`CollectionEngine::maintain_due_expiry`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DueExpiryMaintenance {
+    /// `Deferred`, `Completed`, or `Refused`; never deferred for ready
+    /// collections.
+    pub attempt: RetentionAttempt,
+    /// Retention generation before the attempt.
+    pub generation_before: i64,
+    /// Retention generation after the attempt; it moves only when an expiry
+    /// committed.
+    pub generation_after: i64,
+    /// Whether a fresh local successor acquisition opened now would still
+    /// find its scheduled expiry due, from the persisted cutoff alone. A
+    /// completion that committed nothing (unchanged generation) or a refusal
+    /// records no cutoff and leaves it due. A completion can commit, moving
+    /// the generation and cutoff, with zero deleted rows when only retention
+    /// floors move.
+    pub scheduled_expiry_pending: bool,
+}
+
 /// What the retention expiry attempted before a collection did. Expiry is
 /// maintenance: a refusal (capacity, contention, or a concurrent history
 /// change) is recorded here and the collection proceeds to admission, which
@@ -2493,6 +2528,123 @@ impl CollectionEngine {
         self.retention_attempt.as_ref()
     }
 
+    /// Run the scheduled ordinary-history expiry exactly as a fresh local
+    /// successor acquisition would before its collection: the schedule comes
+    /// from the store's last committed expiry, and an attempt runs only when
+    /// that schedule is due. The one-use capacity bypass stays with
+    /// collection. Every expiry validation, refusal and capacity check is
+    /// the unchanged [`expire_ordinary_history`] path; integrity failures
+    /// are returned as errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same local engine/storage failures as an expiry attempted
+    /// by collection.
+    pub fn maintain_due_expiry(&mut self) -> Result<DueExpiryMaintenance, EngineError> {
+        let generation_before = self.store.retention_boundary()?.generation;
+        let attempt = self.attempt_scheduled_expiry(true, false, false)?;
+        if matches!(attempt, RetentionAttempt::DeferredForReadyCollections) {
+            return Err(EngineError::Invariant(
+                "due-expiry maintenance never defers for ready collections".into(),
+            ));
+        }
+        let generation_after = self.store.retention_boundary()?.generation;
+        let scheduled_expiry_pending = scheduled_expiry_wait(
+            self.store.retention_cutoff()?.as_deref(),
+            self.config.retention.horizon_seconds,
+            Utc::now(),
+        )
+        .is_none();
+        Ok(DueExpiryMaintenance {
+            attempt,
+            generation_before,
+            generation_after,
+            scheduled_expiry_pending,
+        })
+    }
+
+    /// The scheduled expiry step that precedes a collection. A one-shot local
+    /// successor process (`hydrate_from_store`) has no attempt memory of its
+    /// own and adopts the store's last committed expiry as its attempt time
+    /// so the existing quantum applies across processes; anything
+    /// unrecognised leaves the attempt due. Expected refusals are recorded
+    /// and returned; other failures propagate.
+    fn attempt_scheduled_expiry(
+        &mut self,
+        hydrate_from_store: bool,
+        defer_pending_expiry: bool,
+        allow_capacity_bypass: bool,
+    ) -> Result<RetentionAttempt, EngineError> {
+        let horizon = chrono::TimeDelta::try_seconds(
+            i64::try_from(self.config.retention.horizon_seconds).map_err(|_| {
+                EngineError::Invariant("retention horizon exceeds duration range".into())
+            })?,
+        )
+        .ok_or_else(|| EngineError::Invariant("retention horizon exceeds duration range".into()))?;
+        let cutoff = Utc::now().checked_sub_signed(horizon).ok_or_else(|| {
+            EngineError::Invariant("retention cutoff exceeds timestamp range".into())
+        })?;
+        // Expected expiry refusals are recorded and admission proceeds under
+        // its own capacity preflight. Pending work normally continues before
+        // collection; a daemon acquisition turn may defer only that retry.
+        // Scheduled expiry and the one-use capacity bypass still take precedence.
+        // The daemon and ordinary collection keep their first-attempt
+        // behaviour.
+        if hydrate_from_store && self.last_expiry_attempt.is_none() {
+            self.last_expiry_attempt = committed_expiry_elapsed(
+                self.store.retention_cutoff()?.as_deref(),
+                self.config.retention.horizon_seconds,
+                Utc::now(),
+            )
+            .and_then(|elapsed| std::time::Instant::now().checked_sub(elapsed));
+        }
+        let quantum = expiry_quantum(self.config.retention.horizon_seconds);
+        let elapsed = self.last_expiry_attempt.map(|at| at.elapsed());
+        let due = elapsed.is_none_or(|elapsed| elapsed >= quantum)
+            || (self.expiry_continuation && !defer_pending_expiry);
+        let capacity_bypass = allow_capacity_bypass
+            && !due
+            && !self.capacity_bypass_spent
+            && self.capacity_preflight_refuses();
+        let retention_timing = nq_store::operation_timing::PhaseTiming::start("core.retention");
+        retention_timing.value("due", i64::from(due));
+        retention_timing.value("continuation", i64::from(self.expiry_continuation));
+        retention_timing.value("capacity_bypass", i64::from(capacity_bypass));
+        let attempt = if due || capacity_bypass {
+            self.capacity_bypass_spent = capacity_bypass;
+            self.last_expiry_attempt = Some(std::time::Instant::now());
+            classify_retention_attempt(expire_ordinary_history(
+                &mut self.store,
+                &cutoff.to_rfc3339(),
+            ))?
+        } else if self.expiry_continuation && defer_pending_expiry {
+            RetentionAttempt::DeferredForReadyCollections
+        } else {
+            RetentionAttempt::Deferred {
+                next_attempt_in_seconds: quantum
+                    .saturating_sub(elapsed.unwrap_or_default())
+                    .as_secs(),
+            }
+        };
+        if due || capacity_bypass {
+            self.update_expiry_continuation(&attempt);
+        }
+        if let RetentionAttempt::Completed(expired) = &attempt
+            && expired.deleted_rows > 0
+        {
+            if engine_semantic_state(&self.store).is_some() {
+                // The expiry carried this handle's certification forward; the
+                // replay cursor follows it without re-reading history.
+                prune_replay_cursor(&self.store, &mut self.replay, &expired.boundary)?;
+            } else {
+                self.replay = validate_engine_open_history(&self.store)?;
+            }
+        }
+        self.retention_attempt = Some(attempt.clone());
+        drop(retention_timing);
+        Ok(attempt)
+    }
+
     /// The running evaluator identity, or a typed refusal carrying the exact
     /// reason it could not be established.
     fn require_evaluator_identity(&self) -> Result<&EvaluatorRuntimeIdentity, EngineError> {
@@ -2955,75 +3107,13 @@ impl CollectionEngine {
         // unavailable rather than commit an admitted report and only then refuse
         // at evaluation, leaving a durable report behind.
         self.require_evaluator_identity()?;
-        let horizon = chrono::TimeDelta::try_seconds(
-            i64::try_from(self.config.retention.horizon_seconds).map_err(|_| {
-                EngineError::Invariant("retention horizon exceeds duration range".into())
-            })?,
-        )
-        .ok_or_else(|| EngineError::Invariant("retention horizon exceeds duration range".into()))?;
-        let cutoff = Utc::now().checked_sub_signed(horizon).ok_or_else(|| {
-            EngineError::Invariant("retention cutoff exceeds timestamp range".into())
-        })?;
-        // Expected expiry refusals are recorded and admission proceeds under
-        // its own capacity preflight. Pending work normally continues before
-        // collection; a daemon acquisition turn may defer only that retry.
-        // Scheduled expiry and the one-use capacity bypass still take precedence.
-        // A one-shot local successor process has no attempt memory of its
-        // own. Adopt the store's last committed expiry as its attempt time so
-        // the existing quantum applies across those processes; anything
-        // unrecognised leaves the attempt due. The daemon and ordinary
-        // collection keep their first-attempt behaviour.
-        if local_successor_acquisition_id.is_some() && self.last_expiry_attempt.is_none() {
-            self.last_expiry_attempt = committed_expiry_elapsed(
-                self.store.retention_cutoff()?.as_deref(),
-                self.config.retention.horizon_seconds,
-                Utc::now(),
-            )
-            .and_then(|elapsed| std::time::Instant::now().checked_sub(elapsed));
-        }
-        let quantum = expiry_quantum(self.config.retention.horizon_seconds);
-        let elapsed = self.last_expiry_attempt.map(|at| at.elapsed());
-        let due = elapsed.is_none_or(|elapsed| elapsed >= quantum)
-            || (self.expiry_continuation && !defer_pending_expiry);
-        let capacity_bypass =
-            !due && !self.capacity_bypass_spent && self.capacity_preflight_refuses();
-        let retention_timing = nq_store::operation_timing::PhaseTiming::start("core.retention");
-        retention_timing.value("due", i64::from(due));
-        retention_timing.value("continuation", i64::from(self.expiry_continuation));
-        retention_timing.value("capacity_bypass", i64::from(capacity_bypass));
-        let attempt = if due || capacity_bypass {
-            self.capacity_bypass_spent = capacity_bypass;
-            self.last_expiry_attempt = Some(std::time::Instant::now());
-            classify_retention_attempt(expire_ordinary_history(
-                &mut self.store,
-                &cutoff.to_rfc3339(),
-            ))?
-        } else if self.expiry_continuation && defer_pending_expiry {
-            RetentionAttempt::DeferredForReadyCollections
-        } else {
-            RetentionAttempt::Deferred {
-                next_attempt_in_seconds: quantum
-                    .saturating_sub(elapsed.unwrap_or_default())
-                    .as_secs(),
-            }
-        };
-        if due || capacity_bypass {
-            self.update_expiry_continuation(&attempt);
-        }
-        if let RetentionAttempt::Completed(expired) = &attempt
-            && expired.deleted_rows > 0
-        {
-            if engine_semantic_state(&self.store).is_some() {
-                // The expiry carried this handle's certification forward; the
-                // replay cursor follows it without re-reading history.
-                prune_replay_cursor(&self.store, &mut self.replay, &expired.boundary)?;
-            } else {
-                self.replay = validate_engine_open_history(&self.store)?;
-            }
-        }
-        self.retention_attempt = Some(attempt);
-        drop(retention_timing);
-        let binding_timing = nq_store::operation_timing::PhaseTiming::start("core.binding_reconcile");
+        self.attempt_scheduled_expiry(
+            local_successor_acquisition_id.is_some(),
+            defer_pending_expiry,
+            true,
+        )?;
+        let binding_timing =
+            nq_store::operation_timing::PhaseTiming::start("core.binding_reconcile");
         self.reconcile_pending_binding(watcher)?;
         drop(binding_timing);
         let profile = resolve(watcher)?;
@@ -22571,6 +22661,204 @@ sys.stdout.write("\n")
                 at("2026-10-29T19:00:30Z")
             ),
             None
+        );
+    }
+
+    /// Successor acquisitions inside the committed quantum (each defers its
+    /// expiry), so the next due expiry has an aged ordinary prefix beyond the
+    /// retained newest successor.
+    fn add_ordinary_successors(
+        config: &NqConfig,
+        watcher: &WatcherConfig,
+        label: &str,
+        count: usize,
+    ) {
+        let mut engine = reopen_with_test_identity(config).expect("fresh engine");
+        for index in 0..count {
+            engine
+                .diagnostic_acquire_successor_local(watcher, &format!("{label}-extra-{index}"))
+                .expect("successor inside the quantum");
+            assert!(
+                matches!(
+                    engine.last_retention_attempt(),
+                    Some(RetentionAttempt::Deferred { .. })
+                ),
+                "{:?}",
+                engine.last_retention_attempt()
+            );
+        }
+    }
+
+    /// N1 through the owning API: `maintain_due_expiry` defers inside the
+    /// committed quantum, commits once due, and a separately opened one-shot
+    /// acquisition then defers and reuses the carried certification.
+    #[test]
+    fn preseal_maintain_due_expiry_commits_and_the_next_fresh_acquire_defers() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (config, watcher, expired) =
+            recently_expired_successor_store(directory.path(), "preseal-maintain");
+        add_ordinary_successors(&config, &watcher, "preseal-maintain", 3);
+        {
+            let mut early = reopen_with_test_identity(&config).expect("maintenance engine");
+            let report = early.maintain_due_expiry().expect("maintenance");
+            assert!(
+                matches!(report.attempt, RetentionAttempt::Deferred { .. }),
+                "{report:?}"
+            );
+            assert_eq!(report.generation_before, report.generation_after);
+            assert!(!report.scheduled_expiry_pending);
+            assert_eq!(early.store.retention_boundary().expect("boundary"), expired);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(61));
+        let committed = {
+            let mut maintenance = reopen_with_test_identity(&config).expect("maintenance engine");
+            let report = maintenance.maintain_due_expiry().expect("maintenance");
+            assert!(
+                matches!(report.attempt, RetentionAttempt::Completed(_))
+                    && report.generation_after > report.generation_before,
+                "fixture precondition: an aged ordinary prefix commits: {report:?}"
+            );
+            assert!(!report.scheduled_expiry_pending);
+            maintenance.store.retention_boundary().expect("boundary")
+        };
+        let mut acquire = reopen_with_test_identity(&config).expect("fresh one-shot engine");
+        assert!(
+            engine_semantic_state(&acquire.store).is_some(),
+            "a process opened after the commit reuses the carried certification"
+        );
+        let acquired =
+            acquire.diagnostic_acquire_successor_local(&watcher, "preseal-maintain-next");
+        assert!(
+            matches!(
+                acquire.last_retention_attempt(),
+                Some(RetentionAttempt::Deferred { .. })
+            ),
+            "{:?}",
+            acquire.last_retention_attempt()
+        );
+        assert_eq!(
+            acquire.store.retention_boundary().expect("boundary"),
+            committed
+        );
+        acquired.expect("acquisition completes without an expiry attempt");
+    }
+
+    /// Pre-seal maintenance assumption, on the real engine and store: an
+    /// expiry committed by one process (the routine `nq admin expire-due`
+    /// runs) persists the schedule hint, so a later, separately opened
+    /// one-shot acquisition defers its own scheduled expiry and reuses the
+    /// carried certification instead of replaying history. The test never
+    /// writes a cutoff: the store records one only inside the committing
+    /// expiry transaction.
+    #[test]
+    fn preseal_expiry_committed_by_another_process_lets_the_next_fresh_acquire_defer() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (config, watcher, expired) =
+            recently_expired_successor_store(directory.path(), "preseal-hint");
+        add_ordinary_successors(&config, &watcher, "preseal-hint", 3);
+        // Past the quantum: without maintenance the next fresh acquisition
+        // would be due (the existing `..._attempts_expiry_after_quantum`
+        // control).
+        std::thread::sleep(std::time::Duration::from_secs(61));
+        let committed = {
+            let mut maintenance =
+                reopen_with_test_identity(&config).expect("separate maintenance engine");
+            let cutoff = (Utc::now() - chrono::TimeDelta::seconds(1)).to_rfc3339();
+            let result = expire_ordinary_history(maintenance.store_mut_for_test(), &cutoff)
+                .expect("due expiry");
+            let boundary = maintenance.store.retention_boundary().expect("boundary");
+            assert!(
+                boundary.generation > expired.generation,
+                "fixture precondition: an aged ordinary prefix commits: {result:?}"
+            );
+            boundary
+        };
+        let mut acquire = reopen_with_test_identity(&config).expect("fresh one-shot engine");
+        assert!(
+            engine_semantic_state(&acquire.store).is_some(),
+            "a process opened after the commit reuses the carried certification"
+        );
+        let acquired = acquire.diagnostic_acquire_successor_local(&watcher, "preseal-hint-next");
+        assert!(
+            matches!(
+                acquire.last_retention_attempt(),
+                Some(RetentionAttempt::Deferred { .. })
+            ),
+            "the acquisition after committed maintenance must not repeat expiry: {:?}",
+            acquire.last_retention_attempt()
+        );
+        assert_eq!(
+            acquire.store.retention_boundary().expect("boundary"),
+            committed
+        );
+        acquired.expect("acquisition completes without an expiry attempt");
+    }
+
+    /// A budget-limited attempt that commits one batch and leaves candidates
+    /// still records its cutoff, so the next fresh acquisition defers; the
+    /// remainder waits for the next quantum (existing one-shot semantics).
+    #[test]
+    fn preseal_partial_expiry_still_persists_the_schedule_hint() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (config, watcher, expired) =
+            recently_expired_successor_store(directory.path(), "preseal-partial");
+        add_ordinary_successors(&config, &watcher, "preseal-partial", 3);
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        let cutoff = (Utc::now() - chrono::TimeDelta::seconds(1)).to_rfc3339();
+        let result = {
+            let mut maintenance = reopen_with_test_identity(&config).expect("maintenance engine");
+            expire_ordinary_history_within(
+                maintenance.store_mut_for_test(),
+                &cutoff,
+                1,
+                std::time::Duration::ZERO,
+            )
+            .expect("one committed batch")
+        };
+        assert!(
+            result.boundary.generation > expired.generation && result.candidates_remaining,
+            "fixture precondition: one committed batch with candidates left: {result:?}"
+        );
+        let mut acquire = reopen_with_test_identity(&config).expect("fresh one-shot engine");
+        assert_eq!(
+            acquire.store.retention_cutoff().expect("cutoff").as_deref(),
+            Some(cutoff.as_str())
+        );
+        let acquired = acquire.diagnostic_acquire_successor_local(&watcher, "preseal-partial-next");
+        assert!(
+            matches!(
+                acquire.last_retention_attempt(),
+                Some(RetentionAttempt::Deferred { .. })
+            ),
+            "{:?}",
+            acquire.last_retention_attempt()
+        );
+        acquired.expect("acquisition");
+    }
+
+    /// A zero-delete completion writes nothing: neither the cutoff nor the
+    /// boundary moves, so it cannot satisfy a later acquisition's schedule.
+    #[test]
+    fn preseal_zero_delete_expiry_leaves_the_schedule_hint_unchanged() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (config, _watcher, expired) =
+            recently_expired_successor_store(directory.path(), "preseal-noop");
+        let mut maintenance = reopen_with_test_identity(&config).expect("maintenance engine");
+        let prior = maintenance
+            .store
+            .retention_cutoff()
+            .expect("cutoff")
+            .expect("fixture precondition: a committed cutoff");
+        let result = expire_ordinary_history(maintenance.store_mut_for_test(), &prior)
+            .expect("repeat of the committed cutoff");
+        assert_eq!(result.deleted_rows, 0, "{result:?}");
+        assert_eq!(
+            maintenance.store.retention_cutoff().expect("cutoff"),
+            Some(prior)
+        );
+        assert_eq!(
+            maintenance.store.retention_boundary().expect("boundary"),
+            expired
         );
     }
 

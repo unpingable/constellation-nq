@@ -365,6 +365,14 @@ pub struct RestoreArgs {
 /// Administrative maintenance.
 #[derive(Debug, Subcommand)]
 pub enum AdminCommand {
+    /// Run the scheduled ordinary-history expiry when it is due, exactly as a
+    /// local successor acquisition would before its collection, so a caller
+    /// can run it before sealing an acquisition. Not due: reports `deferred`
+    /// from the persisted schedule alone, without validating the store. Due:
+    /// opens the engine and runs the unchanged expiry with every validation,
+    /// refusal and capacity check. The capacity bypass stays with
+    /// collection.
+    ExpireDue,
     /// Validate the store. `--full` re-validates every history row, ignoring
     /// any validation watermark, and records a new watermark on success.
     Validate {
@@ -2795,6 +2803,7 @@ fn record_full_validation(
 #[allow(clippy::too_many_lines)]
 fn admin_command(config_path: &Path, command: AdminCommand, json_output: bool) -> Result<()> {
     match command {
+        AdminCommand::ExpireDue => admin_expire_due(config_path, json_output),
         AdminCommand::Validate { full } => {
             if !full {
                 bail!("only `nq admin validate --full` is supported");
@@ -3315,6 +3324,72 @@ fn validate_sha256(digest: &str) -> Result<()> {
         bail!("expected `sha256:` followed by 64 lowercase hexadecimal characters");
     }
     Ok(())
+}
+
+const EXPIRE_DUE_SCHEMA: &str = "nq.admin.expire_due.v1";
+
+/// `nq admin expire-due`. Every outcome below is a reported result (exit 0);
+/// integrity, invariant and storage failures propagate as errors.
+fn admin_expire_due(config_path: &Path, json_output: bool) -> Result<()> {
+    use nq_core::engine::RetentionAttempt;
+    let config = NqConfig::load(config_path)?;
+    let started = std::time::Instant::now();
+    // The schedule from the persisted hint alone. This read-only open makes
+    // no claim about the integrity of the history it does not read.
+    let wait = {
+        let store = Store::open_read_only(&config.database_path)?;
+        nq_core::engine::scheduled_expiry_wait(
+            store.retention_cutoff()?.as_deref(),
+            config.retention.horizon_seconds,
+            chrono::Utc::now(),
+        )
+    };
+    let deferred = |next: u64| {
+        json!({
+            "schema": EXPIRE_DUE_SCHEMA,
+            "attempt": "deferred",
+            "scope": "schedule_hint_only",
+            "next_attempt_in_seconds": next,
+            "scheduled_expiry_pending": false,
+            "elapsed_ms": started.elapsed().as_millis(),
+        })
+    };
+    if let Some(wait) = wait {
+        return print_value(&deferred(wait.as_secs()), json_output);
+    }
+    let mut engine = nq_core::CollectionEngine::open(&config)?;
+    let report = engine.maintain_due_expiry()?;
+    let value = match &report.attempt {
+        // Another process committed between the schedule read and the open.
+        RetentionAttempt::Deferred {
+            next_attempt_in_seconds,
+        } => deferred(*next_attempt_in_seconds),
+        RetentionAttempt::Completed(result) => json!({
+            "schema": EXPIRE_DUE_SCHEMA,
+            "attempt": "completed",
+            "scope": "engine_validated_expiry",
+            "deleted_rows": result.deleted_rows,
+            "candidates_remaining": result.candidates_remaining,
+            "generation_before": report.generation_before,
+            "generation_after": report.generation_after,
+            "scheduled_expiry_pending": report.scheduled_expiry_pending,
+            "elapsed_ms": started.elapsed().as_millis(),
+        }),
+        RetentionAttempt::Refused { class, detail } => json!({
+            "schema": EXPIRE_DUE_SCHEMA,
+            "attempt": "refused",
+            "scope": "engine_validated_expiry",
+            "refusal": {"class": class, "detail": detail},
+            "generation_before": report.generation_before,
+            "generation_after": report.generation_after,
+            "scheduled_expiry_pending": report.scheduled_expiry_pending,
+            "elapsed_ms": started.elapsed().as_millis(),
+        }),
+        RetentionAttempt::DeferredForReadyCollections => {
+            bail!("due-expiry maintenance never defers for ready collections")
+        }
+    };
+    print_value(&value, json_output)
 }
 
 fn print_value(value: &impl Serialize, json_output: bool) -> Result<()> {
