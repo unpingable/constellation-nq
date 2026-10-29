@@ -137,7 +137,15 @@ deferred, and the collection path continues it at its next collection rather
 than at the next quantum. A later batch refused by a concurrent commit is
 retried up to three times within the budget; if it stays refused, the batches
 already committed are kept and the rest is deferred. A refused first batch is
-reported and retried at the next collection.
+reported. History-change refusals retry at the next collection. If an earlier
+attempt already established a pending continuation, contention preserves that
+continuation for the next collection too, including checkpoint/WAL contention.
+A successful drained attempt clears it. Initial contention with no known pending work, capacity refusals and
+disk-full refusals retain the ordinary quantum and capacity-bypass policy;
+they do not create a new per-collection retry loop. Batch size, attempt budget
+and writer wait limits are unchanged. Persistent contention can therefore add
+another bounded maintenance attempt to each collection while work remains
+pending; continued acquisition and eventual drainage must be observed.
 
 Each evaluation records the lowest admitted-report sequence its envelope names
 (`min_cited_report_sequence`, derived at insert and re-derived by validation),

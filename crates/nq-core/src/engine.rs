@@ -1758,8 +1758,9 @@ pub struct CollectionEngine {
     /// Whether the one immediate attempt allowed by a capacity refusal was
     /// used since the last scheduled attempt.
     capacity_bypass_spent: bool,
-    /// The last attempt spent its budget with candidates remaining: the next
-    /// collection continues it without waiting for the quantum.
+    /// A bounded attempt left candidates, or history changed before expiry.
+    /// The next collection continues without waiting for the quantum. A
+    /// contention refusal preserves an already pending continuation.
     expiry_continuation: bool,
 }
 
@@ -2338,6 +2339,21 @@ impl CollectionEngine {
             expiry_continuation: false,
             capacity_bypass_spent: false,
         })
+    }
+
+    /// Contention does not discharge already pending maintenance. Other
+    /// refusal classes retain their existing scheduling policy.
+    fn update_expiry_continuation(&mut self, attempt: &RetentionAttempt) {
+        self.expiry_continuation = matches!(
+            attempt,
+            RetentionAttempt::Completed(expired) if expired.candidates_remaining
+        ) || matches!(
+            attempt,
+            RetentionAttempt::Refused { class: "history_changed", .. }
+        ) || (self.expiry_continuation && matches!(
+            attempt,
+            RetentionAttempt::Refused { class: "contention", .. }
+        ));
     }
 
     /// Whether the admission's capacity preflight would refuse the next write.
@@ -2936,13 +2952,7 @@ impl CollectionEngine {
             }
         };
         if due || capacity_bypass {
-            self.expiry_continuation = matches!(
-                &attempt,
-                RetentionAttempt::Completed(expired) if expired.candidates_remaining
-            ) || matches!(
-                &attempt,
-                RetentionAttempt::Refused { class: "history_changed", .. }
-            );
+            self.update_expiry_continuation(&attempt);
         }
         if let RetentionAttempt::Completed(expired) = &attempt
             && expired.deleted_rows > 0
@@ -14270,6 +14280,41 @@ sys.stdout.write("\n")
         assert!(!engine.expiry_continuation, "nothing remained");
         assert!(engine.collect(&watcher).is_ok());
         assert!(matches!(engine.last_retention_attempt(), Some(RetentionAttempt::Deferred { .. })));
+    }
+
+    #[test]
+    fn pending_expiry_survives_contention_and_retries_inside_the_quantum() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut engine, watcher, _) = admitted_host_diagnostic_fixture(
+            root.path(), "expiry-pending-contention", b"pending-contention",
+        ).expect("this regression requires an executable admitted-helper fixture");
+        assert!(engine.collect(&watcher).unwrap().is_success());
+        assert!(engine.collect(&watcher).unwrap().is_success());
+        assert!(matches!(engine.last_retention_attempt(), Some(RetentionAttempt::Deferred { .. })));
+        // A previous bounded attempt established that work remains. A
+        // classified writer refusal says nothing about completion of it.
+        engine.expiry_continuation = true;
+        let contention = classify_retention_attempt(Err(EngineError::Store(
+            nq_store::StoreError::Refused(nq_store::Refusal::Contention("concurrent writer owns operation guard".into())),
+        ))).unwrap();
+        engine.update_expiry_continuation(&contention);
+        assert!(engine.collect(&watcher).unwrap().is_success());
+        assert!(matches!(engine.last_retention_attempt(), Some(RetentionAttempt::Completed(_))),
+            "known pending maintenance is retried before the hour elapses");
+        assert!(!engine.expiry_continuation, "the successful drained pass clears it");
+        assert!(engine.collect(&watcher).unwrap().is_success());
+        assert!(matches!(engine.last_retention_attempt(), Some(RetentionAttempt::Deferred { .. })));
+        // Unknown work does not acquire a new per-collection retry policy.
+        engine.update_expiry_continuation(&contention);
+        assert!(engine.collect(&watcher).unwrap().is_success());
+        assert!(matches!(engine.last_retention_attempt(), Some(RetentionAttempt::Deferred { .. })));
+        for class in ["capacity", "disk_full"] {
+            engine.expiry_continuation = true;
+            engine.update_expiry_continuation(&RetentionAttempt::Refused {
+                class, detail: "fixture refusal".into(),
+            });
+            assert!(!engine.expiry_continuation, "{class} keeps its existing bounded policy");
+        }
     }
 
     /// File-level bytes in use after one expiry of `retired` aged
