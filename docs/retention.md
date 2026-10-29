@@ -124,17 +124,22 @@ always attempts expiry, and a capacity refusal by the admission preflight
 allows one immediate attempt between quanta. `nq doctor` prints the quantum
 and the earliest next attempt derived from the last committed expiry
 (`expiry_schedule`).
+One-shot local successor acquisitions adopt that derived last committed
+expiry as their attempt time; see OPERATIONS.md.
 An attempt expires in batches of at most 64 aged collections beyond the
 existing islands, each batch its own guarded transaction (one generation),
-releasing the operation lock between batches so a concurrent writer waits for
-at most one batch. One batch's locked work still grows with the retained
+releasing the operation lock between batches and giving concurrent writers
+an opportunity to acquire it. One batch's locked work still grows with the retained
 window (the full foreign-key check, the floor union and the run scan, about
 405 SQLite ticks per retained collection in the S4 harness), and it has not
 been measured at the production window in a release build, so a writer's
 5-second wait bound is not yet established at that scale. Batches continue
-for up to 20 seconds; whatever remains is
-deferred, and the collection path continues it at its next collection rather
-than at the next quantum. A later batch refused by a concurrent commit is
+within the default five-second soft attempt budget, checked only between
+atomic batches so one batch may exceed it; whatever remains is
+deferred. A long-lived collection engine continues that pending work at its
+next collection rather than at the next quantum. A one-shot local successor
+process does not retain the pending-continuation state across invocations;
+its next attempt follows the derived quantum or the capacity-refusal bypass. A later batch refused by a concurrent commit is
 retried up to three times within the budget; if it stays refused, the batches
 already committed are kept and the rest is deferred. A refused first batch is
 reported. History-change refusals retry at the next collection. If an earlier

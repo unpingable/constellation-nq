@@ -1773,6 +1773,24 @@ pub fn expiry_quantum(horizon_seconds: u64) -> std::time::Duration {
     std::time::Duration::from_secs((horizon_seconds / 168).clamp(60, 3600))
 }
 
+/// Time since the start of the last expiry attempt that committed, derived
+/// as `nq doctor` derives `last_committed_at`: cutoff plus horizon. A
+/// scheduling hint only, not a clock-quality claim. `None` (the attempt is
+/// due) when no expiry committed, the cutoff does not parse, the arithmetic
+/// overflows, or the derived time lies after `now`.
+fn committed_expiry_elapsed(
+    cutoff: Option<&str>,
+    horizon_seconds: u64,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<std::time::Duration> {
+    let cutoff = chrono::DateTime::parse_from_rfc3339(cutoff?)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let horizon = chrono::TimeDelta::try_seconds(i64::try_from(horizon_seconds).ok()?)?;
+    let committed = cutoff.checked_add_signed(horizon)?;
+    now.signed_duration_since(committed).to_std().ok()
+}
+
 /// What the retention expiry attempted before a collection did. Expiry is
 /// maintenance: a refusal (capacity, contention, or a concurrent history
 /// change) is recorded here and the collection proceeds to admission, which
@@ -2950,6 +2968,19 @@ impl CollectionEngine {
         // its own capacity preflight. Pending work normally continues before
         // collection; a daemon acquisition turn may defer only that retry.
         // Scheduled expiry and the one-use capacity bypass still take precedence.
+        // A one-shot local successor process has no attempt memory of its
+        // own. Adopt the store's last committed expiry as its attempt time so
+        // the existing quantum applies across those processes; anything
+        // unrecognised leaves the attempt due. The daemon and ordinary
+        // collection keep their first-attempt behaviour.
+        if local_successor_acquisition_id.is_some() && self.last_expiry_attempt.is_none() {
+            self.last_expiry_attempt = committed_expiry_elapsed(
+                self.store.retention_cutoff()?.as_deref(),
+                self.config.retention.horizon_seconds,
+                Utc::now(),
+            )
+            .and_then(|elapsed| std::time::Instant::now().checked_sub(elapsed));
+        }
         let quantum = expiry_quantum(self.config.retention.horizon_seconds);
         let elapsed = self.last_expiry_attempt.map(|at| at.elapsed());
         let due = elapsed.is_none_or(|elapsed| elapsed >= quantum)
@@ -9308,13 +9339,11 @@ fn replay_heads(state: &nq_store::SemanticState) -> Result<HistoryHeads, EngineE
     Ok(heads)
 }
 
-/// Candidate runs (collections) one expiry batch selects beyond the
-/// existing islands. Each batch is its own guarded transaction and the
-/// operation lock is released between batches, so another writer waits at
-/// most one batch (the other writers' bounded wait is 5 s). At the measured
-/// in-lock cost of about 27 ms per candidate in a debug build, 64 candidates
-/// hold the lock about 1.7 s; the production hourly batch of about 660
-/// collections becomes 11 batches.
+/// Candidate runs selected by one expiry batch beyond the existing islands.
+/// Each batch has its own guarded transaction. The operation lock is released
+/// between batches, giving other writers an opportunity to acquire it. Final
+/// boundary validation and the full foreign-key check also grow with retained
+/// history, so the candidate cap gives no per-batch lock-hold latency bound.
 pub const EXPIRY_BATCH_RUNS: usize = 64;
 
 /// Consecutive refused batches retried within one attempt.
@@ -17368,8 +17397,30 @@ sys.stdout.write("\n")
         genesis_id: &str,
         evaluator_label: &[u8],
     ) -> Option<(CollectionEngine, WatcherConfig, PathBuf)> {
-        let (config, watcher, mode) = host_diagnostic_fixture(root);
-        let mut store = Store::initialize(&config.database_path).expect("initialize store");
+        admitted_host_diagnostic_fixture_with_horizon(root, genesis_id, evaluator_label, None)
+    }
+
+    /// [`admitted_host_diagnostic_fixture`] admitted under an explicit
+    /// retention horizon from initialization (the persisted operating
+    /// envelope then matches every later open of the same config).
+    fn admitted_host_diagnostic_fixture_with_horizon(
+        root: &Path,
+        genesis_id: &str,
+        evaluator_label: &[u8],
+        horizon_seconds: Option<u64>,
+    ) -> Option<(CollectionEngine, WatcherConfig, PathBuf)> {
+        let (mut config, watcher, mode) = host_diagnostic_fixture(root);
+        if let Some(horizon_seconds) = horizon_seconds {
+            config.retention.horizon_seconds = horizon_seconds;
+        }
+        let mut store = Store::initialize_with_capacity(
+            &config.database_path,
+            config.retention.horizon_seconds,
+            config.retention.byte_ceiling,
+            config.retention.reserve_bytes,
+            config.retention.auxiliary_bytes,
+        )
+        .expect("initialize store with its admitted fixture policy");
         append_profile_descriptor(&mut store, resolve(&watcher).expect("host profile"))
             .expect("profile descriptor");
         store
@@ -22253,6 +22304,257 @@ sys.stdout.write("\n")
             engine
                 .diagnostic_acquire_successor_local(&watcher, pending_id)
                 .is_err()
+        );
+    }
+
+    /// A store admitted with a one-second retention horizon (quantum 60 s)
+    /// whose most recent committed expiry was made moments ago by a local
+    /// successor acquisition. Returns the config and the boundary after it.
+    fn recently_expired_successor_store(
+        root: &Path,
+        genesis: &str,
+    ) -> (NqConfig, WatcherConfig, nq_store::RetentionBoundary) {
+        let (mut engine, watcher, _mode) = admitted_host_diagnostic_fixture_with_horizon(
+            root,
+            genesis,
+            b"watermark-evaluator",
+            Some(1),
+        )
+        .expect("this regression requires an executable admitted-helper fixture");
+        engine
+            .diagnostic_execute(&watcher)
+            .expect("initial diagnostic");
+        engine
+            .diagnostic_acquire_successor_local(&watcher, &format!("{genesis}-0"))
+            .expect("first successor");
+        let before = engine.store.retention_boundary().expect("boundary");
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        engine.last_expiry_attempt = None;
+        engine
+            .diagnostic_acquire_successor_local(&watcher, &format!("{genesis}-1"))
+            .expect("expiring successor");
+        let after = engine.store.retention_boundary().expect("boundary");
+        assert!(
+            matches!(
+                engine.last_retention_attempt(),
+                Some(RetentionAttempt::Completed(_))
+            ) && after.generation > before.generation,
+            "fixture precondition: an expiry committed: {:?}",
+            engine.last_retention_attempt()
+        );
+        // Age the newest run past the one-second horizon, so an attempt made
+        // now has a real candidate and commits.
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        (engine.config.clone(), watcher, after)
+    }
+
+    /// Bug: a one-shot `acquire-next-local` process opens a fresh engine
+    /// (`last_expiry_attempt: None`) and so repeated expiry on every
+    /// acquisition, ignoring the store's committed expiry quantum that
+    /// `nq doctor` derives (cutoff + horizon). Within that quantum a fresh
+    /// local successor acquisition must defer expiry and leave the boundary.
+    #[test]
+    fn successor_expiry_quantum_fresh_local_successor_engine_honours_the_committed_expiry_quantum()
+    {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (config, watcher, expired) =
+            recently_expired_successor_store(directory.path(), "successor-quantum");
+        let mut fresh = reopen_with_test_identity(&config).expect("fresh one-shot engine");
+        let acquired = fresh.diagnostic_acquire_successor_local(&watcher, "successor-quantum-next");
+        assert!(
+            matches!(
+                fresh.last_retention_attempt(),
+                Some(RetentionAttempt::Deferred { .. })
+            ),
+            "a fresh acquisition inside the committed quantum must not repeat expiry: {:?}",
+            fresh.last_retention_attempt()
+        );
+        assert_eq!(fresh.store.retention_boundary().expect("boundary"), expired);
+        acquired.expect("acquisition completes without an expiry attempt");
+    }
+
+    /// Control: with no committed expiry (cutoff absent) a fresh local
+    /// successor acquisition still attempts expiry.
+    #[test]
+    fn successor_expiry_quantum_fresh_local_successor_engine_attempts_expiry_when_none_committed() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (mut engine, watcher, _mode) = admitted_host_diagnostic_fixture(
+            directory.path(),
+            "successor-quantum-absent",
+            b"watermark-evaluator",
+        )
+        .expect("this regression requires an executable admitted-helper fixture");
+        engine
+            .diagnostic_execute(&watcher)
+            .expect("initial diagnostic");
+        assert!(
+            engine
+                .store
+                .retention_report()
+                .expect("report")
+                .cutoff
+                .is_none(),
+            "fixture precondition: no committed expiry"
+        );
+        let config = engine.config.clone();
+        drop(engine);
+        let mut fresh = reopen_with_test_identity(&config).expect("fresh one-shot engine");
+        fresh
+            .diagnostic_acquire_successor_local(&watcher, "successor-quantum-absent-next")
+            .expect("acquisition");
+        assert!(
+            matches!(
+                fresh.last_retention_attempt(),
+                Some(RetentionAttempt::Completed(_))
+            ),
+            "{:?}",
+            fresh.last_retention_attempt()
+        );
+    }
+
+    /// Control: once the committed expiry is older than the quantum (60 s at
+    /// a one-second horizon), a fresh local successor attempts and commits.
+    #[test]
+    fn successor_expiry_quantum_fresh_local_successor_engine_attempts_expiry_after_quantum() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (config, watcher, expired) =
+            recently_expired_successor_store(directory.path(), "successor-quantum-due");
+        std::thread::sleep(std::time::Duration::from_secs(61));
+        let mut fresh = reopen_with_test_identity(&config).expect("fresh one-shot engine");
+        fresh
+            .diagnostic_acquire_successor_local(&watcher, "successor-quantum-due-next")
+            .expect("acquisition");
+        assert!(
+            matches!(
+                fresh.last_retention_attempt(),
+                Some(RetentionAttempt::Completed(_))
+            ),
+            "{:?}",
+            fresh.last_retention_attempt()
+        );
+        assert!(
+            fresh
+                .store
+                .retention_boundary()
+                .expect("boundary")
+                .generation
+                > expired.generation
+        );
+    }
+
+    /// Control: inside the committed quantum, the existing one-use capacity
+    /// bypass still forces an expiry attempt, which commits.
+    #[test]
+    fn successor_expiry_quantum_fresh_local_successor_capacity_refusal_still_attempts_expiry() {
+        struct ClearCapacityOverride;
+        impl Drop for ClearCapacityOverride {
+            fn drop(&mut self) {
+                CAPACITY_PREFLIGHT_REFUSES_FOR_TEST.with(|forced| forced.set(None));
+            }
+        }
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (config, watcher, expired) =
+            recently_expired_successor_store(directory.path(), "successor-quantum-capacity");
+        let mut fresh = reopen_with_test_identity(&config).expect("fresh one-shot engine");
+        let _clear = ClearCapacityOverride;
+        CAPACITY_PREFLIGHT_REFUSES_FOR_TEST.with(|forced| forced.set(Some(true)));
+        let _ =
+            fresh.diagnostic_acquire_successor_local(&watcher, "successor-quantum-capacity-next");
+        assert!(
+            matches!(
+                fresh.last_retention_attempt(),
+                Some(RetentionAttempt::Completed(_))
+            ),
+            "{:?}",
+            fresh.last_retention_attempt()
+        );
+        assert!(
+            fresh
+                .store
+                .retention_boundary()
+                .expect("boundary")
+                .generation
+                > expired.generation
+        );
+    }
+
+    /// Scope control: ordinary collection on a fresh engine keeps its existing
+    /// first-attempt behaviour even inside the committed quantum.
+    #[test]
+    fn successor_expiry_quantum_fresh_engine_ordinary_collection_still_attempts_expiry_inside_quantum()
+     {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let (config, watcher, expired) =
+            recently_expired_successor_store(directory.path(), "successor-quantum-ordinary");
+        let mut fresh = reopen_with_test_identity(&config).expect("fresh engine");
+        assert!(fresh.collect(&watcher).expect("collect").is_success());
+        assert!(
+            matches!(
+                fresh.last_retention_attempt(),
+                Some(RetentionAttempt::Completed(_))
+            ),
+            "{:?}",
+            fresh.last_retention_attempt()
+        );
+        assert!(
+            fresh
+                .store
+                .retention_boundary()
+                .expect("boundary")
+                .generation
+                > expired.generation
+        );
+    }
+
+    /// Hand-derived inputs for the store-derived schedule hint: only a
+    /// parsable, non-future, in-range cutoff plus horizon yields an elapsed time.
+    #[test]
+    fn successor_expiry_quantum_committed_expiry_elapsed_is_due_unless_recognised() {
+        let at = |text: &str| {
+            chrono::DateTime::parse_from_rfc3339(text)
+                .expect("fixture time")
+                .with_timezone(&chrono::Utc)
+        };
+        let cutoff = Some("2026-10-22T19:00:00.000000000+00:00");
+        assert_eq!(
+            committed_expiry_elapsed(cutoff, 604_800, at("2026-10-29T19:00:30Z")),
+            Some(std::time::Duration::from_secs(30))
+        );
+        assert_eq!(
+            committed_expiry_elapsed(cutoff, 604_800, at("2026-10-29T19:00:00Z")),
+            Some(std::time::Duration::ZERO)
+        );
+        // Derived commit after `now`: never trusted.
+        assert_eq!(
+            committed_expiry_elapsed(cutoff, 604_800, at("2026-10-29T18:59:59Z")),
+            None
+        );
+        // No committed expiry, or an unrecognised cutoff.
+        assert_eq!(
+            committed_expiry_elapsed(None, 604_800, at("2026-10-29T19:00:30Z")),
+            None
+        );
+        assert_eq!(
+            committed_expiry_elapsed(Some("not-a-time"), 604_800, at("2026-10-29T19:00:30Z")),
+            None
+        );
+        // Horizon beyond i64 seconds, beyond TimeDelta, and a sum beyond the
+        // representable date range.
+        assert_eq!(
+            committed_expiry_elapsed(cutoff, u64::MAX, at("2026-10-29T19:00:30Z")),
+            None
+        );
+        assert_eq!(
+            committed_expiry_elapsed(cutoff, i64::MAX as u64, at("2026-10-29T19:00:30Z")),
+            None
+        );
+        assert_eq!(
+            committed_expiry_elapsed(
+                cutoff,
+                (i64::MAX / 1_000) as u64,
+                at("2026-10-29T19:00:30Z")
+            ),
+            None
         );
     }
 

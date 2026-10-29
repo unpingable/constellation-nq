@@ -1029,6 +1029,20 @@ their chosen duration. The horizon, expiry quantum, candidate selection,
 validation and capacity checks are unchanged. Actual retirement and freshness
 still require observation; this is not a five-second maintenance latency bound.
 
+A one-shot `nq diagnostics acquire-next-local` process has no expiry attempt
+memory of its own. Before its collection it adopts the store's last committed
+expiry (the retention cutoff plus the configured horizon, which `nq doctor`
+reports as `last_committed_at`) as a scheduling hint, so the existing quantum
+also applies across those processes. An absent, unparsable, overflowing or
+future value leaves the attempt due. When an attempt runs, the capacity bypass,
+batch selection, validation, final boundary validation and the full
+foreign-key check are unchanged. The daemon and ordinary `collect` keep their
+existing first-attempt behavior. This is not a latency bound: the acquisition
+that finds the quantum elapsed still performs the batch, and pending
+continuation is not carried between processes. If an attempt ends with work
+pending, successor CLIs alone defer that work until another quantum or the
+capacity-refusal bypass, rather than continuing it on their next invocation.
+
 Already-ready stdio collections get a finite turn between pending retention
 continuation attempts. Each request registers before waiting for the writer.
 After an ordinary maintenance opportunity, the daemon captures the other ready

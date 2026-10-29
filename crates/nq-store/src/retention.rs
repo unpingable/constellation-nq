@@ -897,6 +897,17 @@ impl Store {
     pub fn retention_boundary(&self) -> Result<RetentionBoundary, StoreError> {
         boundary(&self.connection)
     }
+    /// The cutoff recorded by the last committed expiry, if any. Read-only.
+    ///
+    /// # Errors
+    /// Returns an error when the retention metadata cannot be read.
+    pub fn retention_cutoff(&self) -> Result<Option<String>, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT cutoff FROM retention_state WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )?)
+    }
     /// The retention state `nq doctor` reports. Read-only.
     #[allow(clippy::too_many_lines)]
     pub fn retention_report(&self) -> Result<RetentionReport, StoreError> {
