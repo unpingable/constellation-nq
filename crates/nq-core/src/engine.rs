@@ -8220,7 +8220,7 @@ fn reconstruct_admitted_cached(
         entries: HashMap<(String, String), Entry>,
         bytes: usize,
     }
-    const MAX_BYTES: usize = 64 << 20;
+    const MAX_BYTES: usize = 512 << 20;
     static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
     let weight = |row: &nq_store::AdmittedReportRow| {
         [

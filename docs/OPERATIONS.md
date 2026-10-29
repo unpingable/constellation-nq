@@ -1135,7 +1135,7 @@ is bounded by the new rows, the referenced closure, and the schema:
   command (`collect`, `acquire-next-local`) therefore pays the full
   per-report cost above on its first pass. The long-lived daemon's
   collection engine benefits on later collections and sweeps. The memo is
-  limited to an estimated 64 MiB of row weight. The estimate is not an exact
+  limited to an estimated 512 MiB of row weight. The estimate is not an exact
   allocation or RSS bound: it counts the row's variable fields and a fixed
   per-entry allowance, not the validated report payload. A row heavier than
   the limit is never stored, and the memo is cleared when it fills. When an
