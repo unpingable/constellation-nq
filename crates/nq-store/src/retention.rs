@@ -37,6 +37,23 @@ fn crash_phase_for_test(phase: &str, exit_code: i32) {
     }
 }
 
+// One-shot fault injection; absent from production builds.
+#[cfg(test)]
+type ExpiryTestHook = Box<dyn FnOnce(&Connection) -> Result<(), StoreError>>;
+#[cfg(test)]
+thread_local! {
+    pub(crate) static EXPIRY_TEST_HOOK: std::cell::RefCell<Option<(&'static str, ExpiryTestHook)>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+fn expiry_test_hook(connection: &Connection, phase: &str) -> Result<(), StoreError> {
+    let hook = EXPIRY_TEST_HOOK.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|(wanted, _)| *wanted == phase) { slot.take() } else { None }
+    });
+    if let Some((_, hook)) = hook { hook(connection)?; }
+    Ok(())
+}
+
 fn present(connection: &Connection) -> Result<bool, StoreError> {
     Ok(connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='retention_state')",
@@ -1207,14 +1224,24 @@ impl Store {
         let mut failure: Option<E> = None;
         let result = {
             let mut pending = validate_candidates;
+            let mut validated: Option<ExpiryCandidates> = None;
             let mut wrapper = |store: &Self, candidates: &ExpiryCandidates| -> Result<(), StoreError> {
+                if let Some(previous) = &validated {
+                    return if previous == candidates {
+                        Ok(())
+                    } else {
+                        Err(StoreError::Refused(crate::Refusal::HistoryChanged("after")))
+                    };
+                }
                 let Some(validate) = pending.take() else {
-                    return Ok(());
+                    return Err(StoreError::Invariant("expiry candidate validation already failed".into()));
                 };
                 validate(store, candidates).map_err(|error| {
                     failure = Some(error);
                     StoreError::Invariant("expiry candidate validation failed".into())
-                })
+                })?;
+                validated = Some(candidates.clone());
+                Ok(())
             };
             if supplied {
                 self.expire_ordinary_before_checked(cutoff, Some(&proof), Some(&mut wrapper), max_candidate_runs)
@@ -1345,13 +1372,52 @@ impl Store {
             .cloned()
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// An indexed attempt may need pages before reclamation releases them.
+    /// Retry once without that optimization only after a pre-commit failure
+    /// has unwound the whole transaction. The same immutable history proof
+    /// is checked again; successful typed candidate validation is memoized
+    /// above only for that exact history and candidate set.
     fn expire_ordinary_before_checked(
+        &mut self,
+        cutoff: &str,
+        proof: Option<&(HistoryFrontier, RetentionBoundary, i64)>,
+        mut validate_candidates: Option<CandidateValidator<'_>>,
+        max_candidate_runs: Option<usize>,
+    ) -> Result<RetentionResult, StoreError> {
+        let mut attempt = ExpiryAttempt::default();
+        let result = self.expire_ordinary_before_attempt(
+            cutoff, proof,
+            match validate_candidates.as_mut() { Some(v) => Some(&mut **v), None => None },
+            max_candidate_runs, proof.is_some(), &mut attempt,
+        );
+        let capacity_failure = matches!(&result,
+            Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
+                if code.code == rusqlite::ErrorCode::DiskFull)
+            || matches!(&result, Err(StoreError::Refused(crate::Refusal::Contention(_))));
+        if !attempt.lookup_started || attempt.commit_started || !capacity_failure
+            || !self.connection.is_autocommit()
+        {
+            return result;
+        }
+        #[cfg(test)]
+        expiry_test_hook(&self.connection, "before_scalar_retry")?;
+        // Re-enter through normal capacity admission, transaction acquisition,
+        // history-proof validation, planning and all final integrity checks.
+        self.expire_ordinary_before_attempt(
+            cutoff, proof, validate_candidates, max_candidate_runs, false,
+            &mut ExpiryAttempt::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    fn expire_ordinary_before_attempt(
         &mut self,
         cutoff: &str,
         proof: Option<&(HistoryFrontier, RetentionBoundary, i64)>,
         validate_candidates: Option<CandidateValidator<'_>>,
         max_candidate_runs: Option<usize>,
+        use_lookup: bool,
+        attempt: &mut ExpiryAttempt,
     ) -> Result<RetentionResult, StoreError> {
         chrono::DateTime::parse_from_rfc3339(cutoff)
             .map_err(|e| StoreError::Invariant(format!("invalid expiry cutoff: {e}")))?;
@@ -1484,6 +1550,17 @@ impl Store {
         // the end of the transaction (and by the explicit foreign-key check
         // below) instead of between the two statements.
         tx.execute_batch("PRAGMA defer_foreign_keys=ON")?;
+        // SQLite checks the child key for every parent deletion/repacking.
+        // Without this lookup each parent scans all retained evaluations.
+        // The index exists only in this transaction; the persisted schema
+        // remains unchanged and foreign-key enforcement stays enabled.
+        let indexed = use_lookup && plan.affected_runs >= 2;
+        if indexed {
+            attempt.lookup_started = true;
+            tx.execute_batch("CREATE INDEX expiry_evaluation_runs_trigger_lookup ON evaluation_runs(trigger_run_id)")?;
+            #[cfg(test)]
+            crash_phase_for_test("after_lookup_creation", 74);
+        }
         let mut deleted = 0usize;
         // Evaluations at or below the floor that are neither islands nor
         // compact decision records retire with their watermarks and refusals.
@@ -1508,6 +1585,8 @@ impl Store {
             ("watcher_runs", Mutation::Delete("run_id IN (SELECT run_id FROM expiry_dead_runs WHERE anchor=0)")),
         ] {
             deleted += mutation.apply(&tx, table, delta.as_mut())?;
+            #[cfg(test)]
+            if indexed && deleted > 0 { expiry_test_hook(&tx, "after_mutation")?; }
         }
         // Anchor runs are kept unchanged (not counted as deleted or
         // compacted); re-inserting them after their neighbours' deletion
@@ -1517,6 +1596,11 @@ impl Store {
             "watcher_runs",
             delta.as_mut(),
         )?;
+        if indexed {
+            tx.execute_batch("DROP INDEX expiry_evaluation_runs_trigger_lookup")?;
+            #[cfg(test)]
+            crash_phase_for_test("after_lookup_drop", 75);
+        }
         let retire_ids:Vec<String>=tx.prepare("SELECT intake_id FROM provider_intake_attempts WHERE history_expired=0 AND intake_sequence<=?1 AND intake_id IN (SELECT intake_id FROM expiry_links)")?.query_map([inf],|r|r.get(0))?.collect::<Result<_,_>>()?;
         for id in &retire_ids {
             let (run,submission,report,digest):(String,Option<String>,Option<String>,Option<String>)=tx.query_row("SELECT run_id,submission_id,report_id,semantic_digest FROM expiry_links WHERE intake_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
@@ -1595,6 +1679,9 @@ impl Store {
         };
         #[cfg(test)]
         crash_phase_for_test("inside_transaction", 72);
+        attempt.commit_started = true;
+        #[cfg(test)]
+        expiry_test_hook(&tx, "commit_boundary")?;
         tx.commit()?;
         #[cfg(test)]
         crash_phase_for_test("after_commit", 73);
@@ -1651,6 +1738,12 @@ impl Store {
             candidates_remaining: plan.candidates_remaining,
         })
     }
+}
+
+#[derive(Default)]
+struct ExpiryAttempt {
+    lookup_started: bool,
+    commit_started: bool,
 }
 
 /// The in-lock validation of one expiry's candidate closures.

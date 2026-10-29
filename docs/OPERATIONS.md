@@ -896,6 +896,25 @@ watermark and prints its commitment digest. An existing store has no
 watermark until its first engine open or explicit full validation; that first
 validation costs a full validation.
 
+### Retention lookup allocation
+
+Proof-bearing expiry batches with at least two affected watcher runs build a
+transaction-scoped lookup for evaluation trigger references. It avoids scanning
+all retained evaluations for each parent run deletion or repacking. The lookup
+is dropped before final validation and commit, so the committed schema remains
+unchanged. Foreign-key enforcement and the final foreign-key check still apply.
+
+The lookup needs temporary main-database pages and can leave reusable free pages
+in the committed file. If an indexed attempt fails with a capacity or contention
+error before commit starts, the entire transaction is unwound and expiry retries
+once through the scalar path. The retry repeats capacity admission and checks the
+same snapshot frontier, retention boundary and data version. Successfully
+validated typed candidates are reused only when the exact candidate set matches;
+changed history refuses. A failed candidate validation is never reused. Commit
+and post-commit errors receive no scalar retry. This is an allocation fallback,
+not a guarantee that every capacity failure can be recovered. The two-run cutoff
+is an optimization heuristic, not a measured break-even promise.
+
 ### Retention promotion validation rules (engine-rules.2)
 
 A resident collector can outlive other writers. Retention now validates semantic
