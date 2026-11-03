@@ -2365,7 +2365,8 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
 fn backup(config_path: &Path, destination: &Path, json_output: bool) -> Result<()> {
     let config = NqConfig::load(config_path)?;
     let store = open_configured_store(&config)?;
-    store.validate()?;
+    // The verified store primitive fully validates the source before creating
+    // the destination. Keep the artifact-custody audit distinct here.
     let source_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&store)?;
     if destination.exists() {
         bail!(

@@ -1591,7 +1591,7 @@ fn diagnostic_export_import_restart_and_same_operation_replay_preserve_exact_rec
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn doctor_and_restore_refuse_resealed_local_artifact_semantic_substitution() {
+fn doctor_backup_and_restore_refuse_resealed_local_artifact_semantic_substitution() {
     let nq = env!("CARGO_BIN_EXE_nq");
     let directory = tempfile::tempdir().expect("temporary test directory");
     let root = directory.path();
@@ -1804,6 +1804,19 @@ fn doctor_and_restore_refuse_resealed_local_artifact_semantic_substitution() {
             );
         }
 
+        let backup = root.join(format!("hostile-backup-{index}.db"));
+        let backup_diagnostic = failure(run(nq, &config, &["backup", backup.to_str().unwrap()]));
+        assert!(
+            backup_diagnostic.contains(hostile_id.as_str())
+                && backup_diagnostic.contains(mutation.expected_field),
+            "backup did not identify {} semantic substitution: {backup_diagnostic}",
+            mutation.name
+        );
+        assert!(
+            !backup.exists(),
+            "semantic refusal must precede backup destination creation"
+        );
+
         let destination = root.join(format!("hostile-restore-{index}.db"));
         let restore_diagnostic = failure(run(
             nq,
@@ -1884,7 +1897,7 @@ fn inspect_and_export_refuse_coherently_resealed_local_provider_result() {
 }
 
 #[test]
-fn doctor_and_restore_refuse_corrupt_supported_artifact_bytes() {
+fn doctor_backup_and_restore_refuse_corrupt_supported_artifact_bytes() {
     let nq = env!("CARGO_BIN_EXE_nq");
     let directory = tempfile::tempdir().expect("temporary test directory");
     let root = directory.path();
@@ -1950,6 +1963,18 @@ fn doctor_and_restore_refuse_corrupt_supported_artifact_bytes() {
         doctor_diagnostic.contains(id.as_str())
             && doctor_diagnostic.contains("failed byte verification"),
         "doctor did not identify corrupt exact bytes: {doctor_diagnostic}"
+    );
+
+    let backup = root.join("corrupt-backup-destination.db");
+    let backup_diagnostic = failure(run(nq, &config, &["backup", backup.to_str().unwrap()]));
+    assert!(
+        backup_diagnostic.contains(id.as_str())
+            && backup_diagnostic.contains("failed byte verification"),
+        "backup did not identify corrupt exact bytes: {backup_diagnostic}"
+    );
+    assert!(
+        !backup.exists(),
+        "corrupt source refusal must precede backup destination creation"
     );
 
     let destination = root.join("corrupt-restore-destination.db");
