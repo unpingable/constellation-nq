@@ -183,6 +183,13 @@ Roots that keep an island, and when they release it:
 | Latest report per instance, latest acknowledged checkpoint per checkpoint contract, current status target, newest evaluation of each evaluation lineage | while it is the latest | an ordinary candidate |
 | Reports named by a surviving full evaluation | while that evaluation survives | an ordinary candidate |
 
+Released-island detection starts from finding and saved-check evaluation
+references, deduplicates them, and applies the same closure, custody, native-origin
+and newest-lineage conditions. The outer candidate enumeration no longer scans
+unrelated retained evaluations; existing closure and lineage probes retain their
+own costs. The cost can still follow the retained root references; other expiry
+phases still follow the retained window, so this supplies no maintenance deadline.
+
 The notification-custody hold engages only for a notification whose outbox
 row is bound to a finding event (`finding_event_id`). No shipped path binds
 one today: `nq notification submit` and `deliver-local` accept intents from an

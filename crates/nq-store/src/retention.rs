@@ -578,16 +578,22 @@ fn released_islands(connection: &Connection, b: &RetentionBoundary) -> Result<i6
     }
     let live = live_finding_event_sql("f");
     let newest = lineage_newest_sql("e");
+    // Only finding/saved-check roots can release an island. UNION keeps an
+    // evaluation with several roots counted once; CROSS JOIN starts with
+    // those references rather than scanning unrelated retained evaluations.
     Ok(connection.query_row(
         &format!(
-            "SELECT COUNT(*) FROM (SELECT 1 FROM evaluation_runs e WHERE e.evaluation_sequence<=?1 AND e.source_expired=0
-               AND (EXISTS(SELECT 1 FROM finding_events f WHERE f.evaluation_id=e.evaluation_id) OR EXISTS(SELECT 1 FROM saved_check_events c WHERE c.evaluation_id=e.evaluation_id))
+            "SELECT COUNT(*) FROM (
+               SELECT evaluation_id FROM finding_events WHERE evaluation_id IS NOT NULL
+               UNION SELECT evaluation_id FROM saved_check_events WHERE evaluation_id IS NOT NULL
+             ) roots CROSS JOIN evaluation_runs e ON e.evaluation_id=roots.evaluation_id
+             WHERE e.evaluation_sequence<=?1 AND e.source_expired=0
                AND NOT EXISTS(SELECT 1 FROM finding_events f WHERE f.evaluation_id=e.evaluation_id AND {live})
                AND NOT EXISTS(SELECT 1 FROM saved_check_events c WHERE c.evaluation_id=e.evaluation_id AND c.outcome='claimed' AND NOT EXISTS(SELECT 1 FROM saved_check_events t WHERE t.evaluation_id=c.evaluation_id AND t.outcome IN ('refused','passed','failed')))
                AND NOT EXISTS(SELECT 1 FROM local_diagnostic_artifact_origins o WHERE o.evaluation_id=e.evaluation_id)
                AND NOT EXISTS(SELECT 1 FROM local_diagnostic_artifact_origins o WHERE o.run_id=e.trigger_run_id)
                AND NOT EXISTS(SELECT 1 FROM local_successor_acquisition_intents s WHERE s.run_id=e.trigger_run_id)
-               AND NOT {newest})"
+               AND NOT {newest}"
         ),
         [b.evaluation_floor],
         |r| r.get(0),
@@ -2023,6 +2029,101 @@ impl Mutation {
 mod planning_tests {
     use super::*;
     use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    #[test]
+    fn released_island_detection_depends_on_roots_not_unrelated_evaluations() {
+        fn probe(unrelated: i64, mode: &str) -> (i64, usize) {
+            let c = Connection::open_in_memory().unwrap();
+            // Production lookup keys/indexes, isolated from admission and
+            // history validation. No production records are used.
+            c.execute_batch("PRAGMA user_version=15;
+                CREATE TABLE evaluation_runs(evaluation_id TEXT PRIMARY KEY,evaluation_sequence INTEGER UNIQUE,source_expired INTEGER,trigger_run_id TEXT,detector_id TEXT,detector_version TEXT,evaluation_revision INTEGER,detail_json BLOB);
+                CREATE INDEX evaluation_runs_full_by_sequence ON evaluation_runs(evaluation_sequence) WHERE source_expired=0;
+                CREATE TABLE evaluation_watermarks(evaluation_id TEXT,instance_id TEXT,max_report_sequence INTEGER,PRIMARY KEY(evaluation_id,instance_id));
+                CREATE INDEX evaluation_watermarks_by_report ON evaluation_watermarks(instance_id,max_report_sequence);
+                CREATE TABLE finding_events(event_id TEXT PRIMARY KEY,evaluation_id TEXT,finding_id TEXT,event_revision INTEGER,event_kind TEXT,condition_state TEXT);
+                CREATE INDEX finding_events_by_evaluation ON finding_events(evaluation_id);
+                CREATE INDEX finding_events_by_finding ON finding_events(finding_id,event_revision);
+                CREATE TABLE finding_current(finding_id TEXT PRIMARY KEY,latest_event_id TEXT UNIQUE);
+                CREATE TABLE saved_check_events(evaluation_id TEXT,outcome TEXT);
+                CREATE INDEX saved_check_events_evaluation_id ON saved_check_events(evaluation_id) WHERE evaluation_id IS NOT NULL;
+                CREATE TABLE local_diagnostic_artifact_origins(evaluation_id TEXT,run_id TEXT);
+                CREATE TABLE local_successor_acquisition_intents(run_id TEXT);
+                CREATE TABLE notification_outbox(notification_id TEXT PRIMARY KEY,finding_event_id TEXT,max_attempts INTEGER);
+                CREATE TABLE notification_delivery_intents(notification_id TEXT);
+                CREATE TABLE notification_delivery_events(notification_id TEXT,outcome TEXT);
+                CREATE TABLE notification_attempts(notification_id TEXT,outcome TEXT);").unwrap();
+            let detail = br#"{"profile":"p","context":{"subject":"s","scope":{},"vantage":{}},"result":{"condition":"c"}}"#;
+            for n in 1..=unrelated {
+                c.execute("INSERT INTO evaluation_runs VALUES(?1,?2,0,NULL,'other','1',1,?3)",
+                    params![format!("unrelated-{n}"),n,detail.as_slice()]).unwrap();
+                c.execute("INSERT INTO evaluation_watermarks VALUES(?1,?2,0)",
+                    params![format!("unrelated-{n}"),format!("unrelated-instance-{n}")]).unwrap();
+            }
+            for (id,offset,revision) in [("old",1,1),("new",2,2)] {
+                c.execute("INSERT INTO evaluation_runs VALUES(?1,?2,0,'run-old','detector','1',?3,?4)",
+                    params![id,unrelated+offset,revision,detail.as_slice()]).unwrap();
+                c.execute("INSERT INTO evaluation_watermarks VALUES(?1,'instance',0)",[id]).unwrap();
+            }
+            c.execute_batch("INSERT INTO finding_events VALUES('opened','old','f',1,'opened','present'),('resolved','new','f',2,'resolved','explicitly_absent');
+                INSERT INTO finding_current VALUES('f','resolved');").unwrap();
+            match mode {
+                "none" | "saved_only" => {
+                    c.execute_batch("DELETE FROM finding_current; DELETE FROM finding_events").unwrap();
+                    if mode=="saved_only" { c.execute_batch("INSERT INTO saved_check_events VALUES('old','passed')").unwrap(); }
+                }
+                "duplicates" => {
+                    c.execute_batch("INSERT INTO saved_check_events VALUES('old','passed')").unwrap();
+                }
+                "pending" | "unknown" | "accepted" => {
+                    c.execute_batch("INSERT INTO notification_outbox VALUES('n','opened',3)").unwrap();
+                    if mode!="pending" {
+                        c.execute_batch("INSERT INTO notification_delivery_intents VALUES('n')").unwrap();
+                        c.execute("INSERT INTO notification_delivery_events VALUES('n',?1)",[mode]).unwrap();
+                    }
+                }
+                "claimed" | "completed_claim" => {
+                    c.execute_batch("INSERT INTO saved_check_events VALUES('old','claimed')").unwrap();
+                    if mode=="completed_claim" { c.execute_batch("INSERT INTO saved_check_events VALUES('old','passed')").unwrap(); }
+                }
+                "native_evaluation" => { c.execute_batch("INSERT INTO local_diagnostic_artifact_origins VALUES('old','elsewhere')").unwrap(); }
+                "native_run" => { c.execute_batch("INSERT INTO local_diagnostic_artifact_origins VALUES('elsewhere','run-old')").unwrap(); }
+                "successor" => { c.execute_batch("INSERT INTO local_successor_acquisition_intents VALUES('run-old')").unwrap(); }
+                "newest" => { c.execute_batch("DELETE FROM evaluation_watermarks WHERE evaluation_id='new'").unwrap(); }
+                "compact" => { c.execute_batch("UPDATE evaluation_runs SET source_expired=1 WHERE evaluation_id='old'").unwrap(); }
+                "two" => {
+                    for (id,offset,revision) in [("old2",3,1),("new2",4,2)] {
+                        c.execute("INSERT INTO evaluation_runs VALUES(?1,?2,0,'run-two','detector-two','1',?3,?4)",params![id,unrelated+offset,revision,detail.as_slice()]).unwrap();
+                        c.execute("INSERT INTO evaluation_watermarks VALUES(?1,'instance-two',0)",[id]).unwrap();
+                    }
+                    c.execute_batch("INSERT INTO finding_events VALUES('opened2','old2','f2',1,'opened','present'),('resolved2','new2','f2',2,'resolved','explicitly_absent'); INSERT INTO finding_current VALUES('f2','resolved2')").unwrap();
+                }
+                "closed" | "above_floor" => {}
+                _ => panic!("unexpected fixture mode"),
+            }
+            // Null references name no evaluation in either source table.
+            c.execute_batch("INSERT INTO finding_events VALUES('null-root',NULL,'null-finding',1,'resolved','explicitly_absent');
+                INSERT INTO saved_check_events VALUES(NULL,'passed')").unwrap();
+            let b = RetentionBoundary { generation:1,evaluation_floor:if mode=="above_floor" {unrelated} else {unrelated+4},..RetentionBoundary::default() };
+            let work=Arc::new(AtomicUsize::new(0));let observed=work.clone();
+            c.progress_handler(100,Some(move || {observed.fetch_add(1,Ordering::Relaxed);false}));
+            let count=released_islands(&c,&b).unwrap();
+            c.progress_handler(100,None::<fn()->bool>);
+            (count,work.load(Ordering::Relaxed))
+        }
+        let mut history_scans=Vec::new();
+        for (mode,expected) in [("none",0),("closed",1),("saved_only",1),("duplicates",1),
+            ("pending",0),("unknown",0),("accepted",1),("claimed",0),("completed_claim",1),
+            ("native_evaluation",0),("native_run",0),("successor",0),("newest",0),("compact",0),
+            ("above_floor",0),("two",2)] {
+            let (small,small_work)=probe(32,mode);let (large,large_work)=probe(4096,mode);
+            assert_eq!(small,expected,"{mode}: exact released count");
+            assert_eq!(large,expected,"{mode}: unrelated history changes no obligation");
+            println!("released mode={mode} count={large} ticks small={small_work} large={large_work}");
+            if large_work>small_work*2+8 { history_scans.push((mode,small_work,large_work)); }
+        }
+        assert!(history_scans.is_empty(),"released-root detection rescans unrelated evaluation history: {history_scans:?}");
+    }
 
     #[test]
     fn indexed_and_scalar_expiry_plans_keep_the_same_closure() {
