@@ -75,9 +75,13 @@ The packaged defaults are:
 | Private supervised-helper runtime directory | `/run/nq/helpers/` |
 | Loopback console (opt-in; off by default) | `http://127.0.0.1:8787/` when enabled |
 
-`nq --config FILE --json watcher inspect INSTANCE` verifies a current admission
-without opening the NQ database, running a helper, collecting evidence, changing
-the lock or creating directories. It reuses admission's config, profile,
+After defining the [capped maintenance wrapper](#test-and-admit-a-watcher), use
+`nq_helper_command --config FILE --json watcher inspect INSTANCE` for a compiled
+watcher. Inspection verifies a current admission without opening the NQ database,
+performing a collection exchange, changing the lock or creating directories.
+Compiled-helper loader verification still enters the admitted execution account,
+so a bare `sudo -u nq` process is not the required execution envelope.
+Inspection reuses admission's config, profile,
 protocol/corpus, capability and execution-identity checks, and refuses a lock
 replacement during inspection. Success is `nq.watcher_inspection.v1`, including
 the exact admission and binding identities and observation time. Missing,
@@ -87,8 +91,8 @@ health or fresh collection is inferred. The shared golden vector is
 
 This read is a point-in-time check, not a held lease or an authorization grant.
 Formalization consideration: existing admission verification supplies the
-binding rules; CLI tests establish that the read works with an absent database,
-does not invoke the helper, preserves lock/store bytes, and refuses missing,
+binding rules; conformance-fixture CLI tests establish that the read works with an absent database,
+does not perform a collection exchange, preserves lock/store bytes, and refuses missing,
 malformed or drifted bindings. The producer/consumer vector fixes the new read
 shape. These bounded tests suffice for the additive command; they do not prove
 future currentness, multi-writer exclusion or service recovery.
@@ -172,7 +176,7 @@ recorded build environment. A development build without `NQ_SOURCE_COMMIT`
 prints `nq 0.2.4` and `"source_commit":null`, and is not packageable.
 
 At every service start under the intact packaged unit, systemd runs the
-installed inner-manifest check from `/usr` before `config check`. Missing or
+installed inner-manifest check from `/usr` before `config check --observation-only`. Missing or
 changed packaged bytes fail startup:
 
 ```sh
@@ -187,6 +191,19 @@ the unit through the package or inner manifest when that threat is in scope.
 Restore drift by reinstalling the exact verified package, never by
 recalculating the shipped manifest in place.
 
+The explicit observation-only check validates normal configuration shape and
+compiled observation profiles, without loading the installed notification policy.
+Its JSON identifies `scope: observation`, `observation_valid: true` and
+`notification_policy_checked: false`; it does not print `valid: true` or establish
+delivery readiness. A missing or broken policy therefore does not prevent the
+packaged service from observing. The daemon still reports that problem. An absent
+policy binding leaves existing informational/attention notices available through
+configured routes; Page admission requires an installed document. An invalid
+configured policy, including a missing pinned file, refuses notification admission.
+These delivery rules are unchanged. Malformed configuration and uncompiled
+profiles still refuse. Default `config check`, `config diff` and `config apply`
+remain strict; run the owning policy checks before relying on Page delivery.
+
 ## Configure and initialize
 
 The package installs its sample outside `/etc`. Install it only when no active
@@ -196,7 +213,7 @@ configuration exists:
 sudo test ! -e /etc/nq/nq.toml
 sudo install -o root -g nq -m 0640 \
   /usr/share/doc/nq-ng/examples/nq.toml /etc/nq/nq.toml
-sudo -u nq nq --config /etc/nq/nq.toml config check
+sudo -u nq nq --config /etc/nq/nq.toml config check --observation-only
 ```
 
 Review and replace the sample nonce before admission. The sample's helper path
@@ -325,8 +342,11 @@ reaps a distinct-UID helper. The child clears every capability and enables
 `no_new_privs` before helper exec. The transient unit also mirrors the daemon's
 filesystem, home, temporary-directory, namespace, kernel, and address-family
 restrictions; keep it synchronized with `nqd.service`. Use it for commands that
-execute or runtime-verify a watcher: `watcher test/admit/rotate/rollback`,
-`collect`, and `doctor`. In particular, `doctor` and rollback trace the current
+execute or runtime-verify a watcher: `watcher inspect/test/admit/rotate/rollback`,
+`collect`, `diagnostics execute/acquire-next-local`, and `doctor`.
+`diagnostics replay-local-successor` also uses this capped wrapper: it opens the
+writable engine and may record an already committed completion, even though it
+does not collect again. In particular, compiled-watcher inspection, `doctor` and rollback trace the current
 runtime loader under the admitted watcher UID, so they are not capability-free
 inspection operations. Initialization, backup, restore, archive creation,
 upgrade and validation-watermark writes also use this wrapper so their actual

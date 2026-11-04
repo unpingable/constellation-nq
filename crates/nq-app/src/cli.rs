@@ -226,6 +226,9 @@ pub enum ConfigCommand {
     Check {
         /// Candidate path; defaults to the global configuration.
         path: Option<PathBuf>,
+        /// Check observation configuration/profiles without checking delivery policy.
+        #[arg(long)]
+        observation_only: bool,
     },
     /// Compare canonical intent without treating formatting as drift.
     Diff {
@@ -1603,13 +1606,30 @@ fn initialize(config_path: &Path, arguments: InitArgs, json_output: bool) -> Res
 
 fn config_command(active: &Path, command: ConfigCommand, json_output: bool) -> Result<()> {
     match command {
-        ConfigCommand::Check { path } => {
+        ConfigCommand::Check {
+            path,
+            observation_only,
+        } => {
             let path = path.unwrap_or_else(|| active.to_path_buf());
             let config = NqConfig::load(&path)
                 .with_context(|| format!("cannot validate {}", path.display()))?;
             validate_compiled_profiles(&config)?;
-            crate::escalation::Policy::load(&config)?.require_installed()?;
+            if !observation_only {
+                crate::escalation::Policy::load(&config)?.require_installed()?;
+            }
             let digest = semantic_digest(&config)?.to_string();
+            if observation_only {
+                return print_value(
+                    &json!({
+                        "scope": "observation",
+                        "observation_valid": true,
+                        "notification_policy_checked": false,
+                        "path": path,
+                        "config_digest": digest,
+                    }),
+                    json_output,
+                );
+            }
             print_value(
                 &json!({"valid": true, "path": path, "config_digest": digest}),
                 json_output,
