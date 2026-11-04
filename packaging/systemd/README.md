@@ -40,6 +40,20 @@ root-owned payload bytes and the manifest. This is a local drift check over the
 exact release payload, not a signature; the outer `.deb`/tarball checksum
 remains the custody anchor.
 
+The following configuration preflight uses `nq config check --observation-only`.
+It validates the ordinary configuration shape and compiled observation profiles,
+and reports `scope: observation`, `observation_valid: true` and
+`notification_policy_checked: false`. It makes no full-configuration or delivery
+validity claim. Missing or broken notification policy does not prevent observation
+startup; the daemon still reports that policy problem. With no policy binding,
+existing informational/attention notices continue through the routes table, while
+Page admission requires an installed document. An invalid configured policy,
+including a missing pinned file, refuses notification admission. These delivery
+rules are unchanged. Malformed observation configuration and uncompiled
+profiles still refuse startup. The installed manifest, capabilities and other
+service guards remain in force. Default `config check`, `config diff` and
+`config apply` continue to check notification policy strictly.
+
 Systemd creates `/run/nq` as `0751`; the API socket itself remains `0660` and
 group protected. A privileged `ExecStartPre` resets `/run/nq/helpers` to
 `0711` and `nq:nq`, matching tmpfiles. Random names cannot be listed, but an
