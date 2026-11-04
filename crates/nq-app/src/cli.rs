@@ -2365,9 +2365,6 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
 fn backup(config_path: &Path, destination: &Path, json_output: bool) -> Result<()> {
     let config = NqConfig::load(config_path)?;
     let store = open_configured_store(&config)?;
-    // The verified store primitive fully validates the source before creating
-    // the destination. Keep the artifact-custody audit distinct here.
-    let source_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&store)?;
     if destination.exists() {
         bail!(
             "backup destination already exists: {}",
@@ -2379,22 +2376,13 @@ fn backup(config_path: &Path, destination: &Path, json_output: bool) -> Result<(
     }
     // SQLite's online backup API is used by the store so WAL state is captured
     // consistently; a filesystem copy is not sufficient.
-    store_backup_if_supported(&store, destination)?;
-    // An archive preserves its source envelope. Reading it on another
-    // filesystem does not admit it as a writable deployment there.
-    let backup_store = Store::open_read_only(destination)?;
-    backup_store.validate()?;
-    let backup_artifacts = nq_core::engine::validate_diagnostic_artifact_history(&backup_store)?;
-    if backup_artifacts != source_artifacts {
-        bail!("backup did not preserve the exact diagnostic artifact custody counts");
-    }
-    let digest = digest_file(destination)?;
+    let verified = nq_core::engine::backup_store(&store, destination)?;
     print_value(
         &json!({
             "backup": destination,
-            "sha256": digest,
+            "sha256": verified.artifact.sha256,
             "verified": true,
-            "diagnostic_artifacts": diagnostic_artifact_preservation_value(&backup_artifacts),
+            "diagnostic_artifacts": diagnostic_artifact_preservation_value(&verified.diagnostic_artifacts),
         }),
         json_output,
     )
@@ -3425,8 +3413,11 @@ fn append_genesis_if_supported(store: &mut Store, digest: Option<String>) -> Res
     Ok(nq_core::engine::append_genesis(store, digest)?)
 }
 
+// Restore and upgrade verify/rebind their temporary copy after this step;
+// their final receipt must describe those resulting bytes.
 fn store_backup_if_supported(store: &Store, destination: &Path) -> Result<()> {
-    Ok(nq_core::engine::backup_store(store, destination)?)
+    nq_core::engine::backup_store(store, destination)?;
+    Ok(())
 }
 
 fn validate_v3_upgrade_source_semantics(path: &Path) -> Result<()> {

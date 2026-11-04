@@ -1249,6 +1249,18 @@ sudo systemctl start nqd.service
 The destination must not exist. Copy a retained backup off the host together
 with its reported digest and protect it like the evidence database.
 
+Backup runs exhaustive structural and typed validation on the source and the
+standalone copy. The core and CLI reuse the same verified copy and custody
+summary; a validation watermark never skips the copy's full structural check.
+The source operation guard ends after SQLite finishes copying, while the
+destination guard remains held through verification and the final digest.
+Concurrent source writes can still make the separately audited custody counts
+differ; backup refuses that mismatch rather than claiming an atomic audit of
+source and copy. A returned structural, typed or custody-verification error
+removes the copy just created. Process loss can leave an unverified partial
+copy, which must be reconciled separately. These changes establish no general
+backup latency bound.
+
 A file-level copy, snapshot, or digest of `nq.db` alone is not the store:
 connections do not checkpoint on close, so the newest commits can reside only
 in `nq.db-wal` (after a refused stop checkpoint, or after any `nq` CLI write).

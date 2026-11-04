@@ -8919,19 +8919,35 @@ pub fn record_component_status(
     Ok(())
 }
 
-/// Create a consistent `SQLite` backup through the storage boundary.
+/// A structurally and semantically verified backup and its exact artifact custody.
+#[derive(Debug)]
+pub struct VerifiedBackup {
+    /// The standalone copy's path, size and digest, computed after verification.
+    pub artifact: nq_store::BackupArtifact,
+    /// Exhaustively reopened custody, without fabricating unavailable bytes.
+    pub diagnostic_artifacts: DiagnosticArtifactHistoryVerification,
+}
+
+/// Create and exhaustively verify a consistent `SQLite` backup through the storage boundary.
 ///
 /// # Errors
 ///
 /// Returns when the source, backup, or verification step fails.
-pub fn backup_store(store: &Store, destination: &Path) -> Result<(), EngineError> {
-    validate_semantic_history(store)?;
-    let _artifact = store.backup_verified(destination)?;
-    // A backup preserves the source envelope; only explicit restore admits
-    // writable operation on a different filesystem.
-    let reopened = Store::open_read_only(destination)?;
-    validate_semantic_history(&reopened)?;
-    Ok(())
+pub fn backup_store(store: &Store, destination: &Path) -> Result<VerifiedBackup, EngineError> {
+    let source_artifacts = validate_semantic_history(store)?;
+    let (artifact, diagnostic_artifacts) = store.backup_verified_with(destination, |copy| {
+        let copied_artifacts = validate_semantic_history(copy)?;
+        if copied_artifacts != source_artifacts {
+            return Err(EngineError::Invariant(
+                "backup did not preserve the exact diagnostic artifact custody counts".into(),
+            ));
+        }
+        Ok(copied_artifacts)
+    })?;
+    Ok(VerifiedBackup {
+        artifact,
+        diagnostic_artifacts,
+    })
 }
 
 /// Identity of the semantic validation rules above the store: this engine
@@ -24046,6 +24062,267 @@ sys.stdout.write("\n")
             ),
             &format!("{} -> {} retained acquisitions", small + 1, total + 2),
         );
+    }
+
+    /// Measure the real backup validation stack over admitted history, including
+    /// unrelated run-level refusals. Run explicitly on disposable compute with
+    /// a new, absolute `NQ_BACKUP_MEASURE_DIR` and optional increasing
+    /// `NQ_BACKUP_SCALE_SIZES` (default `64,256`). The fixture and backups remain
+    /// in that directory for inspection. SQL progress callbacks add overhead:
+    /// elapsed times here are diagnostic, not a production latency benchmark.
+    #[test]
+    #[ignore = "builds and retains real acquisition history and verified backups"]
+    #[allow(clippy::too_many_lines)]
+    fn backup_validation_scaling_measurement() {
+        fn phase<T>(
+            pairs: usize,
+            name: &str,
+            store: Option<&Store>,
+            operation: impl FnOnce() -> T,
+        ) -> T {
+            eprintln!("BACKUP_SCALE begin pairs={pairs} phase={name}");
+            nq_store::start_sql_work_count();
+            if let Some(store) = store {
+                store.count_sql_work_on_this_handle();
+            }
+            let started = Instant::now();
+            let result = operation();
+            let elapsed = started.elapsed();
+            let work = nq_store::stop_sql_work_count().expect("SQL counting enabled");
+            eprintln!(
+                "BACKUP_SCALE end pairs={pairs} phase={name} sql_work={work} elapsed_s={:.6}",
+                elapsed.as_secs_f64()
+            );
+            result
+        }
+
+        fn geometry(database: &Path) -> Value {
+            let connection = rusqlite::Connection::open_with_flags(
+                database,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("geometry connection");
+            let mut geometry = serde_json::Map::new();
+            for pragma in ["page_count", "freelist_count", "page_size"] {
+                let value: i64 = connection
+                    .query_row(&format!("PRAGMA {pragma}"), [], |row| row.get(0))
+                    .expect("database geometry");
+                geometry.insert(pragma.to_owned(), json!(value));
+            }
+            for table in [
+                "evaluation_runs",
+                "watcher_runs",
+                "provider_intake_attempts",
+                "diagnostic_artifact_commitments",
+                "refusals",
+                "finding_events",
+            ] {
+                let count: i64 = connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .expect("history cardinality");
+                geometry.insert(table.to_owned(), json!(count));
+            }
+            let null_refusals: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM refusals WHERE evaluation_id IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("run-level refusal count");
+            geometry.insert(
+                "refusals_without_evaluation".to_owned(),
+                json!(null_refusals),
+            );
+            for (label, path) in [
+                ("database_bytes", database.to_path_buf()),
+                (
+                    "wal_bytes",
+                    PathBuf::from(format!("{}-wal", database.display())),
+                ),
+                (
+                    "shm_bytes",
+                    PathBuf::from(format!("{}-shm", database.display())),
+                ),
+            ] {
+                geometry.insert(
+                    label.to_owned(),
+                    json!(fs::metadata(path).map_or(0, |metadata| metadata.len())),
+                );
+            }
+            Value::Object(geometry)
+        }
+
+        let directory = PathBuf::from(
+            std::env::var_os("NQ_BACKUP_MEASURE_DIR")
+                .expect("set NQ_BACKUP_MEASURE_DIR to a new occurrence-owned directory"),
+        );
+        assert!(
+            directory.is_absolute(),
+            "measurement directory must be absolute"
+        );
+        fs::create_dir(&directory).expect("measurement directory must not already exist");
+        let sizes: Vec<usize> = std::env::var("NQ_BACKUP_SCALE_SIZES")
+            .unwrap_or_else(|_| "64,256".to_owned())
+            .split(',')
+            .map(|value| value.trim().parse().expect("positive target pair count"))
+            .collect();
+        assert!(!sizes.is_empty() && sizes[0] > 0);
+        assert!(sizes.windows(2).all(|pair| pair[0] < pair[1]));
+        let (mut engine, watcher, mode) = admitted_host_diagnostic_fixture(
+            &directory,
+            "backup-scaling-genesis",
+            b"watermark-evaluator",
+        )
+        .expect("real helper admission is required, not a skipped measurement");
+        engine
+            .diagnostic_execute(&watcher)
+            .expect("initial diagnostic");
+        let config = engine.config.clone();
+        drop(engine);
+        let mut built = 0;
+        for pairs in sizes {
+            eprintln!("BACKUP_SCALE begin pairs={pairs} phase=fixture_growth from={built}");
+            let started = Instant::now();
+            let mut engine = reopen_with_test_identity(&config).expect("growth engine");
+            while built < pairs {
+                if built % 32 == 31 {
+                    drop(engine);
+                    engine = reopen_with_test_identity(&config).expect("reopened growth engine");
+                }
+                fs::write(&mode, "helper_refusal\n").expect("ordinary helper refusal mode");
+                let refusal = engine
+                    .diagnostic_acquire_successor_local(
+                        &watcher,
+                        &format!("backup-scale-refusal-{built}"),
+                    )
+                    .expect("retained refusal successor");
+                let SupportedDiagnosticExecution::V2(refusal) = refusal else {
+                    panic!("new diagnostic uses v2");
+                };
+                assert_eq!(refusal.outcome.derivation, DiagnosticDerivationV1::Refused);
+                fs::write(&mode, "complete\n").expect("ordinary complete mode");
+                engine
+                    .diagnostic_acquire_successor_local(&watcher, &format!("backup-scale-{built}"))
+                    .expect("real complete successor");
+                built += 1;
+            }
+            drop(engine);
+            eprintln!(
+                "BACKUP_SCALE end pairs={pairs} phase=fixture_growth elapsed_s={:.6}",
+                started.elapsed().as_secs_f64()
+            );
+            phase(pairs, "certify_watermark", None, || {
+                full_validation_and_watermark(&config)
+            });
+            let before = geometry(&config.database_path);
+            eprintln!("BACKUP_SCALE geometry pairs={pairs} source={before}");
+            assert!(
+                before["refusals_without_evaluation"]
+                    .as_u64()
+                    .expect("count")
+                    >= pairs as u64
+            );
+
+            let source = phase(pairs, "source_open", None, || {
+                Store::open_read_only(&config.database_path).expect("source read-only open")
+            });
+            eprintln!(
+                "BACKUP_SCALE source_open_validation pairs={pairs} {:?}",
+                source.open_validation()
+            );
+            phase(pairs, "source_full_structural", Some(&source), || {
+                source.validate().expect("source full validation")
+            });
+            phase(pairs, "source_semantic_planes", Some(&source), || {
+                validate_semantic_planes_in_full(&source).expect("source semantic planes")
+            });
+            phase(pairs, "source_provider_intake", Some(&source), || {
+                validate_provider_intake_history(&source).expect("source provider semantics")
+            });
+            let artifacts = phase(pairs, "source_artifact_audit", Some(&source), || {
+                validate_diagnostic_artifact_history(&source).expect("source artifact custody")
+            });
+            let typed = phase(pairs, "source_full_typed", Some(&source), || {
+                validate_semantic_history(&source).expect("source full typed history")
+            });
+            assert_eq!(typed, artifacts);
+
+            let destination = directory.join(format!("primitive-{pairs}.db"));
+            let backup = phase(pairs, "primitive_backup", Some(&source), || {
+                source
+                    .backup_verified(&destination)
+                    .expect("verified primitive backup")
+            });
+            assert_eq!(backup.path, destination);
+            assert_eq!(
+                backup.size_bytes,
+                fs::metadata(&destination).expect("backup metadata").len()
+            );
+            let reopened = phase(pairs, "destination_open", None, || {
+                Store::open_read_only(&destination).expect("destination read-only open")
+            });
+            eprintln!(
+                "BACKUP_SCALE destination_open_validation pairs={pairs} {:?}",
+                reopened.open_validation()
+            );
+            phase(
+                pairs,
+                "destination_full_structural",
+                Some(&reopened),
+                || {
+                    reopened
+                        .validate()
+                        .expect("destination explicit full validation")
+                },
+            );
+            let destination_typed = phase(pairs, "destination_full_typed", Some(&reopened), || {
+                validate_semantic_history(&reopened).expect("destination full typed history")
+            });
+            let destination_artifacts =
+                phase(pairs, "destination_artifact_audit", Some(&reopened), || {
+                    validate_diagnostic_artifact_history(&reopened)
+                        .expect("destination artifact custody")
+                });
+            assert_eq!(typed, destination_typed);
+            assert_eq!(artifacts, destination_artifacts);
+            let copied_geometry = geometry(&destination);
+            for table in [
+                "evaluation_runs",
+                "watcher_runs",
+                "provider_intake_attempts",
+                "diagnostic_artifact_commitments",
+                "refusals",
+                "finding_events",
+            ] {
+                assert_eq!(
+                    before[table], copied_geometry[table],
+                    "backup preserves {table}"
+                );
+            }
+            eprintln!("BACKUP_SCALE geometry pairs={pairs} destination={copied_geometry}");
+            drop(reopened);
+            let core_destination = directory.join(format!("core-{pairs}.db"));
+            phase(pairs, "core_backup", Some(&source), || {
+                backup_store(&source, &core_destination).expect("actual core backup stack")
+            });
+            // Read-only measurements and backup must not grow source history.
+            let after = geometry(&config.database_path);
+            for table in [
+                "evaluation_runs",
+                "watcher_runs",
+                "provider_intake_attempts",
+                "diagnostic_artifact_commitments",
+                "refusals",
+                "finding_events",
+            ] {
+                assert_eq!(
+                    before[table], after[table],
+                    "measurement preserves source {table}"
+                );
+            }
+        }
     }
 
     /// One collection on `engine`, returning its `SQLite` work.

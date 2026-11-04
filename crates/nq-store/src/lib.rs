@@ -2211,7 +2211,10 @@ impl Store {
     /// SQLite to rewrite main database bytes. WAL reads may rebuild SHM after
     /// bootstrap allocation admission.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
-        let path = path.as_ref();
+        Self::open_read_only_inner(path.as_ref(), false)
+    }
+
+    fn open_read_only_inner(path: &Path, require_full: bool) -> Result<Self, StoreError> {
         if !path.is_file() || std::fs::metadata(path)?.len() == 0 {
             return Err(StoreError::NotInitialized(path.to_path_buf()));
         }
@@ -2229,7 +2232,7 @@ impl Store {
             validation: ValidationState::default(),
             capacity: None,
         };
-        store.validate_on_open(false)?;
+        store.validate_on_open(require_full)?;
         Ok(store)
     }
 
@@ -6107,50 +6110,89 @@ impl Store {
         &self,
         destination: impl AsRef<Path>,
     ) -> Result<BackupArtifact, StoreError> {
-        self.validate()?;
+        let (artifact, ()) =
+            self.backup_verified_with(destination, |_| Ok::<(), StoreError>(()))?;
+        Ok(artifact)
+    }
+
+    /// Fully validate both source and copy, and apply additional read-only
+    /// verification to the same fully validated destination handle.
+    ///
+    /// The destination guard remains held through verification and hashing.
+    /// The source guard is released when SQLite finishes its consistent copy,
+    /// so additional verification does not block source writers. Any returned
+    /// verification error removes the newly created copy and its sidecars.
+    /// This does not promise cleanup after a panic or process loss, nor an
+    /// atomic snapshot spanning a caller's earlier source audit and the copy.
+    pub fn backup_verified_with<T, E>(
+        &self,
+        destination: impl AsRef<Path>,
+        verify: impl FnOnce(&Self) -> Result<T, E>,
+    ) -> Result<(BackupArtifact, T), E>
+    where
+        E: From<StoreError>,
+    {
+        self.validate().map_err(E::from)?;
         let destination = destination.as_ref();
-        let _source_guard = self
+        let source_guard = self
             .path
             .as_deref()
             .map(capacity::operation_guard)
-            .transpose()?;
+            .transpose()
+            .map_err(E::from)?;
         let (_destination_guard, destination_envelope) =
-            capacity::admit_backup_from_connection(&self.connection, destination)?;
+            capacity::admit_backup_from_connection(&self.connection, destination)
+                .map_err(E::from)?;
         if destination.exists() {
-            return Err(StoreError::Invariant(format!(
+            return Err(E::from(StoreError::Invariant(format!(
                 "backup destination already exists: {}",
                 destination.display()
-            )));
+            ))));
         }
         drop(
             std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(destination)?,
+                .open(destination)
+                .map_err(StoreError::from)
+                .map_err(E::from)?,
         );
-        let result = (|| {
-            let mut target =
-                Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-            capacity::configure_backup_target(&target, &destination_envelope)?;
-            {
+        let result: Result<(BackupArtifact, T), E> = (|| {
+            let copied = (|| -> Result<(), StoreError> {
+                let mut target =
+                    Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+                capacity::configure_backup_target(&target, &destination_envelope)?;
                 let backup = rusqlite::backup::Backup::new(&self.connection, &mut target)?;
                 backup.run_to_completion(64, std::time::Duration::from_millis(10), None)?;
-            }
-            drop(target);
+                Ok(())
+            })();
+            copied.map_err(E::from)?;
+            drop(source_guard);
             #[cfg(test)]
             if BACKUP_VERIFY_FAULT_FOR_TEST.with(|armed| armed.replace(false)) {
-                return Err(StoreError::Integrity("injected backup verification fault".into()));
+                return Err(E::from(StoreError::Integrity(
+                    "injected backup verification fault".into(),
+                )));
             }
 
-            // Opening through Store validates identity, schema, integrity, and public views.
-            drop(Self::open_read_only(destination)?);
-            let size_bytes = std::fs::metadata(destination)?.len();
-            let sha256 = sha256_file(destination)?;
-            Ok(BackupArtifact {
-                path: destination.to_path_buf(),
-                sha256,
-                size_bytes,
-            })
+            // Force one exhaustive pass even if a sidecar already exists.
+            // The normal RO opener's identity and foreign-sidecar checks apply.
+            let reopened = Self::open_read_only_inner(destination, true).map_err(E::from)?;
+            let verification = verify(&reopened)?;
+            drop(reopened);
+            let size_bytes = std::fs::metadata(destination)
+                .map_err(StoreError::from)
+                .map_err(E::from)?
+                .len();
+            let sha256 = sha256_file(destination).map_err(E::from)?;
+            Ok((
+                BackupArtifact {
+                    path: destination.to_path_buf(),
+                    sha256,
+                    size_bytes,
+                },
+                verification,
+            ))
         })();
         if result.is_err() {
             remove_database_artifact(destination);
