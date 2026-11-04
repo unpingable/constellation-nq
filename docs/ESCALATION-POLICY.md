@@ -99,11 +99,17 @@ uses the resulting in-memory snapshot. Symlinks, FIFOs and devices refuse.
 The pin binds content, not its author. Protecting the operator configuration
 and reviewing its changes remain the authorization boundary.
 
-NQ enforces policy in `config check/diff/apply`, effective-policy inspection,
+NQ enforces policy in default `config check/diff/apply`, effective-policy inspection,
 and each notification admission (submit, resubmit and deliver-local), before
 delivery effects. A configured missing, malformed, oversized, mismatched or
 unsupported document refuses those operations. It never falls back on error:
 that could restore permissions intentionally removed by a newer policy.
+The explicit `config check --observation-only` service preflight checks ordinary
+configuration shape and compiled observation profiles without checking installed
+notification policy. Its JSON marks that scope and
+`notification_policy_checked: false`, with no blanket `valid: true` claim.
+It grants no delivery authority; strict default checks and notification boundaries
+are unchanged.
 Daemon startup (including `--once`) validates and logs the result without
 stopping observation. Doctor reports an `escalation_policy` finding without
 failing solely because of that finding; its `healthy` result describes its

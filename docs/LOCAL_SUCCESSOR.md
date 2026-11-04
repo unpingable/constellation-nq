@@ -10,10 +10,16 @@ the existing local helper path; it does not establish hardware or remote-host
 provenance. The ordinary `diagnostics execute` entry point remains the initial
 diagnostic path and refuses an incompatible prior-history shape.
 
+Define the canonical capped `nq_helper_command` from
+[Operations](OPERATIONS.md#test-and-admit-a-watcher) first, with the selected
+collector's exact paths and limits. Acquisition executes the admitted helper;
+replay opens the writable engine even when returning an existing artifact, so
+it must retain that store envelope. Neither command is a bare login-shell read.
+
 ```sh
-nq --config /path/to/nq.toml diagnostics acquire-next-local host-local \
+nq_helper_command --config /path/to/nq.toml diagnostics acquire-next-local host-local \
   --acquisition-id local-check-002 > observation.json
-nq --config /path/to/nq.toml diagnostics replay-local-successor host-local \
+nq_helper_command --config /path/to/nq.toml diagnostics replay-local-successor host-local \
   --acquisition-id local-check-002 > replay.json
 cmp observation.json replay.json
 artifact=$(jq -er .artifact_id observation.json)

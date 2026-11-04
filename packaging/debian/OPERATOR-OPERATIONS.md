@@ -11,6 +11,20 @@ Use the candidate's documented enrollment; do not run two collectors against one
 store. `nqd.service` is disabled until configured and explicitly enabled. The
 Workbench local exercise uses its separately enrolled `nqd-ops.service` instead.
 
+The intact packaged service first verifies `/usr/share/nq/MANIFEST.sha256`,
+then runs `nq config check --observation-only`. That explicit scope validates
+configuration shape and compiled observation profiles without checking installed
+notification policy. Its JSON says `scope: observation`, `observation_valid: true`
+and `notification_policy_checked: false`, with no full `valid: true` claim.
+Missing or broken delivery policy does not stop observation; the daemon reports
+it. With no policy binding, existing informational/attention notices still use
+configured routes, while Page admission requires an installed document. An invalid
+configured policy, including a missing pinned file, refuses notification admission.
+These delivery rules are unchanged. Malformed configuration and
+uncompiled profiles still refuse startup. Default `config check`, `config diff`
+and `config apply` remain strict. This option does not grant delivery authority
+or replace enrollment, the manifest check or any other service guard.
+
 Inspect `nq --build-info`, service status and journal, then the source-defined
 `nq --help` commands for diagnosis. Successful transport or a running service
 does not establish current same-boot evidence. Missing/stale/refused evidence
@@ -105,7 +119,7 @@ With the collector stopped and the owner-created configuration in place,
 initialize a **new** store through that wrapper:
 
 ```sh
-sudo -u nq /usr/bin/nq --config /etc/nq/nq.toml config check
+sudo -u nq /usr/bin/nq --config /etc/nq/nq.toml config check --observation-only
 nq_store_command --config /etc/nq/nq.toml init
 ```
 
