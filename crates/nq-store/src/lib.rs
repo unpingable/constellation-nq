@@ -1957,12 +1957,13 @@ impl Default for ValidationState {
     }
 }
 
-/// A handle's schema contract. Legacy-v12 handles exist solely as the return
-/// value of the historical v5-to-v12 upgrade endpoint; they cannot perform
-/// ordinary writes or be created by an ordinary open.
+/// A handle's schema contract. Legacy handles exist solely in the explicit
+/// upgrade path; they cannot perform ordinary writes or be created by an
+/// ordinary open.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StoreSchemaMode {
     Current,
+    LegacyUpgradeV3,
     LegacyUpgradeV12,
     LegacyUpgradeV13,
     LegacyUpgradeV14,
@@ -2295,7 +2296,7 @@ impl Store {
         let store = Self {
             connection,
             path: Some(path.to_path_buf()),
-            schema_mode: StoreSchemaMode::Current,
+            schema_mode: StoreSchemaMode::LegacyUpgradeV3,
             validation: ValidationState::default(),
             capacity: None,
         };
@@ -2686,6 +2687,9 @@ impl Store {
     }
 
     fn validate_scoped(&self, scope: Scope<'_>) -> Result<(), StoreError> {
+        if self.schema_mode == StoreSchemaMode::LegacyUpgradeV3 {
+            return self.validate_v3_upgrade_source();
+        }
         if self.schema_mode == StoreSchemaMode::LegacyUpgradeV13 {
             return validate_v13_upgrade_source_connection(&self.connection);
         }
@@ -5212,7 +5216,13 @@ impl Store {
     fn require_current_schema(&self) -> Result<(), StoreError> {
         if self.schema_mode != StoreSchemaMode::Current {
             return Err(StoreError::SchemaVersionMismatch {
-                found: 12,
+                found: match self.schema_mode {
+                    StoreSchemaMode::LegacyUpgradeV3 => 3,
+                    StoreSchemaMode::LegacyUpgradeV12 => 12,
+                    StoreSchemaMode::LegacyUpgradeV13 => 13,
+                    StoreSchemaMode::LegacyUpgradeV14 => 14,
+                    StoreSchemaMode::Current => unreachable!(),
+                },
                 supported: SCHEMA_VERSION,
             });
         }
@@ -7420,7 +7430,12 @@ impl Store {
         let snapshot = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
             .map_err(StoreError::from)
             .map_err(E::from)?;
-        let bounds = HistoryFrontier::capture_bounds(&snapshot).map_err(E::from)?;
+        let bounds = if self.schema_mode == StoreSchemaMode::LegacyUpgradeV3 {
+            HistoryFrontier::capture_v3_upgrade_bounds(&snapshot)
+        } else {
+            HistoryFrontier::capture_bounds(&snapshot)
+        }
+        .map_err(E::from)?;
         let value = read(self, &bounds)?;
         drop(snapshot);
         Ok(value)
@@ -20894,6 +20909,43 @@ mod tests {
                 .reports
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn exact_v3_upgrade_read_snapshot_uses_legacy_bounds_without_skipping_current_tables() {
+        let directory = tempdir().expect("temporary directory");
+        let source = directory.path().join("schema-v3.db");
+        write_empty_exact_v3(&source);
+        let connection = Connection::open(&source).expect("open exact v3 source");
+        connection
+            .execute(
+                "INSERT INTO retention_tombstones (
+                    tombstone_id, target_kind, target_id, target_digest,
+                    reason_code, detail_json, created_at
+                 ) VALUES ('snapshot-fact', 'fixture', 'retained', NULL,
+                           'fixture', CAST('{}' AS BLOB), ?1)",
+                [TIME],
+            )
+            .expect("append a valid v3 history fact");
+        drop(connection);
+        let before = std::fs::read(&source).expect("source bytes");
+        let legacy = Store::open_v3_upgrade_source_read_only(&source).expect("exact v3 opens");
+        let bounds = legacy
+            .with_read_snapshot(|_, bounds| Ok::<_, StoreError>(bounds.clone()))
+            .expect("the upgrade's status snapshot can bound exact v3 history");
+        assert_eq!(bounds.evaluation_sequence, 0);
+        assert_eq!(bounds.tables["retention_tombstones"].max_rowid, Some(1));
+        assert_eq!(std::fs::read(&source).unwrap(), before);
+
+        let current = Store::initialize_in_memory().expect("current store");
+        current
+            .connection
+            .execute("DROP TABLE diagnostic_artifact_commitments", [])
+            .expect("remove a mandatory current table");
+        let error = current
+            .with_read_snapshot(|_, _| Ok::<_, StoreError>(()))
+            .expect_err("current snapshots must not silently skip a missing table");
+        assert!(error.to_string().contains("diagnostic_artifact_commitments"));
     }
 
     #[test]
