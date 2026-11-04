@@ -22,7 +22,7 @@ fn backup_work_is_bounded_by_source_and_destination_verification() {
     let mut source = Store::initialize(&path).expect("initialize real SQLite store");
     append_genesis(&mut source, None).expect("record genuine store genesis");
 
-    let (_, structural) = sqlite_work(&source, || source.validate().expect("full store laws"));
+    let ((), structural) = sqlite_work(&source, || source.validate().expect("full store laws"));
     let (_, semantic) = sqlite_work(&source, || {
         validate_semantic_history(&source).expect("full typed history")
     });
