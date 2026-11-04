@@ -297,6 +297,47 @@ impl HistoryFrontier {
     /// Read the current append position of every history table (each an
     /// O(log n) rowid lookup), without counts or chains.
     pub(crate) fn capture_bounds(connection: &Connection) -> Result<Self, StoreError> {
+        Self::capture_table_bounds(connection, HISTORY_TABLES)
+    }
+
+    /// Bounds for a handle opened through the exact qualified-v3 upgrade
+    /// validator. Later custody planes do not exist in that schema. Ordinary
+    /// current handles still require every table in `HISTORY_TABLES`.
+    pub(crate) fn capture_v3_upgrade_bounds(connection: &Connection) -> Result<Self, StoreError> {
+        Self::capture_table_bounds(
+            connection,
+            &[
+                "admission_records",
+                "admitted_reports",
+                "binding_materialization_events",
+                "evaluation_runs",
+                "evaluation_watermarks",
+                "finding_events",
+                "finding_evidence",
+                "genesis_records",
+                "instance_binding_events",
+                "legacy_references",
+                "notification_attempts",
+                "notification_outbox",
+                "observation_coverage",
+                "observations",
+                "profile_descriptor_snapshots",
+                "raw_submissions",
+                "refusals",
+                "report_coverage",
+                "report_errors",
+                "retention_tombstones",
+                "status_events",
+                "upgrade_receipts",
+                "watcher_runs",
+            ],
+        )
+    }
+
+    fn capture_table_bounds(
+        connection: &Connection,
+        history_tables: &[&str],
+    ) -> Result<Self, StoreError> {
         // One snapshot for every table: a frontier bounds what later rows can
         // reference only if no commit lands between its reads.
         let _snapshot = if connection.is_autocommit() {
@@ -305,7 +346,7 @@ impl HistoryFrontier {
             None
         };
         let mut tables = BTreeMap::new();
-        for table in HISTORY_TABLES {
+        for table in history_tables {
             let max_rowid: Option<i64> =
                 connection.query_row(&format!("SELECT MAX(rowid) FROM {table}"), [], |row| {
                     row.get(0)

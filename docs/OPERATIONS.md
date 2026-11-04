@@ -246,6 +246,10 @@ schema v4, and the exact schema-v3 artifact shipped in the qualified `v0.1.0`
 release. `admin upgrade` validates the complete source schema and stored
 semantics, creates and reopens a digest-addressed backup for each transition,
 and applies v3-to-v4 and then v4-to-v5 transactionally.
+The v3 pre-upgrade check reads typed status history in one snapshot of that
+exact v3 schema, before any backup or source write. It does not require custody
+tables introduced by later migrations; current-schema snapshots still require
+all current tables.
 Historical v3 watcher runs retain explicit `provider_intake_not_recorded`
 gaps; the migration manufactures neither provider identities, raw captures,
 durable acknowledgments, nor diagnostic artifacts that the source never
