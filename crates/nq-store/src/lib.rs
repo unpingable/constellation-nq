@@ -11755,26 +11755,36 @@ fn run_evaluations_sql(columns: &str, bound: Option<i64>) -> String {
     )
 }
 
-/// For full validation, the rowids of every evaluation by run, in append
-/// order, from one scan (`trigger_run_id` is unindexed in schema 13, so per-run
-/// lookups would each scan the table). `None` for a scoped validation.
-fn run_evaluations_in_full(
+/// Evaluation rowids by run, in evaluation order, from one scan of the
+/// validation scope. New runs can only be named by evaluations after the
+/// captured frontier. Covered runs selected by a new child still need their
+/// complete evaluation set and use the original per-run lookup below.
+fn run_evaluations_for_scope(
     connection: &Connection,
     scope: Scope<'_>,
-) -> Result<Option<std::collections::HashMap<String, Vec<i64>>>, StoreError> {
-    if !scope.is_full() {
-        return Ok(None);
-    }
+) -> Result<std::collections::HashMap<String, Vec<i64>>, StoreError> {
     let mut by_run: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
-    let mut statement = connection.prepare(
-        "SELECT trigger_run_id, rowid FROM evaluation_runs
-         WHERE trigger_run_id IS NOT NULL ORDER BY evaluation_sequence",
-    )?;
+    let (hint, range) = scope.frontier().map_or_else(
+        || ("", String::new()),
+        |frontier| {
+            (
+                "NOT INDEXED",
+                format!(
+                    " AND rowid > {}",
+                    frontier.max_rowid("evaluation_runs").unwrap_or(i64::MIN)
+                ),
+            )
+        },
+    );
+    let mut statement = connection.prepare(&format!(
+        "SELECT trigger_run_id, rowid FROM evaluation_runs {hint}
+         WHERE trigger_run_id IS NOT NULL{range} ORDER BY evaluation_sequence",
+    ))?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
         by_run.entry(row.get(0)?).or_default().push(row.get(1)?);
     }
-    Ok(Some(by_run))
+    Ok(by_run)
 }
 
 /// Read the given evaluation rows, in the given order.
@@ -11821,15 +11831,18 @@ fn validate_admitted_evaluation_closures(
             .collect::<Result<Vec<_>, _>>()?
     };
 
-    let mut covered = run_evaluations_in_full(connection, scope)?;
+    let mut covered = run_evaluations_for_scope(connection, scope)?;
     for (run_id, expected_detector_identity, expected_evaluator_artifact, run_rowid) in
         admitted_runs
     {
-        let evaluations = if let Some(rowids) = covered.as_mut().map(|map| map.remove(&run_id)) {
+        let evaluations = if scope.is_full()
+            || run_evaluation_bound(scope.frontier(), run_rowid).is_some()
+        {
+            let rowids = covered.remove(&run_id).unwrap_or_default();
             evaluations_by_rowid(
                 connection,
                 "evaluation_id, detector_digest, evaluator_artifact_digest",
-                &rowids.unwrap_or_default(),
+                &rowids,
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -11918,15 +11931,18 @@ fn validate_admitted_run_result_documents(
             })?
             .collect::<Result<Vec<_>, _>>()?
     };
-    let mut covered = run_evaluations_in_full(connection, scope)?;
+    let mut covered = run_evaluations_for_scope(connection, scope)?;
     for (run_id, instance_id, report_id, report_status, semantic_digest, detail, run_rowid) in
         admitted_results
     {
-        let evaluations = if let Some(rowids) = covered.as_mut().map(|map| map.remove(&run_id)) {
+        let evaluations = if scope.is_full()
+            || run_evaluation_bound(scope.frontier(), run_rowid).is_some()
+        {
+            let rowids = covered.remove(&run_id).unwrap_or_default();
             evaluations_by_rowid(
                 connection,
                 "detail_json",
-                &rowids.unwrap_or_default(),
+                &rowids,
                 |row| row.get::<_, Vec<u8>>(0),
             )?
         } else {
@@ -17533,6 +17549,70 @@ mod tests {
         Ok(receipt)
     }
 
+    #[test]
+    fn scoped_admitted_runs_do_not_rescan_the_uncovered_evaluation_tail() {
+        let mut measured = Vec::new();
+        for rounds in [12usize, 96] {
+            let (mut store, profile_digest) = configured_store();
+            let frontier = HistoryFrontier::capture_bounds(&store.connection)
+                .expect("capture the certified prefix bounds");
+            // Real accepted store fixtures: independent evaluations coexist
+            // with admitted runs whose declared detector suite is empty.
+            // Each run still has to prove its exact (empty) evaluation set.
+            seed_association_history(&mut store, &profile_digest, rounds);
+            for index in 0..rounds {
+                let suffix = format!("uncovered-tail-{index}");
+                commit_admitted(
+                    &mut store,
+                    "fixture-a",
+                    &suffix,
+                    &profile_digest,
+                    document(json!({"tail": index})),
+                    format!("tail {index}\n").into_bytes(),
+                );
+            }
+            let before = logical_state_digest(&store.connection, b"scoped-tail-test")
+                .expect("original logical bytes");
+            let scope = Scope::after(&frontier);
+            let runs = run_result_scope(scope);
+            start_sql_work_count();
+            history_scope::install_sql_work_counter(&store.connection);
+            validate_admitted_evaluation_closures(&store.connection, scope, &runs)
+                .expect("exact admitted detector and evaluator closure");
+            let closures = stop_sql_work_count().expect("count closure SQL work");
+            start_sql_work_count();
+            validate_admitted_run_result_documents(&store.connection, scope, &runs)
+                .expect("exact canonical admitted result documents");
+            let documents = stop_sql_work_count().expect("count document SQL work");
+            assert_eq!(
+                before,
+                logical_state_digest(&store.connection, b"scoped-tail-test")
+                    .expect("unchanged logical bytes"),
+                "read validation must preserve every stored byte"
+            );
+            eprintln!(
+                "{rounds} uncovered rounds: closures={closures}, documents={documents} SQL operations"
+            );
+            measured.push((closures, documents));
+        }
+        let [(small_closures, small_documents), (large_closures, large_documents)] =
+            measured.as_slice()
+        else {
+            unreachable!("two tail sizes")
+        };
+        assert!(*small_closures > 0 && *small_documents > 0);
+        // Eight times as many runs and evaluations permits sorting/constant
+        // work, but not a fresh tail scan for every admitted run.
+        assert!(
+            *large_closures <= small_closures * 16,
+            "admitted closure work rescans the uncovered tail per run: {measured:?}"
+        );
+        assert!(
+            *large_documents <= small_documents * 16,
+            "canonical result work rescans the uncovered tail per run: {measured:?}"
+        );
+    }
+
     fn commit_diagnostic_artifact_fixture(
         store: &mut Store,
         suffix: &str,
@@ -18457,6 +18537,22 @@ mod tests {
             })
             .expect("ordered admitted evaluation sequence commits");
         store.validate().expect("original sequence validates");
+        let frontier = HistoryFrontier::capture_bounds(&store.connection)
+            .expect("capture the already validated run and evaluations");
+        // An affected covered run still requires its complete original
+        // evaluation set, even when the uncovered evaluation tail is empty.
+        validate_admitted_evaluation_closures(
+            &store.connection,
+            Scope::after(&frontier),
+            "1",
+        )
+        .expect("covered run retains its exact detector/evaluator suite");
+        validate_admitted_run_result_documents(
+            &store.connection,
+            Scope::after(&frontier),
+            "1",
+        )
+        .expect("covered run retains its exact ordered canonical result");
         store
             .backup_verified(&backup)
             .expect("ordered sequence creates a verified backup");
@@ -18765,6 +18861,8 @@ mod tests {
             document(json!({"fixture": "historical-partial-evaluation"})),
             b"historical partial evaluation".to_vec(),
         );
+        let frontier = HistoryFrontier::capture_bounds(&store.connection)
+            .expect("capture the covered run before the late evaluation");
         let report_sequence = receipt.report_sequence.expect("report sequence");
         store
             .connection
@@ -18800,6 +18898,16 @@ mod tests {
                 params!["evaluation-historical-partial", report_sequence, TIME],
             )
             .expect("historical writer appends the late watermark");
+        let scope = Scope::after(&frontier);
+        assert!(matches!(
+            validate_admitted_evaluation_closures(
+                &store.connection,
+                scope,
+                &run_result_scope(scope),
+            ),
+            Err(StoreError::Integrity(message))
+                if message.contains("detector suite identity")
+        ));
         assert!(matches!(
             store.validate(),
             Err(StoreError::Integrity(message))
