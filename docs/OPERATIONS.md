@@ -1232,6 +1232,11 @@ is bounded by the new rows, the referenced closure, and the schema:
   `profile_semantic_id`) refuses the old store and cannot archive it, and a
   refused writable open still checkpoints the WAL. The sealed archive is the
   provenance link between the retired generation and the new store.
+- Each scoped admitted-run validator groups the uncovered evaluations by run
+  once, then reads each newly appended run's exact evaluation rows by rowid.
+  A covered run selected by newly linked history still reopens its complete
+  evaluation set. This changes neither validation membership nor refusal rules,
+  and does not refresh the watermark or remove the remaining lookups below.
 - The certified status export reopens each lineage's newest evaluation,
   which joins the same unindexed `refusals.evaluation_id` and
   `finding_events.evaluation_id`: one SQL scan of those tables per lineage
