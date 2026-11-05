@@ -1,6 +1,6 @@
 # NQ operations: current scope and historical runbook
 
-The current source has SQLite schema v13, including retained saved-check,
+The current source has SQLite schema v15, including retained saved-check,
 maintenance-declaration, and notification-delivery custody. The small supported
 starting path is the credential-free local saved-check example in
 [`SAVED_CHECKS.md`](SAVED_CHECKS.md). Notification delivery is documented in
