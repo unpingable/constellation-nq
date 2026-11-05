@@ -3491,10 +3491,25 @@ impl CollectionEngine {
                             submission: Some(submission),
                         };
                         ensure_replay_cursor(&self.store, &mut self.replay)?;
+                        let history = if local_successor_acquisition_id.is_none() {
+                            Some(PreparedHistoricalReports::prepare(
+                                &mut self.store,
+                                watcher,
+                                profile,
+                            )?)
+                        } else {
+                            None
+                        };
+                        let generation = history.as_ref().map(|history| history.generation);
                         let replay = &mut self.replay;
                         let committed = self.store.commit_admitted_collection_validated(
                             &collection,
-                            |store, bounds| advance_engine_cursor(store, replay, bounds),
+                            |store, bounds| {
+                                if let Some(generation) = generation {
+                                    PreparedHistoricalReports::require_generation(store, generation)?;
+                                }
+                                advance_engine_cursor(store, replay, bounds)
+                            },
                             |view, receipt| {
                                 let snapshot = view.evidence_snapshot(std::slice::from_ref(
                                     &watcher.instance_id,
@@ -3507,7 +3522,7 @@ impl CollectionEngine {
                                     }
                                 }
                                 let current_findings = view.finding_snapshots()?;
-                                let prepared = prepare_instance_evaluations(
+                                let prepared = prepare_instance_evaluations_with_history(
                                     watcher,
                                     profile,
                                     Some(&run_id),
@@ -3519,6 +3534,7 @@ impl CollectionEngine {
                                     } else {
                                         EvaluationReportSelection::AllMatching
                                     },
+                                    history.map(|history| (history, Some(report_id.as_str()))),
                                 )?;
                                 let (diagnostic_artifact_id, diagnostic_artifact) =
                                     if let Some(context) = diagnostic_context.as_ref() {
@@ -4327,12 +4343,17 @@ impl CollectionEngine {
             .as_str()
             .to_owned();
         ensure_replay_cursor(&self.store, &mut self.replay)?;
+        let history = PreparedHistoricalReports::prepare(&mut self.store, watcher, profile)?;
         let replay = &mut self.replay;
-        // Read, validate, prepare, and commit in one IMMEDIATE transaction,
-        // so the evaluations build on exactly the history just validated.
+        // Pure historical selection/reconstruction is outside writer admission.
+        // Recheck its exact source and retention boundary under the original
+        // IMMEDIATE transaction; detectors/findings and the atomic commit stay
+        // inside that transaction.
         self.store
             .commit_evaluations_validated(|store, view, bounds| {
-                let snapshot_timing = nq_store::operation_timing::PhaseTiming::start("core.evaluation_snapshot");
+                PreparedHistoricalReports::require_generation(store, history.generation)?;
+                let snapshot_timing =
+                    nq_store::operation_timing::PhaseTiming::start("core.evaluation_snapshot");
                 let snapshot =
                     view.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
                 drop(snapshot_timing);
@@ -4342,8 +4363,9 @@ impl CollectionEngine {
                 let findings_timing = nq_store::operation_timing::PhaseTiming::start("core.evaluation_findings");
                 let current_findings = view.finding_snapshots()?;
                 drop(findings_timing);
-                let prepare_timing = nq_store::operation_timing::PhaseTiming::start("core.evaluation_prepare");
-                let prepared = prepare_instance_evaluations(
+                let prepare_timing =
+                    nq_store::operation_timing::PhaseTiming::start("core.evaluation_prepare");
+                let prepared = prepare_instance_evaluations_with_history(
                     watcher,
                     profile,
                     trigger_run_id,
@@ -4351,6 +4373,7 @@ impl CollectionEngine {
                     &current_findings,
                     &evaluator_artifact_digest,
                     EvaluationReportSelection::AllMatching,
+                    Some((history, None)),
                 )?;
                 drop(prepare_timing);
                 Ok(prepared
@@ -5896,6 +5919,110 @@ struct PreparedEvaluation {
     detector_reports: Vec<DetectorReport>,
 }
 
+/// One call's immutable historical context, not another persistent memo.
+/// Capture generation before reading: an expiry during preparation must refuse
+/// at admission rather than silently become this context's new boundary.
+struct PreparedHistoricalReports {
+    generation: i64,
+    source_rows: Vec<nq_store::AdmittedReportRow>,
+    matching_rows: Vec<nq_store::AdmittedReportRow>,
+    reports: Vec<DetectorReport>,
+}
+
+impl PreparedHistoricalReports {
+    fn prepare(
+        store: &mut Store,
+        watcher: &WatcherConfig,
+        profile: &'static dyn ProfileModule,
+    ) -> Result<Self, EngineError> {
+        let _timing = nq_store::operation_timing::PhaseTiming::start("core.historical_preparation");
+        let generation = store.retention_generation()?;
+        let snapshot = store.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
+        let digest = profile
+            .descriptor()
+            .digest()
+            .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        let matching_rows = evaluation_context_rows(&snapshot.reports, watcher, digest.as_str())?;
+        #[cfg(test)]
+        HISTORICAL_RECONSTRUCTION_FOR_TEST.with(|hook| {
+            let hook = hook.borrow_mut().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
+        let reports = matching_rows
+            .iter()
+            .map(|row| reconstruct_admitted_cached(row, profile, digest.as_str()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            generation,
+            source_rows: snapshot.reports,
+            matching_rows,
+            reports,
+        })
+    }
+
+    fn require_generation(store: &Store, generation: i64) -> Result<(), EngineError> {
+        if store.retention_generation()? != generation {
+            return Err(
+                nq_store::StoreError::Refused(nq_store::Refusal::HistoryChanged("during")).into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Recheck exact same-instance source membership/bytes while the original
+    /// writer guard is held. A newly inserted current report is the sole extra
+    /// row; its context and reconstruction are still checked here. Other
+    /// same-instance appends conservatively refuse, even if nonmatching.
+    fn reconcile(
+        self,
+        snapshot: &EvidenceSnapshot,
+        watcher: &WatcherConfig,
+        profile: &'static dyn ProfileModule,
+        digest: &str,
+        current_report_id: Option<&str>,
+    ) -> Result<(Vec<nq_store::AdmittedReportRow>, Vec<DetectorReport>), EngineError> {
+        let (current_history, current) = match current_report_id {
+            Some(id) => {
+                let (current, history) = snapshot.reports.split_last().ok_or_else(|| {
+                    EngineError::Invariant(
+                        "newly admitted report is absent from its snapshot".into(),
+                    )
+                })?;
+                if current.report_id != id {
+                    return Err(EngineError::Invariant(
+                        "newly admitted report is not the snapshot's last report".into(),
+                    ));
+                }
+                (history, Some(current))
+            }
+            None => (snapshot.reports.as_slice(), None),
+        };
+        let Self {
+            source_rows,
+            mut matching_rows,
+            mut reports,
+            ..
+        } = self;
+        if source_rows.as_slice() != current_history {
+            return Err(
+                nq_store::StoreError::Refused(nq_store::Refusal::HistoryChanged("during")).into(),
+            );
+        }
+        // Release the old source vector before detector/finding preparation;
+        // matching rows and reconstructions move into the existing evaluator.
+        drop(source_rows);
+        if let Some(current) = current
+            && report_matches_evaluation_context(current, watcher, digest)?
+        {
+            matching_rows.push(current.clone());
+            reports.push(reconstruct_admitted_cached(current, profile, digest)?);
+        }
+        Ok((matching_rows, reports))
+    }
+}
+
 /// The normal evaluator consumes its complete matching context. A named local
 /// successor has a separately retained selection law: its newly admitted
 /// occurrence is the only detector input while earlier matching reports remain
@@ -5928,6 +6055,7 @@ fn find_current_finding<'a>(
     findings.iter().find(|finding| lineage.matches(finding))
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_lines)]
 fn prepare_instance_evaluations(
     watcher: &WatcherConfig,
@@ -5938,6 +6066,29 @@ fn prepare_instance_evaluations(
     evaluator_artifact_digest: &str,
     selection: EvaluationReportSelection<'_>,
 ) -> Result<Vec<PreparedEvaluation>, EngineError> {
+    prepare_instance_evaluations_with_history(
+        watcher,
+        profile,
+        trigger_run_id,
+        snapshot,
+        current_findings,
+        evaluator_artifact_digest,
+        selection,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn prepare_instance_evaluations_with_history(
+    watcher: &WatcherConfig,
+    profile: &'static dyn ProfileModule,
+    trigger_run_id: Option<&str>,
+    snapshot: &EvidenceSnapshot,
+    current_findings: &[FindingSnapshotRow],
+    evaluator_artifact_digest: &str,
+    selection: EvaluationReportSelection<'_>,
+    history: Option<(PreparedHistoricalReports, Option<&str>)>,
+) -> Result<Vec<PreparedEvaluation>, EngineError> {
     let _timing = nq_store::operation_timing::PhaseTiming::start("core.prepare_evaluations");
     let profile_version = watcher.profile.version.to_string();
     let profile_digest = profile
@@ -5946,32 +6097,57 @@ fn prepare_instance_evaluations(
         .map_err(|error| EngineError::Canonical(error.to_string()))?;
     let profile_semantic = profile_semantic_id(profile.descriptor())
         .map_err(|error| EngineError::Canonical(error.to_string()))?;
-    let context_timing = nq_store::operation_timing::PhaseTiming::start("core.context_and_selection");
-    let matching_rows =
-        evaluation_context_rows(&snapshot.reports, watcher, profile_digest.as_str())?;
-    let selected_rows = match selection {
-        EvaluationReportSelection::AllMatching => matching_rows.clone(),
-        EvaluationReportSelection::ExactCurrent(report_id) => {
-            let selected = matching_rows
-                .iter()
-                .filter(|row| row.report_id == report_id)
-                .collect::<Vec<_>>();
-            let [selected] = selected.as_slice() else {
-                return Err(EngineError::Invariant(format!(
-                    "local successor detector selection requires exactly its newly admitted report {report_id}; found {} matching rows",
-                    selected.len()
-                )));
-            };
-            vec![(*selected).clone()]
+    let (matching_rows, reports) = if let Some((history, current_report_id)) = history {
+        if !matches!(selection, EvaluationReportSelection::AllMatching) {
+            return Err(EngineError::Invariant(
+                "historical preparation requires ordinary complete matching context".into(),
+            ));
         }
+        history.reconcile(
+            snapshot,
+            watcher,
+            profile,
+            profile_digest.as_str(),
+            current_report_id,
+        )?
+    } else {
+        let context_timing =
+            nq_store::operation_timing::PhaseTiming::start("core.context_and_selection");
+        let matching_rows =
+            evaluation_context_rows(&snapshot.reports, watcher, profile_digest.as_str())?;
+        let selected_rows = match selection {
+            EvaluationReportSelection::AllMatching => matching_rows.clone(),
+            EvaluationReportSelection::ExactCurrent(report_id) => {
+                let selected = matching_rows
+                    .iter()
+                    .filter(|row| row.report_id == report_id)
+                    .collect::<Vec<_>>();
+                let [selected] = selected.as_slice() else {
+                    return Err(EngineError::Invariant(format!(
+                        "local successor detector selection requires exactly its newly admitted report {report_id}; found {} matching rows",
+                        selected.len()
+                    )));
+                };
+                vec![(*selected).clone()]
+            }
+        };
+        drop(context_timing);
+        let reconstruction_timing =
+            nq_store::operation_timing::PhaseTiming::start("core.profile_validation");
+        #[cfg(test)]
+        HISTORICAL_RECONSTRUCTION_FOR_TEST.with(|hook| {
+            let hook = hook.borrow_mut().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
+        let reports = selected_rows
+            .iter()
+            .map(|row| reconstruct_admitted_cached(row, profile, profile_digest.as_str()))
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(reconstruction_timing);
+        (matching_rows, reports)
     };
-    drop(context_timing);
-    let reconstruction_timing = nq_store::operation_timing::PhaseTiming::start("core.profile_validation");
-    let reports = selected_rows
-        .iter()
-        .map(|row| reconstruct_admitted_cached(row, profile, profile_digest.as_str()))
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(reconstruction_timing);
     let latest = matching_rows.iter().max_by_key(|row| row.report_sequence);
     let evaluation_watermark = nq_store::EvaluationWatermark {
         instance_id: watcher.instance_id.clone(),
@@ -8191,6 +8367,8 @@ fn reconstruct_admitted(
 thread_local! {
     /// Test-only count of full admitted-report reconstructions on this thread.
     static RECONSTRUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// One test pauses the real reconstruction consumer to try another writer.
+    static HISTORICAL_RECONSTRUCTION_FOR_TEST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Reconstruct an admitted report for detector input, reusing an exact prior
@@ -17397,6 +17575,415 @@ sys.stdout.write("\n")
             panic!("fixture admission failed: {error}");
         }
         Some((engine, watcher, mode))
+    }
+
+    fn install_guard_competition_check(store: &mut Store) {
+        store
+            .install_saved_check(&nq_store::SavedCheckDefinitionInput {
+                definition_id: "guard-competition-check".to_owned(),
+                stable_reference: "sqlite.guard-competition".to_owned(),
+                definition_digest: nq_protocol::sha256_bytes(b"guard-competition-check")
+                    .into_string(),
+                definition: canonical(&json!({"schema":"nq.saved_check.v1"})).unwrap(),
+                installed_at: timestamp(Utc::now()),
+            })
+            .expect("install the competing saved-check custody");
+    }
+
+    fn competing_saved_check_write(
+        path: PathBuf,
+        evaluation_id: &str,
+    ) -> Result<(), nq_store::StoreError> {
+        let mut writer = Store::open(path)?;
+        let detail = nq_store::CanonicalDocument::from_serializable(
+            &json!({"binding":{"fixture":evaluation_id}}),
+        )
+        .expect("canonical competing claim");
+        let now = timestamp(Utc::now());
+        assert!(writer.claim_saved_check_evaluation(
+            "guard-competition-check",
+            evaluation_id,
+            &now,
+            &detail,
+        )?);
+        writer.append_saved_check_event(&nq_store::SavedCheckEventInput {
+            definition_id: "guard-competition-check".to_owned(),
+            event_number: 0,
+            occurred_at: now,
+            outcome: "passed".to_owned(),
+            detail,
+            evaluation_id: Some(evaluation_id.to_owned()),
+        })?;
+        Ok(())
+    }
+
+    #[test]
+    fn historical_reconstruction_does_not_exclude_a_saved_check_writer() {
+        historical_writer_competition(false);
+    }
+
+    #[test]
+    fn historical_freshness_preparation_does_not_exclude_a_saved_check_writer() {
+        historical_writer_competition(true);
+    }
+
+    fn historical_writer_competition(freshness: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let (mut engine, watcher, _) = admitted_host_diagnostic_fixture(
+            root.path(),
+            "guard-competition-genesis",
+            b"guard-competition-evaluator",
+        )
+        .expect("the real helper consumer must run for this regression");
+        assert!(matches!(
+            engine.collect(&watcher).unwrap().result,
+            CollectionResult::Admitted { .. }
+        ));
+        install_guard_competition_check(&mut engine.store);
+        let path = engine.config.database_path.clone();
+        HISTORICAL_RECONSTRUCTION_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let writer = std::thread::spawn(move || {
+                    competing_saved_check_write(path, "during-historical-reconstruction")
+                });
+                assert!(
+                    writer.join().expect("competing writer thread").is_ok(),
+                    "pure historical reconstruction must leave the real saved-check writer admission available"
+                );
+            }));
+        });
+        if freshness {
+            assert!(engine.freshness_sweep(&watcher).unwrap() > 0);
+        } else {
+            assert!(matches!(
+                engine.collect(&watcher).unwrap().result,
+                CollectionResult::Admitted { .. }
+            ));
+        }
+        assert_eq!(
+            engine
+                .store
+                .saved_check_event_by_evaluation_id("during-historical-reconstruction")
+                .unwrap()
+                .unwrap()
+                .outcome,
+            "passed"
+        );
+        validate_semantic_history(&engine.store).expect("unchanged typed collection semantics");
+    }
+
+    #[test]
+    fn changed_historical_source_refuses_without_a_partial_collection_or_evaluation() {
+        // Keep this Store callback proof within its existing coherent fixture
+        // family. Public collection/freshness saved-writer cases above exercise
+        // the native engine wiring separately.
+        for collection in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("changed-history.db");
+            let config = holes_engine_config(&path);
+            let watcher = config.watchers[0].clone();
+            let profile = resolve(&watcher).unwrap();
+            let digest = profile.descriptor().digest().unwrap();
+            let mut store = Store::initialize(&path).unwrap();
+            store.append_genesis(&GenesisInput {
+                genesis_id:"changed-history-genesis".to_owned(),
+                legacy_manifest_digest:None,created_at:timestamp(Utc::now()),
+                detail:canonical(&json!({"source":"changed-history-test"})).unwrap(),
+            }).unwrap();
+            REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = Some(None));
+            commit_real_host_detector_report(&mut store,&watcher,"report-first","coherent",Utc::now(),1.0,None);
+            let history = PreparedHistoricalReports::prepare(&mut store,&watcher,profile).unwrap();
+            let admission = store.latest_binding(&watcher.instance_id).unwrap().unwrap().admission_id.unwrap();
+            let concurrent = watcher.clone();
+            let (_,_,mut late) = std::thread::spawn(move || {
+                let mut writer = Store::open(path).unwrap();
+                REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = Some(Some((admission,"coherent".to_owned()))));
+                let result = commit_real_host_detector_report(&mut writer,&concurrent,"report-late","late",Utc::now(),1.0,None);
+                REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = None);
+                result
+            }).join().expect("real late admitted writer");
+            let before_reports = store.evidence_snapshot(std::slice::from_ref(&watcher.instance_id)).unwrap().reports.len();
+            let before_evaluations = store.latest_evaluation_sequence().unwrap();
+            let before_status = store.latest_status_sequence().unwrap();
+            let error = if collection {
+                let mut submission = late.submission.take().unwrap();
+                submission.submission_id = "submission-pending".to_owned();
+                let SubmissionDisposition::Admitted(report) = &mut submission.disposition else { panic!("admitted fixture") };
+                report.report_id = "report-pending".to_owned();
+                let admission = store.latest_binding(&watcher.instance_id).unwrap().unwrap().admission_id.unwrap();
+                let run = test_run(&store,profile,&watcher.instance_id,"pending",admission,AcquisitionOutcome::Response);
+                let pending = test_collection(&mut store,run,Some(submission),"pending");
+                store.commit_admitted_collection_validated::<(),EngineError,_,_>(
+                    &pending,
+                    |_,_| Ok(()),
+                    |view,_| {
+                        let snapshot = view.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
+                        history.reconcile(&snapshot,&watcher,profile,digest.as_str(),Some("report-pending"))?;
+                        unreachable!("changed historical source must refuse before completion")
+                    },
+                ).unwrap_err()
+            } else {
+                store.commit_evaluations_validated::<(),EngineError,_>(|_,view,_| {
+                    let snapshot = view.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
+                    history.reconcile(&snapshot,&watcher,profile,digest.as_str(),None)?;
+                    Ok((Vec::new(),()))
+                }).unwrap_err()
+            };
+            assert!(matches!(error,EngineError::Store(nq_store::StoreError::Refused(nq_store::Refusal::HistoryChanged(_)))),"unexpected refusal: {error:?}");
+            assert_eq!(store.evidence_snapshot(std::slice::from_ref(&watcher.instance_id)).unwrap().reports.len(),before_reports);
+            assert_eq!(store.latest_evaluation_sequence().unwrap(),before_evaluations);
+            assert_eq!(store.latest_status_sequence().unwrap(),before_status);
+            validate_semantic_history(&store).unwrap();
+            REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+
+    #[test]
+    fn a_different_instances_append_preserves_the_prepared_context() {
+        for freshness in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (mut engine, watcher, _) = admitted_host_diagnostic_fixture(
+                root.path(),
+                "different-instance-genesis",
+                b"different-instance-evaluator",
+            )
+            .expect("the real helper consumer must run for this regression");
+            engine.collect(&watcher).unwrap();
+            let path = engine.config.database_path.clone();
+            let mut other = watcher.clone();
+            other.instance_id = "host-diagnostic.other".to_owned();
+            HISTORICAL_RECONSTRUCTION_FOR_TEST.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    std::thread::spawn(move || {
+                        let mut writer = Store::open(path).unwrap();
+                        commit_real_host_detector_report(
+                            &mut writer,
+                            &other,
+                            "report-different-instance",
+                            "different-instance",
+                            Utc::now(),
+                            1.0,
+                            None,
+                        );
+                    })
+                    .join()
+                    .expect("ordinary different-instance admitted writer");
+                }));
+            });
+            if freshness {
+                assert!(engine.freshness_sweep(&watcher).unwrap() > 0);
+            } else {
+                assert!(matches!(
+                    engine.collect(&watcher).unwrap().result,
+                    CollectionResult::Admitted { .. }
+                ));
+            }
+            validate_semantic_history(&engine.store).expect("both instances remain verifiable");
+        }
+    }
+
+    #[test]
+    fn prepared_context_rejects_retention_and_exact_byte_or_membership_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut engine, watcher, _) = admitted_host_diagnostic_fixture(
+            root.path(),
+            "prepared-context-genesis",
+            b"prepared-context-evaluator",
+        )
+        .expect("the real helper consumer must run for this regression");
+        engine.collect(&watcher).unwrap();
+        let profile = resolve(&watcher).unwrap();
+        let digest = profile.descriptor().digest().unwrap();
+        for mutation in ["bytes", "membership"] {
+            let mut prepared =
+                PreparedHistoricalReports::prepare(&mut engine.store, &watcher, profile).unwrap();
+            assert!(!prepared.source_rows.is_empty());
+            if mutation == "bytes" {
+                prepared.source_rows[0].canonical_json.push(b' ');
+            } else {
+                prepared.source_rows.clear();
+            }
+            let snapshot = engine
+                .store
+                .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))
+                .unwrap();
+            assert!(matches!(
+                prepared.reconcile(&snapshot, &watcher, profile, digest.as_str(), None),
+                Err(EngineError::Store(nq_store::StoreError::Refused(
+                    nq_store::Refusal::HistoryChanged(_)
+                )))
+            ));
+        }
+        let prepared =
+            PreparedHistoricalReports::prepare(&mut engine.store, &watcher, profile).unwrap();
+        assert!(matches!(
+            PreparedHistoricalReports::require_generation(&engine.store, prepared.generation + 1),
+            Err(EngineError::Store(nq_store::StoreError::Refused(
+                nq_store::Refusal::HistoryChanged(_)
+            )))
+        ));
+        validate_semantic_history(&engine.store).unwrap();
+    }
+
+    #[test]
+    fn preparation_time_expiry_refuses_without_partial_collection_or_evaluation() {
+        for freshness in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (mut engine, watcher, _) = admitted_host_diagnostic_fixture(
+                root.path(),
+                "preparation-expiry-genesis",
+                b"preparation-expiry-evaluator",
+            )
+            .expect("the real helper consumer must run for this regression");
+            engine.collect(&watcher).unwrap();
+            let generation = engine.store.retention_generation().unwrap();
+            let path = engine.config.database_path.clone();
+            let instance = watcher.instance_id.clone();
+            let after_expiry = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let captured = after_expiry.clone();
+            HISTORICAL_RECONSTRUCTION_FOR_TEST.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    let counts = std::thread::spawn(move || {
+                        let mut writer = Store::open(path).unwrap();
+                        let result = expire_ordinary_history(
+                            &mut writer,
+                            &timestamp(Utc::now() + Duration::seconds(60)),
+                        )
+                        .unwrap();
+                        assert!(result.boundary.generation > generation);
+                        (
+                            writer.evidence_snapshot(&[instance]).unwrap().reports.len(),
+                            writer.latest_evaluation_sequence().unwrap(),
+                        )
+                    })
+                    .join()
+                    .expect("ordinary typed concurrent expiry");
+                    *captured.lock().unwrap() = Some(counts);
+                }));
+            });
+            let error = if freshness {
+                engine.freshness_sweep(&watcher).map(|_| ()).unwrap_err()
+            } else {
+                engine.collect(&watcher).map(|_| ()).unwrap_err()
+            };
+            // Store may refuse the retired pending identity before reaching
+            // our generation check. Both paths refuse the original attempt.
+            assert!(matches!(
+                error,
+                EngineError::Store(nq_store::StoreError::Refused(
+                    nq_store::Refusal::HistoryChanged(_)
+                )) | EngineError::Store(nq_store::StoreError::HistoryIdentityUnavailable(_))
+            ), "unexpected refusal: {error:?}");
+            let expected = after_expiry.lock().unwrap().unwrap();
+            assert_eq!(
+                engine
+                    .store
+                    .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))
+                    .unwrap()
+                    .reports
+                    .len(),
+                expected.0,
+                "no incoming report survived the preparation-time expiry refusal"
+            );
+            assert_eq!(
+                engine.store.latest_evaluation_sequence().unwrap(),
+                expected.1,
+                "no incoming evaluation survived the preparation-time expiry refusal"
+            );
+        }
+    }
+
+    // Disposable native comparison: the root-owned driver starts a real timer
+    // only after this actual reconstruction boundary is reached. No sleep or
+    // external command is part of the shipped engine.
+    #[test]
+    #[ignore = "requires the scoped native timer driver and fixture directory"]
+    fn scheduled_saved_check_runs_during_historical_preparation() {
+        let root = PathBuf::from(std::env::var("NQ_GUARD_NATIVE_FIXTURE").unwrap());
+        assert!(root.is_absolute());
+        let (mut engine, watcher, _) = admitted_host_diagnostic_fixture(
+            &root,
+            "scheduled-guard-genesis",
+            b"scheduled-guard-evaluator",
+        )
+        .expect("real admitted helper fixture");
+        assert!(matches!(engine.collect(&watcher).unwrap().result,CollectionResult::Admitted { .. }));
+        assert!(!engine.store.evidence_snapshot(std::slice::from_ref(&watcher.instance_id)).unwrap().reports.is_empty());
+        let definition = canonical(&json!({
+            "schema":"nq.saved-check-definition/v1",
+            "reference":"sqlite.guard-native",
+            "source_identity":"guard-native-fixture",
+            "currentness_seconds":60,
+            "name":"guard-native-fixture",
+            "sql_text":"SELECT 1 WHERE 0",
+            "mode":"non_empty",
+            "threshold":null,"column":null,"description":null
+        })).unwrap();
+        engine.store.install_saved_check(&nq_store::SavedCheckDefinitionInput {
+            definition_id:"guard-native-definition".to_owned(),
+            stable_reference:"sqlite.guard-native".to_owned(),
+            definition_digest:nq_protocol::sha256_bytes(definition.as_bytes()).into_string(),
+            definition,
+            installed_at:timestamp(Utc::now()),
+        }).unwrap();
+        fs::write(root.join("nq.toml"), toml::to_string(&engine.config).unwrap()).unwrap();
+        fs::write(root.join("FIXTURE-READY"), b"ready\n").unwrap();
+        let arm_bound = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !root.join("PREPARATION-ARM").exists() {
+            assert!(std::time::Instant::now() < arm_bound, "standalone native CLI preflight did not arm the fixture");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let boundary = root.clone();
+        HISTORICAL_RECONSTRUCTION_FOR_TEST.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::write(boundary.join("PREPARATION-READY"), b"ready\n").unwrap();
+                let end = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                while !boundary.join("COMPETITOR-TERMINAL.json").exists() {
+                    assert!(std::time::Instant::now() < end, "native competitor did not terminate within fixture bound");
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }));
+        });
+        if std::env::var("NQ_GUARD_NATIVE_FRESHNESS").as_deref() == Ok("1") {
+            engine.freshness_sweep(&watcher).unwrap();
+        } else {
+            engine.collect(&watcher).unwrap();
+        }
+        let result: Value = serde_json::from_slice(&fs::read(root.join("COMPETITOR-TERMINAL.json")).unwrap()).unwrap();
+        let passed = std::env::var("NQ_GUARD_NATIVE_EXPECT").unwrap() == "passed";
+        assert_eq!(result["returncode"] == 0, passed);
+        if passed {
+            assert_eq!(engine.store.saved_check_event_by_evaluation_id("scheduled-guard-evaluation").unwrap().unwrap().outcome, "passed");
+        } else {
+            assert_eq!(result["operation_guard_bounded_wait"], true);
+            assert!(engine.store.saved_check_event_by_evaluation_id("scheduled-guard-evaluation").unwrap().is_none());
+        }
+        validate_semantic_history(&engine.store).unwrap();
+    }
+
+    #[test]
+    fn a_real_guarded_write_keeps_the_five_second_competitor_refusal() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("held-guard.db");
+        let mut store = Store::initialize(&path).unwrap();
+        install_guard_competition_check(&mut store);
+        store
+            .commit_evaluations_validated::<_, nq_store::StoreError, _>(|_, _, _| {
+                let started = std::time::Instant::now();
+                let contender = path.clone();
+                let error = std::thread::spawn(move || {
+                    competing_saved_check_write(contender, "during-held-write")
+                })
+                .join()
+                .expect("competing writer thread")
+                .expect_err("a genuine guarded transaction still excludes another writer");
+                assert!(matches!(error, nq_store::StoreError::Refused(nq_store::Refusal::Contention(ref text))
+                    if text.contains("concurrent writer owns operation guard after bounded wait")));
+                assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+                Ok((Vec::new(), ()))
+            })
+            .unwrap();
+        competing_saved_check_write(path, "after-held-write").unwrap();
     }
 
     struct SemanticLineageFixture {
