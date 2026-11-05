@@ -1237,6 +1237,19 @@ is bounded by the new rows, the referenced closure, and the schema:
   A covered run selected by newly linked history still reopens its complete
   evaluation set. This changes neither validation membership nor refusal rules,
   and does not refresh the watermark or remove the remaining lookups below.
+- Ordinary collection and freshness sweeps prepare historical context selection
+  and report reconstruction before taking the common writer guard. The guarded
+  transaction rechecks the captured retention generation and exact source rows
+  for that instance, then handles the new current report, detectors, findings
+  and atomic commit as before. A changed same-instance report set refuses,
+  including an appended report outside the matching profile/context; an append
+  for another instance alone does not. This is conservative optimistic admission,
+  not a fairness or latency guarantee. The five-second guard refusal and the
+  existing memo budget remain unchanged. `core.historical_preparation` records
+  the preparation cost. Its source/matching vectors and reconstructed reports
+  are owned by one operation and moved into the evaluator; memory still grows
+  with retained instance history. Named local-successor exact-current selection
+  keeps its existing path.
 - The certified status export reopens each lineage's newest evaluation,
   which joins the same unindexed `refusals.evaluation_id` and
   `finding_events.evaluation_id`: one SQL scan of those tables per lineage
