@@ -608,6 +608,26 @@ pub(crate) struct RunEvaluations {
 }
 
 impl RunEvaluations {
+    /// One captured uncovered range, in the same order as the scalar lookup.
+    fn build_tail(connection: &Connection, after: i64, through: i64) -> Result<Self, StoreError> {
+        let mut by_run: std::collections::HashMap<String, Vec<i64>> =
+            std::collections::HashMap::new();
+        let mut statement = connection.prepare(
+            "SELECT trigger_run_id, rowid FROM evaluation_runs NOT INDEXED
+             WHERE rowid > ?1 AND rowid <= ?2 ORDER BY evaluation_sequence",
+        )?;
+        let mut rows = statement.query([after, through])?;
+        while let Some(row) = rows.next()? {
+            if let Some(run_id) = row.get::<_, Option<String>>(0)? {
+                by_run.entry(run_id).or_default().push(row.get(1)?);
+            }
+        }
+        Ok(Self {
+            bound: Some(through),
+            by_run,
+        })
+    }
+
     fn build(connection: &Connection, through: i64) -> Result<Self, StoreError> {
         let bound: Option<i64> = connection.query_row(
             "SELECT MAX(rowid) FROM evaluation_runs WHERE rowid <= ?1",
@@ -643,6 +663,46 @@ impl RunEvaluations {
             self.bound = Some(rowid);
         }
         Ok(())
+    }
+}
+
+/// The range visible to one deferred read transaction, never a persistent
+/// validation cache. The lower bound covers every reference frontier this
+/// handle can use; individual lookups still apply their original bound.
+#[derive(Debug)]
+pub(crate) struct RunEvaluationSnapshot {
+    after: i64,
+    through: i64,
+    relation: Option<RunEvaluations>,
+}
+
+/// Restore snapshot-local state before the owning SQLite transaction drops,
+/// including on a callback error or unwind.
+pub(crate) struct RunEvaluationSnapshotGuard<'a> {
+    target: &'a std::cell::RefCell<Option<RunEvaluationSnapshot>>,
+    previous: Option<RunEvaluationSnapshot>,
+}
+
+impl<'a> RunEvaluationSnapshotGuard<'a> {
+    pub(crate) fn capture(store: &'a crate::Store, bounds: &HistoryFrontier) -> Self {
+        let after = store
+            .reference_frontiers()
+            .map(|frontier| frontier.max_rowid("evaluation_runs").unwrap_or(i64::MIN))
+            .min()
+            .unwrap_or(i64::MIN);
+        let target = &store.validation.snapshot_run_evaluations;
+        let previous = target.replace(Some(RunEvaluationSnapshot {
+            after,
+            through: bounds.max_rowid("evaluation_runs").unwrap_or(i64::MIN),
+            relation: None,
+        }));
+        Self { target, previous }
+    }
+}
+
+impl Drop for RunEvaluationSnapshotGuard<'_> {
+    fn drop(&mut self) {
+        self.target.replace(self.previous.take());
     }
 }
 
@@ -1624,7 +1684,10 @@ impl crate::Store {
     /// [`Self::run_evaluation_bound`]); any other run from an index of
     /// evaluations by run built once per handle (one scan of the evaluation
     /// table) and extended by the committed range appended since, so a
-    /// long-lived handle reads each evaluation once.
+    /// long-lived handle reads each evaluation once. Inside a captured read
+    /// snapshot, bounded lookups share one relation of the uncovered range,
+    /// through that snapshot's upper bound. Covered runs keep the complete
+    /// lookup; snapshot-local rows never enter the persistent handle index.
     pub(crate) fn run_evaluation_rowids(&self, run_id: &str) -> Result<Vec<i64>, StoreError> {
         let beyond = |bound: Option<i64>| -> Result<Vec<i64>, StoreError> {
             self.connection
@@ -1634,6 +1697,36 @@ impl crate::Store {
                 .map_err(StoreError::from)
         };
         if let Some(bound) = self.run_evaluation_bound(run_id)? {
+            if let Some(snapshot) = self
+                .validation
+                .snapshot_run_evaluations
+                .borrow_mut()
+                .as_mut()
+            {
+                if bound < snapshot.after {
+                    return Err(StoreError::Invariant(
+                        "run evaluation bound precedes the captured snapshot range".into(),
+                    ));
+                }
+                if snapshot.relation.is_none() {
+                    snapshot.relation = Some(RunEvaluations::build_tail(
+                        &self.connection,
+                        snapshot.after,
+                        snapshot.through,
+                    )?);
+                }
+                let relation = snapshot.relation.as_ref().ok_or_else(|| {
+                    StoreError::Invariant("snapshot run relation was not built".into())
+                })?;
+                return Ok(relation
+                    .by_run
+                    .get(run_id)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .filter(|rowid| *rowid > bound)
+                    .collect());
+            }
             return beyond(Some(bound));
         }
         let mut cache = self.validation.run_evaluations.borrow_mut();
