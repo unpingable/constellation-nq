@@ -1182,6 +1182,98 @@ fn backup_and_restore_report_preserved_artifact_custody_without_claiming_full_re
 
 #[test]
 #[allow(clippy::too_many_lines)]
+fn schema5_upgrade_retires_only_operation_owned_temporary_backups() {
+    use std::os::unix::fs::MetadataExt;
+
+    let root = tempfile::tempdir().expect("fixture directory");
+    let database = root.path().join("exact-v5.db");
+    let connection = Connection::open(&database).expect("create exact v5 fixture");
+    connection
+        .execute_batch(include_str!("../../nq-store/src/schema_v5.sql"))
+        .expect("install pinned public v5 schema");
+    connection
+        .execute(
+            "INSERT INTO schema_metadata (singleton, product, schema_version,
+             schema_artifact_digest, initialized_at)
+             VALUES (1, 'nq-ng', 5, ?1, '2026-07-16T12:00:00.000Z')",
+            [nq_store::SCHEMA_V5_ARTIFACT_DIGEST],
+        )
+        .expect("record exact v5 fixture identity");
+    drop(connection);
+    let config = write_config(root.path(), "exact-v5", &database);
+    let backups = root.path().join("backups");
+    fs::create_dir(&backups).expect("create backup directory");
+    // These belong to another occurrence. Even matching temporary prefixes
+    // never authorize a directory-wide cleanup.
+    let foreign_members = [
+        ".nq-upgrade-foreign.db",
+        ".nq-upgrade-foreign.db-wal",
+        ".nq-upgrade-foreign.db-shm",
+        ".nq-upgrade-foreign.db.capacity.lock",
+    ];
+    for name in foreign_members {
+        fs::write(backups.join(name), b"another occurrence").expect("foreign sentinel");
+    }
+    let source_lock = root.path().join("exact-v5.db.capacity.lock");
+    fs::write(&source_lock, b"").expect("source coordination inode");
+    let source_lock_before = fs::metadata(&source_lock).expect("source lock metadata");
+    let upgraded = success(run(
+        env!("CARGO_BIN_EXE_nq"),
+        &config,
+        &[
+            "admin",
+            "upgrade",
+            "--backup-directory",
+            backups.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(upgraded["from_schema_version"], 5);
+    assert_eq!(upgraded["schema_version"], nq_store::SCHEMA_VERSION);
+    let mut temporary_members = fs::read_dir(&backups)
+        .expect("list backup members")
+        .map(|entry| {
+            entry
+                .expect("backup entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with(".nq-upgrade-"))
+        .collect::<Vec<_>>();
+    temporary_members.sort();
+    let mut expected_foreign = foreign_members.map(str::to_owned).to_vec();
+    expected_foreign.sort();
+    assert_eq!(
+        temporary_members, expected_foreign,
+        "successful upgrade must retire only its own temporary database sidecars and lock"
+    );
+    for name in foreign_members {
+        assert_eq!(fs::read(backups.join(name)).unwrap(), b"another occurrence");
+    }
+    let source_lock_after = fs::metadata(&source_lock).expect("source lock retained");
+    assert_eq!(
+        (source_lock_after.dev(), source_lock_after.ino()),
+        (source_lock_before.dev(), source_lock_before.ino())
+    );
+    let receipts = read_only_upgrade_receipts(&database);
+    assert_eq!(receipts.len(), 4);
+    for (receipt, (from, to)) in receipts.iter().zip([(5, 12), (12, 13), (13, 14), (14, 15)]) {
+        assert_eq!((receipt.from_version, receipt.to_version), (from, to));
+        let backup = PathBuf::from(&receipt.backup_location);
+        assert_eq!(sha256_file(&backup), receipt.backup_digest);
+        assert_eq!(
+            nq_store::Store::database_schema_version(&backup).unwrap(),
+            from
+        );
+    }
+    nq_store::Store::open(&database)
+        .unwrap()
+        .validate()
+        .unwrap();
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
 fn exact_v3_upgrade_accepts_typed_empty_history_and_refuses_semantic_or_schema_drift() {
     let nq = env!("CARGO_BIN_EXE_nq");
     let directory = tempfile::tempdir().expect("temporary test directory");

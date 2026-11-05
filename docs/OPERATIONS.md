@@ -256,7 +256,13 @@ capacity envelope under the maintenance process limits. The v14→v15 transition
 takes its own verified backup and adds declared protected holes under the
 persisted envelope, unchanged. Use the current binary's `admin
 upgrade` output and preserve every recorded backup before relying on an older
-schema procedure below.
+schema procedure below. After each private copy's SQLite handles and backup
+capacity guards close, `admin upgrade` retires that copy's empty WAL, SHM index
+and temporary capacity lock under its own retirement guard before publishing
+the digest-named backup. A contended copy guard, rollback journal or nonempty
+WAL refuses that publication. Preserve the retained operation files and native
+error for recovery; do not remove pending database state to bypass a refusal.
+This retirement names only the current operation's private copy.
 
 The historical v3/v4 discussion records the then-supported migration sources:
 schema v4, and the exact schema-v3 artifact shipped in the qualified `v0.1.0`

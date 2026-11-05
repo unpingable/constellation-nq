@@ -2360,7 +2360,12 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
         .as_deref()
         .and_then(|cutoff| chrono::DateTime::parse_from_rfc3339(cutoff).ok())
         .and_then(|cutoff| {
-            Some(cutoff + chrono::TimeDelta::try_seconds(i64::try_from(config.retention.horizon_seconds).ok()?)?)
+            Some(
+                cutoff
+                    + chrono::TimeDelta::try_seconds(
+                        i64::try_from(config.retention.horizon_seconds).ok()?,
+                    )?,
+            )
         });
     let expiry_schedule = json!({
         "quantum_seconds": quantum.as_secs(),
@@ -2764,7 +2769,12 @@ fn upgrade_v13_to_current(
         retention.auxiliary_bytes,
     )?
     .validate()?;
-    upgrade_v14_to_current(database_path, backup_directory, binary_digest, operator_identity)?;
+    upgrade_v14_to_current(
+        database_path,
+        backup_directory,
+        binary_digest,
+        operator_identity,
+    )?;
     Ok((backup, artifact.sha256))
 }
 
@@ -2813,6 +2823,11 @@ fn finalize_upgrade_backup(
             .strip_prefix("sha256:")
             .context("qualified backup digest")?
     ));
+    // Each caller has returned from verification of its fresh UUID copy, so
+    // all copy connections and backup guards have closed. Retire only that
+    // copy's state-free sidecars under its own guard before publication.
+    nq_store::capacity::retire_private_copy_sidecars(temporary_backup)
+        .context("retire the verified upgrade backup's private sidecars")?;
     if backup.exists() {
         if digest_file(&backup)? != backup_digest {
             bail!(
@@ -2839,7 +2854,12 @@ fn record_full_validation(
     nq_store::RetentionReport,
 )> {
     let full = nq_core::engine::validate_full_snapshot_and_record(database_path)?;
-    Ok((full.value, full.watermark, full.prior_certification, full.retention))
+    Ok((
+        full.value,
+        full.watermark,
+        full.prior_certification,
+        full.retention,
+    ))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -3683,6 +3703,107 @@ mod tests {
     use super::*;
     use nq_core::engine::{EngineError, GovernedRefusal};
     use nq_protocol::{InstanceId, Refusal, RefusalBoundary, RefusalCode, canonical_json_bytes};
+
+    fn private_upgrade_backup_fixture() -> (tempfile::TempDir, PathBuf, String) {
+        let root = tempfile::tempdir().expect("private backup fixture");
+        let temporary = root.path().join(".nq-upgrade-test.db");
+        let connection = rusqlite::Connection::open(&temporary).expect("private SQLite copy");
+        connection
+            .execute_batch("CREATE TABLE copied (id INTEGER PRIMARY KEY);")
+            .expect("copied database content");
+        drop(connection);
+        let digest = digest_file(&temporary).expect("exact copied bytes digest");
+        (root, temporary, digest)
+    }
+
+    #[test]
+    fn upgrade_backup_finalization_retires_only_private_sidecars_on_new_and_existing_destination() {
+        use std::os::unix::fs::MetadataExt;
+
+        for existing in [false, true] {
+            let (root, temporary, digest) = private_upgrade_backup_fixture();
+            let backup = root
+                .path()
+                .join(format!("nq-{}.db", digest.strip_prefix("sha256:").unwrap()));
+            let original = fs::read(&temporary).unwrap();
+            let old_inode = if existing {
+                fs::write(&backup, &original).unwrap();
+                Some(fs::metadata(&backup).unwrap().ino())
+            } else {
+                None
+            };
+            for (suffix, bytes) in [
+                ("-wal", &b""[..]),
+                ("-shm", &b"index"[..]),
+                (".capacity.lock", &b""[..]),
+            ] {
+                fs::write(format!("{}{suffix}", temporary.display()), bytes).unwrap();
+            }
+            let published = finalize_upgrade_backup(&temporary, root.path(), &digest).unwrap();
+            assert_eq!(published, backup);
+            assert_eq!(fs::read(&backup).unwrap(), original);
+            if let Some(inode) = old_inode {
+                assert_eq!(fs::metadata(&backup).unwrap().ino(), inode);
+            }
+            for suffix in ["", "-wal", "-shm", ".capacity.lock"] {
+                assert!(
+                    !PathBuf::from(format!("{}{suffix}", temporary.display())).exists(),
+                    "retired temporary member survived: {suffix}"
+                );
+            }
+        }
+    }
+
+    fn assert_upgrade_backup_refuses_pending_sidecar(suffix: &str) {
+        let (root, temporary, digest) = private_upgrade_backup_fixture();
+        let before = fs::read(&temporary).unwrap();
+        let sidecar = PathBuf::from(format!("{}{suffix}", temporary.display()));
+        fs::write(&sidecar, b"pending database state").unwrap();
+        finalize_upgrade_backup(&temporary, root.path(), &digest)
+            .expect_err("state outside the main file must refuse before publication");
+        assert_eq!(fs::read(&temporary).unwrap(), before);
+        assert_eq!(fs::read(&sidecar).unwrap(), b"pending database state");
+        assert!(
+            !root
+                .path()
+                .join(format!("nq-{}.db", digest.strip_prefix("sha256:").unwrap()))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn upgrade_backup_finalization_refuses_nonempty_wal_before_publication() {
+        assert_upgrade_backup_refuses_pending_sidecar("-wal");
+    }
+
+    #[test]
+    fn upgrade_backup_finalization_refuses_rollback_journal_before_publication() {
+        assert_upgrade_backup_refuses_pending_sidecar("-journal");
+    }
+
+    #[test]
+    fn upgrade_backup_finalization_preserves_a_contended_capacity_lock_inode() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (root, temporary, digest) = private_upgrade_backup_fixture();
+        let lock_path = PathBuf::from(format!("{}.capacity.lock", temporary.display()));
+        let file = File::create(&lock_path).unwrap();
+        let inode = file.metadata().unwrap().ino();
+        let held = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        finalize_upgrade_backup(&temporary, root.path(), &digest)
+            .expect_err("a live copy guard must refuse finalization");
+        assert_eq!(fs::metadata(&lock_path).unwrap().ino(), inode);
+        assert!(temporary.exists());
+        assert!(
+            !root
+                .path()
+                .join(format!("nq-{}.db", digest.strip_prefix("sha256:").unwrap()))
+                .exists()
+        );
+        drop(held);
+    }
 
     fn validate_archive_event_fixture(
         outcome: Option<&str>,
