@@ -1938,6 +1938,8 @@ struct ValidationState {
     certified: std::cell::RefCell<Option<Box<ValidationWatermark>>>,
     /// Lazily built index of covered evaluations by run.
     run_evaluations: std::cell::RefCell<Option<history_scope::RunEvaluations>>,
+    /// An uncovered relation owned only by the current read snapshot.
+    snapshot_run_evaluations: std::cell::RefCell<Option<history_scope::RunEvaluationSnapshot>>,
 }
 
 impl Default for ValidationState {
@@ -1953,6 +1955,7 @@ impl Default for ValidationState {
             observed_retention: None,
             certified: std::cell::RefCell::new(None),
             run_evaluations: std::cell::RefCell::new(None),
+            snapshot_run_evaluations: std::cell::RefCell::new(None),
         }
     }
 }
@@ -2485,6 +2488,7 @@ impl Store {
             observed_retention: None,
             certified: std::cell::RefCell::new(certified),
             run_evaluations: std::cell::RefCell::new(None),
+            snapshot_run_evaluations: std::cell::RefCell::new(None),
         })
     }
 
@@ -7379,7 +7383,9 @@ impl Store {
             .map_err(StoreError::from)
             .map_err(E::from)?;
         let bounds = HistoryFrontier::capture_bounds(&snapshot).map_err(E::from)?;
+        let run_evaluations = history_scope::RunEvaluationSnapshotGuard::capture(self, &bounds);
         let value = read(self, &bounds)?;
+        drop(run_evaluations);
         drop(snapshot);
         Ok(value)
     }
@@ -16003,6 +16009,155 @@ mod tests {
             |_| Ok(true),
         ).unwrap();
         assert!(result.watermark.is_some(), "the next stable pass includes recovery");
+    }
+
+    #[test]
+    fn read_snapshot_admitted_run_lookups_do_not_rescan_the_tail() {
+        let mut measured = Vec::new();
+        for tail in [12usize, 96] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("admitted-run-tail.db");
+            certified_crash_fixture(&path);
+            let profile = fixture_descriptor_digest();
+            let mut writer = Store::open(&path).unwrap();
+            for index in 0..tail {
+                commit_ordinary_evaluated_received(
+                    &mut writer,
+                    &profile,
+                    &format!("tail-{index}"),
+                    TIME,
+                );
+            }
+            drop(writer);
+            let reader = Store::open_read_only(&path).unwrap();
+            let frontier = reader
+                .validated_history_frontier()
+                .expect("applied watermark");
+            assert_eq!(
+                frontier.evaluation_sequence, 3,
+                "the covered prefix stays fixed"
+            );
+            assert_eq!(
+                reader.open_frontier().unwrap().evaluation_sequence,
+                3 + i64::try_from(tail).unwrap()
+            );
+            start_sql_work_count();
+            reader.count_sql_work_on_this_handle();
+            reader
+                .with_read_snapshot(|store, _| {
+                    for index in 0..tail {
+                        let row = store
+                            .admitted_collection_for_run(&format!("run-tail-{index}"))?
+                            .expect("genuinely admitted collection");
+                        assert_eq!(row.evaluations, 1);
+                    }
+                    Ok::<_, StoreError>(())
+                })
+                .unwrap();
+            let work = stop_sql_work_count().expect("SQL work counter");
+            assert!(work > 0);
+            eprintln!("{tail} admitted run lookups: {work} SQLite operations");
+            measured.push(work);
+        }
+        assert!(
+            measured[1] <= measured[0] * 12,
+            "eight times the admitted-run tail must not cause quadratic lookup work: {measured:?}"
+        );
+    }
+
+    #[test]
+    fn read_snapshot_run_relations_include_post_open_commits_and_exclude_later_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("snapshot-run-relations.db");
+        certified_crash_fixture(&path);
+        let reader = Store::open_read_only(&path).unwrap();
+        let profile = fixture_descriptor_digest();
+        {
+            let mut writer = Store::open(&path).unwrap();
+            commit_ordinary_evaluated_received(&mut writer, &profile, "before-snapshot", TIME);
+        }
+        reader
+            .with_read_snapshot(|store, bounds| {
+                assert!(
+                    bounds.evaluation_sequence
+                        > store
+                            .store_validated_frontier()
+                            .unwrap()
+                            .evaluation_sequence,
+                    "the snapshot includes a commit after this reader opened"
+                );
+                for id in ["run-before-snapshot", "run-crash-a"] {
+                    let scalar = store
+                        .connection
+                        .prepare(&run_evaluations_sql("rowid", None))?
+                        .query_map([id], |row| row.get::<_, i64>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    assert!(!scalar.is_empty());
+                    assert_eq!(
+                        store.run_evaluation_rowids(id)?,
+                        scalar,
+                        "both newly visible and covered runs retain their complete ordered set"
+                    );
+                }
+                let mut writer = Store::open(&path)?;
+                commit_ordinary_evaluated_received(&mut writer, &profile, "during-snapshot", TIME);
+                assert!(
+                    store
+                        .run_evaluation_rowids("run-during-snapshot")?
+                        .is_empty(),
+                    "a later committed run is outside the captured snapshot"
+                );
+                Ok::<_, StoreError>(())
+            })
+            .unwrap();
+        assert_eq!(
+            reader
+                .run_evaluation_rowids("run-during-snapshot")
+                .unwrap()
+                .len(),
+            1,
+            "the next read includes the commit without inheriting a stale snapshot relation"
+        );
+    }
+
+    #[test]
+    fn read_snapshot_run_relations_are_released_after_error_and_unwind() {
+        for unwind in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("snapshot-run-recovery.db");
+            certified_crash_fixture(&path);
+            let reader = Store::open_read_only(&path).unwrap();
+            let profile = fixture_descriptor_digest();
+            {
+                let mut writer = Store::open(&path).unwrap();
+                commit_ordinary_evaluated_received(&mut writer, &profile, "before-error", TIME);
+            }
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                reader.with_read_snapshot(|store, _| {
+                    assert_eq!(store.run_evaluation_rowids("run-before-error")?.len(), 1);
+                    if unwind {
+                        panic!("fixture snapshot unwind");
+                    }
+                    Err::<(), _>(StoreError::Invariant("fixture snapshot error".into()))
+                })
+            }));
+            assert_eq!(result.is_err(), unwind);
+            if let Ok(error) = result {
+                assert!(error.is_err());
+            }
+            {
+                let mut writer = Store::open(&path).unwrap();
+                commit_ordinary_evaluated_received(&mut writer, &profile, "after-error", TIME);
+            }
+            assert_eq!(
+                reader
+                    .run_evaluation_rowids("run-after-error")
+                    .unwrap()
+                    .len(),
+                1,
+                "failed read snapshots release both transaction and snapshot-only relation"
+            );
+        }
     }
 
     #[test]
