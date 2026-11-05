@@ -1243,6 +1243,10 @@ is bounded by the new rows, the referenced closure, and the schema:
   head, without decoding. A current instance status whose run the watermark
   already covers builds the evaluations-by-run index above once. The
   notification delivery summary groups retained delivery custody.
+  Within one read snapshot, newly admitted run lookups share one scan of
+  uncovered evaluations through its captured upper bound, including commits
+  since the handle opened. This relation is discarded on snapshot exit,
+  including errors; covered runs retain their complete lookup.
 - Full validation is linear in history apart from those lookups: about 7 s,
   27 s, and 81 s at those sizes, and 3.5 s on a 208-acquisition production
   store copy.

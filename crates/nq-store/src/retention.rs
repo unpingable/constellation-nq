@@ -1253,6 +1253,7 @@ impl Store {
                 observed_retention,
                 certified: std::cell::RefCell::new(Some(Box::new(watermark))),
                 run_evaluations: std::cell::RefCell::new(None),
+                snapshot_run_evaluations: std::cell::RefCell::new(None),
             };
         }
         drop(promotion_timing);
@@ -1793,6 +1794,7 @@ impl Store {
                     observed_retention: Some(after_witness.clone()),
                     certified: std::cell::RefCell::new(Some(Box::new(watermark))),
                     run_evaluations: std::cell::RefCell::new(None),
+                    snapshot_run_evaluations: std::cell::RefCell::new(None),
                 };
             }
             // No certification was carried: later opens and engine paths
