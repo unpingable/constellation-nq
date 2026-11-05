@@ -9,10 +9,12 @@ constellation-nq #30 and cartography #95; it does not establish deployment.
 ## Scope of this repair
 
 The declared policy removes the provider adapter's compiled anchor list as the
-source of authorization. Anchor gating currently applies in effect only to
-v2/PagerDuty: only v2 carries a condition and only PagerDuty accepts v2.
-Slack, Discord and local delivery receive route and response-class gating.
-This repair does not complete provider independence across all handlers.
+source of authorization. Every configured handler (`slack`, `discord`,
+`local_file`, `pagerduty`) accepts the same strict condition-bearing v2 page
+intent and checks its rule, component, class and route before effects. V1
+messages retain route and class checks without acquiring a condition from prose.
+This is support in NQ; an evaluator that still emits v1 copies has not established
+condition-bound delivery merely by installing this binary.
 
 ## Document and approval
 
@@ -151,10 +153,10 @@ failures and one-attempt custody remain in force.
 Existing v1 messages have no condition and keep their operator/Nightshift
 authorization; an installed policy gates their route and class only. With no
 policy, notices continue through the routes configuration; page authorization
-requires an installed document. NQ does not infer an
-anchor from prose or a policy ID. V2 remains PagerDuty's existing wire envelope;
-other current handlers still accept v1 only. This repair does not add a shared
-condition envelope to those handlers. A future handler must join the same
+requires an installed document. NQ does not infer an anchor from prose or a
+policy ID. V2 uses the same strict condition/action fields across the configured
+handlers. NQ selects the actual handler's projection: PagerDuty Events API,
+Slack/Discord text, or a versioned local message. A future handler must join the same
 validated route/class/condition authorization path before rendering, key access
 or I/O, declare its closed kind and bounded fields, and retain its own failure
 semantics. There is no dynamic plugin loader or automatic fan-out.
@@ -177,8 +179,7 @@ selected routes must be checked against the same installed document, using the
 effective policy export. `notification policy --check-registry FILE` validates
 a bounded `nq.escalation_registry.v1` JSON export with `anchors` in the same
 shape as this document. Every exported tuple must be permitted by the policy.
-Each page tuple must also have at least one configured handler that accepts
-condition-bearing pages (currently PagerDuty) carrying its anchor and page
+Each page tuple must also have at least one configured handler carrying its anchor and page
 class. `--route REFERENCE` requires that delivery path on the named route.
 An anchor-only grant with no deliverable page route fails this check, even
 though the document can pass `config check`. The export must include all
@@ -249,13 +250,23 @@ route split above. The profile-identity closure is unchanged: no store rollover.
 Package installation remains inert. This lane builds and stages no package and
 performs no host operation.
 
-## Follow-up for full provider independence
+## Producer integration and qualification
 
-A shared condition envelope for every handler would let anchor authorization
-apply uniformly before rendering, key access or I/O. That requires a separate
-wire-compatibility change for Slack, Discord and local delivery and tests of
-each handler's refusal and retention behavior. The owner must decide whether
-that work is required before cartography #95's acceptance item closes.
+`fixtures/notifications/condition-page-v2.json` pins a literal common-envelope
+vector for NQ and evaluator conformance. V1 histories and local v1 copies remain
+supported. A producer must explicitly emit the shared v2 envelope with the
+configured route's destination label before it can claim condition-bound delivery.
+Attention's `local_page_route_v1_copy` capability describes its older v1 path;
+it does not imply v2 support. The producer must advertise and validate its own
+compatible mode, and the ordinary installation must validate the exact installed
+NQ/producer pair and all reviewed policy tuples. Never strip a condition or lower
+the schema to turn a refused Page check into success.
+
+Qualification needs actual native trigger/resolve, exact local artifact and
+inspection checks, unauthorized tuple controls, bounded failure custody and
+shared golden-vector consumption. A configured handler or a source test does
+not establish external delivery or human receipt. No new provider, broadcast or
+dynamic plugin interface is introduced by the shared envelope.
 
 ## Owner decisions (2026-10-22)
 

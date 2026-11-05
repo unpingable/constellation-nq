@@ -8194,10 +8194,14 @@ impl Store {
             *slot += count;
         }
         let mut statement = self.connection.prepare(
-            "SELECT i.route_reference, i.notification_id, e.outcome, e.occurred_at, e.detail_json, \
-                CASE WHEN json_extract(CAST(i.intent_json AS TEXT), '$.schema') = 'nq.notification_delivery_intent.v2' \
-                  THEN json_extract(CAST(i.intent_json AS TEXT), '$.condition.site') || ':' || json_extract(CAST(i.intent_json AS TEXT), '$.condition.component') || ':' || json_extract(CAST(i.intent_json AS TEXT), '$.condition.rule') || COALESCE(':' || json_extract(CAST(i.intent_json AS TEXT), '$.condition.target_class'), '') END \
-             FROM notification_delivery_events AS e JOIN notification_delivery_intents AS i ON i.notification_id = e.notification_id \
+            "WITH submitted_intents AS ( \
+                SELECT *, CASE WHEN json_extract(CAST(intent_json AS TEXT), '$.schema') = 'nq.local-inbox-delivery-intent/v1' \
+                  THEN json_extract(CAST(intent_json AS TEXT), '$.intent') ELSE CAST(intent_json AS TEXT) END AS submitted \
+                FROM notification_delivery_intents) \
+             SELECT i.route_reference, i.notification_id, e.outcome, e.occurred_at, e.detail_json, \
+                CASE WHEN json_extract(i.submitted, '$.schema') = 'nq.notification_delivery_intent.v2' \
+                  THEN json_extract(i.submitted, '$.condition.site') || ':' || json_extract(i.submitted, '$.condition.component') || ':' || json_extract(i.submitted, '$.condition.rule') || COALESCE(':' || json_extract(i.submitted, '$.condition.target_class'), '') END \
+             FROM notification_delivery_events AS e JOIN submitted_intents AS i ON i.notification_id = e.notification_id \
              WHERE e.outcome IN ('failed', 'unknown', 'accepted') \
                 OR (e.outcome = 'refused' AND COALESCE(json_extract(CAST(e.detail_json AS TEXT), '$.reason'), '') NOT IN ('network_dispatch_not_explicitly_enabled', 'saved_check_attention_event_not_current', 'saved_check_attention_event_time_invalid')) \
                 OR (e.outcome = 'claimed' AND NOT EXISTS (SELECT 1 FROM notification_delivery_events AS t WHERE t.notification_id = e.notification_id AND t.event_number > e.event_number)) \

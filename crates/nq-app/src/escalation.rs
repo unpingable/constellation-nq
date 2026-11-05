@@ -510,8 +510,7 @@ impl Policy {
                     ensure!(
                         self.document.routes.iter().any(|route| {
                             selected_route.is_none_or(|reference| route.reference == reference)
-                                // Only PagerDuty currently accepts condition-bearing v2 pages.
-                                && matches!(route.handler, Handler::PagerDuty { .. })
+                                // Every configured handler accepts the same strict v2 condition.
                                 && route.anchors.contains(&anchor.rule)
                                 && route.response_classes.contains(&ResponseClass::Page)
                         }),
@@ -753,9 +752,10 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        // Slack carrying the anchor/class is insufficient: it cannot accept v2.
-        assert!(policy.check_registry(&path, None).is_err());
-        assert!(policy.check_registry(&path, Some("operations")).is_err());
+        // The exact grant can use any compatible configured handler.
+        policy.check_registry(&path, None).unwrap();
+        policy.check_registry(&path, Some("operations")).unwrap();
+        assert!(policy.check_registry(&path, Some("pagerduty-ops")).is_err());
         policy.document.routes[0].anchors.push(rule);
         policy.check_registry(&path, None).unwrap();
         policy.check_registry(&path, Some("pagerduty-ops")).unwrap();

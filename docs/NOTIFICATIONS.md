@@ -64,8 +64,9 @@ refused and nothing is sent, so the alert stays open until a resolve with
 `response_class` value outside the closed set is a malformed intent and is
 refused as a command error, with no retained record.
 
-Slack, Discord and local-inbox routes take any class permitted by the installed
-policy, including `page`. Without a policy, notice classes keep flowing. The
+Slack, Discord and local-inbox v1 routes take any class permitted by the installed
+policy, including `page`. Condition-bearing v2 intents on every handler require
+an explicit `page` class and the exact condition grant. Without a policy, v1 notice classes keep flowing. The
 class is optional there and defaults to `attention`; the message starts with
 it, for example `[page] Attention required: ...` or, in a local-inbox
 message summary, `[attention] check storage`.
@@ -147,7 +148,7 @@ never invent new event IDs to bypass an uncertain previous attempt. PagerDuty
 routes are the one exception, because their dedup key makes a repeated send
 update the same alert; see [Retry by resubmission](#retry-by-resubmission).
 
-The intent is exact canonical JSON, at most32KiB, with schema
+The v1 intent is exact canonical JSON, at most32KiB, with schema
 `nq.notification_delivery_intent.v1`. It binds attention kind, event, transition,
 policy ID/digest, route reference, destination label, summary and inspection link,
 and optionally `response_class` (absent means `attention`).
@@ -229,7 +230,8 @@ The detail is grouped by route. For each route it gives counts of `pending`
 interrupted), `refused`, `failed`, `unknown` and `accepted` records, the time
 of the newest acceptance, and the unresolved failures. A failure is
 unresolved when it is the newest terminal outcome of its condition: the
-route, plus for a PagerDuty record its `site:component:rule[:target_class]`.
+route, plus for a v2 record its `site:component:rule[:target_class]`, including
+v2 local records inside their retained directory-binding wrapper.
 A failure here is `failed`, `unknown`, a stale claim, or any refusal except
 three, so a missing or malformed routing key and `response_class_not_page`
 count. The exceptions are the
@@ -294,10 +296,11 @@ text is masked if it echoes it. `endpoint_secret_locator` is refused on this
 transport; the endpoint cannot be redirected by configuration. See
 [`PAGERDUTY_RUNBOOK.md`](PAGERDUTY_RUNBOOK.md) for provisioning.
 
-### Intent v2
+### Condition-bearing intent v2
 
-A PagerDuty route accepts only `nq.notification_delivery_intent.v2`, and other
-routes refuse it. A v2 intent has every v1 field (the summary
+All four configured handlers accept `nq.notification_delivery_intent.v2`.
+PagerDuty requires v2; other handlers also retain their existing v1 support.
+A v2 intent has every v1 field (the summary
 may be up to 1024 bytes) and, with the same closed field set:
 
 | field | contract |
@@ -311,6 +314,31 @@ may be up to 1024 bytes) and, with the same closed field set:
 | `severity` | `critical`, `error`, `warning` or `info` |
 | `runbook_url` | optional `https://` URL, at most 1024 bytes |
 | `details` | optional JSON object, at most 4 KiB canonical; key `constellation` is reserved and credential-like key names are refused |
+
+`destination_identity` must match the configured handler and route exactly:
+`pagerduty:ROUTE`, `slack:ROUTE`, `discord:ROUTE` or `local-inbox:ROUTE`.
+Use `deliver-local` for local_file and `submit` for HTTPS handlers. All v2 paths
+check the exact installed policy's rule/component/class/route grant before replay
+or delivery effects. The full `notification policy --check-registry` check can
+therefore accept a fully authorized local or HTTPS Page route without requiring
+a PagerDuty route. No check manufactures a policy grant.
+
+A v2 local file has schema `nq.local-inbox-message/v2` and explicitly carries
+`condition`, `action` and `response_class` alongside the existing summary,
+inspection and directory-binding fields. The 4096-byte rendered-message ceiling,
+descriptor-bound create/write/sync and duplicate/unknown semantics still apply.
+V1 local messages retain their exact v1 schema and fields. Slack and Discord keep
+their provider-specific JSON shape; their v2 text names the stable condition and
+TRIGGER/RESOLVE action rather than relying on caller-authored prose for identity.
+The submitted canonical intent remains in custody in every case.
+
+`notification inspect` retains its existing `pagerduty` fields for PagerDuty
+history. Other v2 records expose `condition_delivery` with condition, action,
+class and last event; they have no PagerDuty dedup key. `resubmit` remains limited
+to PagerDuty records: accepting v2 on another handler does not grant safe retry
+semantics to that destination. Missing-policy and non-page v2 refusals create no
+local message and resolve no provider obligation. Existing local v1 Page copies
+remain a narrower supported path, not evidence of v2 producer integration.
 
 For example, as canonical JSON (compact, sorted keys, no trailing newline):
 
