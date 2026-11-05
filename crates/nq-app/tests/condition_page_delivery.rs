@@ -297,3 +297,112 @@ fn legacy_v1_local_page_keeps_its_existing_message_shape() {
         "[page] TEST: authorized condition page projection"
     );
 }
+
+#[test]
+fn discord_v2_rendered_boundary_is_a_native_precustody_refusal() {
+    for (supplementary, units, inspection_chars, accepted) in [
+        (false, 2000, 885, true),
+        (false, 2001, 886, false),
+        (true, 2000, 887, true),
+        (true, 2001, 888, false),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut policy = policy();
+        policy["routes"][0]["reference"] = json!("discord-pages");
+        policy["routes"][0]["handler"] =
+            json!({"kind":"discord", "timeout_ms":10000, "max_response_bytes":4096});
+        let bytes = serde_json::to_vec(&policy).unwrap();
+        fs::write(root.path().join("policy.json"), &bytes).unwrap();
+        let config = root.path().join("nq.toml");
+        fs::write(
+            &config,
+            format!(
+                r#"schema = "nq.config.v1"
+database_path = "{0}/notification.db"
+socket_path = "{0}/nqd.sock"
+admissions_dir = "{0}/admissions"
+helper_runtime_dir = "{0}/helpers"
+[escalation_policy]
+path = "{0}/policy.json"
+sha256 = "{1}"
+[[notification_routes]]
+reference = "discord-pages"
+transport = "discord"
+endpoint_secret_locator = "NQ_QUALIFICATION_UNUSED_DISCORD_URL"
+timeout_ms = 10000
+max_response_bytes = 4096
+"#,
+                root.path().display(),
+                sha256_bytes(&bytes)
+            ),
+        )
+        .unwrap();
+        success(&run(&config, &["init"]));
+        let summary = if supplementary {
+            format!("{}😀", "s".repeat(1020))
+        } else {
+            "s".repeat(1024)
+        };
+        let inspection = format!("https://{}", "i".repeat(inspection_chars - 8));
+        let expected = format!(
+            "[page] TRIGGER page-qualification:service:service-down:nginx\nAttention required: {summary}\nInspect: {inspection}"
+        );
+        assert_eq!(expected.encode_utf16().count(), units);
+        assert_eq!(expected.chars().count(), units - usize::from(supplementary));
+        let mut intent = vector();
+        intent["summary"] = json!(summary);
+        intent["inspection_reference"] = json!(inspection);
+        intent["route_reference"] = json!("discord-pages");
+        intent["destination_identity"] = json!("discord:discord-pages");
+        let path = root.path().join("intent.json");
+        fs::write(&path, serde_json::to_vec(&intent).unwrap()).unwrap();
+        // No network enablement or endpoint value: this exercises the real CLI
+        // up to its retained dispatch refusal without contacting a destination.
+        let result = run(
+            &config,
+            &[
+                "notification",
+                "submit",
+                "--intent",
+                path.to_str().unwrap(),
+                "--route",
+                "discord-pages",
+            ],
+        );
+        if accepted {
+            assert_eq!(success(&result)["delivery_state"], "refused");
+            let inspected = success(&run(&config, &["notification", "inspect"]));
+            assert_eq!(
+                inspected[0]["condition_delivery"]["last_event"]["detail"]["reason"],
+                "network_dispatch_not_explicitly_enabled"
+            );
+            let connection =
+                rusqlite::Connection::open(root.path().join("notification.db")).unwrap();
+            let payload: Vec<u8> = connection
+                .query_row("SELECT payload_json FROM notification_outbox", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            let payload: Value = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(payload["content"], expected);
+            let retained: Vec<u8> = connection
+                .query_row(
+                    "SELECT intent_json FROM notification_delivery_intents",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&retained).unwrap(), intent);
+        } else {
+            assert!(!result.status.success());
+            assert!(
+                String::from_utf8_lossy(&result.stderr)
+                    .contains("discord_content_exceeds_2000_utf16_units")
+            );
+            assert_eq!(
+                success(&run(&config, &["notification", "inspect"])),
+                json!([])
+            );
+        }
+    }
+}

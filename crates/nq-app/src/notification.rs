@@ -25,6 +25,7 @@ use std::time::Duration;
 
 const MAX_INTENT_BYTES: usize = 32_768;
 const LOCAL_INBOX_FILE_MAX_BYTES: usize = 4_096;
+const DISCORD_CONTENT_MAX_UTF16_UNITS: usize = 2_000;
 const INTENT_V1: &str = "nq.notification_delivery_intent.v1";
 const INTENT_V2: &str = "nq.notification_delivery_intent.v2";
 const PAGERDUTY_ENQUEUE_URL: &str = "https://events.pagerduty.com/v2/enqueue";
@@ -782,7 +783,14 @@ fn render_condition_notice(
 fn render_text(route: &NotificationRouteConfig, text: String) -> Result<CanonicalDocument> {
     let payload = match route.transport {
         NotificationTransportKind::Slack => json!({"text": text}),
-        NotificationTransportKind::Discord => json!({"content": text}),
+        NotificationTransportKind::Discord => {
+            if text.encode_utf16().count() > DISCORD_CONTENT_MAX_UTF16_UNITS {
+                bail!(
+                    "discord_content_exceeds_2000_utf16_units: rendered Discord content exceeds 2000 UTF-16 code units"
+                );
+            }
+            json!({"content": text})
+        }
         NotificationTransportKind::LocalFile => {
             bail!("local inbox uses its own bounded message envelope")
         }
@@ -4537,6 +4545,76 @@ mod tests {
                 .to_string()
                 .contains("resubmit is defined only")
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn discord_v2_rendered_utf16_bound_precedes_custody_and_credentials() {
+        for (supplementary, units, inspection_chars, accepted) in [
+            (false, 2000, 885, true),
+            (false, 2001, 886, false),
+            (true, 2000, 887, true),
+            (true, 2001, 888, false),
+        ] {
+            let root = TempDir::new().unwrap();
+            let mut config = config(&root);
+            config.notification_routes[0].transport = NotificationTransportKind::Discord;
+            let policy = Policy::example(&config.notification_routes)
+                .unwrap()
+                .inspect()["policy"]
+                .clone();
+            installed_policy(&root, &mut config, &policy);
+            let summary = if supplementary {
+                format!("{}😀", "s".repeat(1020))
+            } else {
+                "s".repeat(1024)
+            };
+            let inspection = format!("https://{}", "i".repeat(inspection_chars - 8));
+            let expected = format!(
+                "[page] TRIGGER page-qualification:service:service-down:nginx\nAttention required: {summary}\nInspect: {inspection}"
+            );
+            assert_eq!(summary.len(), 1024);
+            assert_eq!(expected.encode_utf16().count(), units);
+            assert_eq!(expected.chars().count(), units - usize::from(supplementary));
+            let mut value = pagerduty_intent("trigger", "discord-boundary", &summary);
+            value["route_reference"] = json!("ops.primary");
+            value["destination_identity"] = json!("discord:ops.primary");
+            value["condition"] = json!({"site":"page-qualification", "component":"service", "rule":"service-down", "target_class":"nginx"});
+            value["inspection_reference"] = json!(inspection);
+            let path = write_intent(&root, value);
+            let result = submit_with_dispatch(
+                &config,
+                &path,
+                "ops.primary",
+                true,
+                |_| {
+                    assert!(
+                        accepted,
+                        "oversized Discord content must precede credentials"
+                    );
+                    Ok("qualification-endpoint".into())
+                },
+                |_| {
+                    Ok(move |_, bytes: Vec<u8>, _| async move {
+                        assert!(accepted, "oversized Discord content must precede dispatch");
+                        let payload: Value = serde_json::from_slice(&bytes).unwrap();
+                        assert_eq!(payload["content"], expected);
+                        Ok(TransportResult::Accepted(200))
+                    })
+                },
+            )
+            .await;
+            if accepted {
+                assert_eq!(result.unwrap()["delivery_state"], "accepted");
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("discord_content_exceeds_2000_utf16_units")
+                );
+                assert_eq!(inspect(&config, None).unwrap(), json!([]));
+            }
         }
     }
 

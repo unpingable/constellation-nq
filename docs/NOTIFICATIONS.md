@@ -332,6 +332,19 @@ their provider-specific JSON shape; their v2 text names the stable condition and
 TRIGGER/RESOLVE action rather than relying on caller-authored prose for identity.
 The submitted canonical intent remains in custody in every case.
 
+NQ limits the entire rendered Discord `content` to **2000 UTF-16 code units**,
+including the condition/action prefix, summary and inspection reference. Above
+that limit it returns the named command refusal
+`discord_content_exceeds_2000_utf16_units` before delivery custody or credential
+resolution; no one-attempt delivery is consumed. NQ never truncates the text,
+strips the condition or downgrades the intent. Shorten the authored summary or
+inspection reference before submitting again. Discord's
+[Execute Webhook contract](https://docs.discord.com/developers/resources/webhook#execute-webhook)
+states a 2000-character maximum without specifying its Unicode counting rule.
+NQ's UTF-16-unit ceiling is a conservative local limit, not a claim about exact
+provider accounting: a supplementary Unicode character counts as two units.
+The limit counts decoded text, not UTF-8 bytes or JSON escape bytes.
+
 `notification inspect` retains its existing `pagerduty` fields for PagerDuty
 history. Other v2 records expose `condition_delivery` with condition, action,
 class and last event; they have no PagerDuty dedup key. `resubmit` remains limited
