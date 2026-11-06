@@ -19496,6 +19496,63 @@ sys.stdout.write("\n")
         assert_eq!(clears, 0);
     }
 
+    /// The same real validated rows fit a bounded memo only when its duplicate
+    /// canonical bodies no longer consume one full body allowance per entry.
+    #[test]
+    fn context_memo_working_set_reuses_validated_reports_without_body_copies() {
+        let fixture = SemanticLineageFixture::new();
+        let mut rows = Vec::new();
+        let mut contexts = Vec::new();
+        let mut expected = Vec::new();
+        for sequence in 1..=32 {
+            let mut row = reconstruction_fixture_row(
+                &fixture,
+                &format!("report:bounded-working-set-{sequence:02}"),
+            );
+            row.report_sequence = sequence;
+            let mut decoded: nq_protocol::EvidenceReport =
+                serde_json::from_slice(&row.canonical_json).unwrap();
+            decoded.errors[0].message = "x".repeat(4096);
+            nq_protocol::validate_report(&decoded).unwrap();
+            row.canonical_json = nq_protocol::canonical_json_bytes(&decoded).unwrap();
+            row.semantic_digest = nq_protocol::sha256_bytes(&row.canonical_json).to_string();
+            CanonicalDocument::from_canonical_bytes(row.canonical_json.clone()).unwrap();
+            contexts.push(ImmutableReportContext {
+                profile: decoded.profile,
+                binding: decoded.binding,
+            });
+            expected.push(reconstruct_admitted(&row, fixture.profile).unwrap());
+            rows.push(row);
+        }
+        let mut memo = AdmittedReportMemo::default();
+        let clears_before = RECONSTRUCTION_MEMO_CLEARS.with(std::cell::Cell::get);
+        let mut hits = 0;
+        let mut misses = 0;
+        for _ in 0..2 {
+            let actual = rows.iter().zip(&contexts).map(|(row, context)| {
+                if let Some(report) = memo.exact(row, &fixture.profile_digest)
+                    .and_then(|entry| entry.report.as_ref())
+                {
+                    hits += 1;
+                    report.clone()
+                } else {
+                    misses += 1;
+                    let report = reconstruct_admitted(row, fixture.profile).unwrap();
+                    memo.remember(row, &fixture.profile_digest, Some(context.clone()),
+                        Some(report.clone()), 512 * 1024);
+                    report
+                }
+            }).collect::<Vec<_>>();
+            assert_eq!(actual, expected, "cache fit cannot change semantic testimony");
+        }
+        let clears = RECONSTRUCTION_MEMO_CLEARS.with(std::cell::Cell::get) - clears_before;
+        println!("memo_working_set rows=32 passes=2 hits={hits} misses={misses} clears={clears} accounted_bytes={}", memo.bytes);
+        assert_eq!(hits, 32, "the second pass must reuse this bounded working set");
+        assert_eq!(misses, 32);
+        assert_eq!(clears, 0);
+        assert_eq!(memo.entries.len(), 32);
+    }
+
     #[test]
     fn context_memo_counts_the_inline_context_slot_even_when_absent() {
         let fixture = SemanticLineageFixture::new();
