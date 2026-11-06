@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::{
-    AdmittedReportRow, EvidenceSnapshot, Refusal, Store, StoreError, ADMITTED_REPORT_COLUMNS,
+    ADMITTED_REPORT_COLUMNS, AdmittedReportRow, EvidenceSnapshot, Refusal, Store, StoreError,
     decode_admitted_report, evidence_snapshot_from_connection,
     evidence_snapshot_metadata_from_connection, retention,
 };
@@ -39,10 +39,12 @@ pub struct PreparedEvidenceSnapshot {
 }
 
 impl PreparedEvidenceSnapshot {
+    #[must_use]
     pub fn snapshot(&self) -> &EvidenceSnapshot {
         &self.snapshot
     }
 
+    #[must_use]
     pub fn retention_generation(&self) -> i64 {
         self.generation
     }
@@ -106,7 +108,10 @@ impl ResolvedPreparedSnapshot {
                 ));
             }
             self.snapshot.reports.push(current_admitted_report(
-                transaction, instance, report_id, sequence,
+                transaction,
+                instance,
+                report_id,
+                sequence,
             )?);
         }
         // These planes belong to the current guarded transaction, including
@@ -131,11 +136,10 @@ impl Store {
         // Capture BEFORE establishing the deferred read snapshot. A commit
         // between these steps must cause fallback, not stamp older S as newer.
         let stamp = SnapshotStamp::capture(&self.connection)?;
-        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let snapshot = evidence_snapshot_from_connection(
-            &transaction,
-            &[instance_id.to_owned()],
-        )?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let snapshot = evidence_snapshot_from_connection(&transaction, &[instance_id.to_owned()])?;
         transaction.commit()?;
         Ok(PreparedEvidenceSnapshot {
             instance_id: instance_id.to_owned(),
@@ -153,15 +157,20 @@ pub(super) fn current_admitted_report(
     report_id: &str,
     sequence: i64,
 ) -> Result<AdmittedReportRow, StoreError> {
-    connection.query_row(
-        &format!(
-            "SELECT {ADMITTED_REPORT_COLUMNS} FROM admitted_reports AS report
+    connection
+        .query_row(
+            &format!(
+                "SELECT {ADMITTED_REPORT_COLUMNS} FROM admitted_reports AS report
              WHERE instance_id=?1 AND report_id=?2 AND report_sequence=?3 AND {}",
-            retention::full_source_condition(connection, "report")?,
-        ),
-        params![instance_id, report_id, sequence],
-        decode_admitted_report,
-    ).optional()?.ok_or_else(|| StoreError::Invariant(
-        "newly admitted report is absent or differs from its exact receipt identity".into(),
-    ))
+                retention::full_source_condition(connection, "report")?,
+            ),
+            params![instance_id, report_id, sequence],
+            decode_admitted_report,
+        )
+        .optional()?
+        .ok_or_else(|| {
+            StoreError::Invariant(
+                "newly admitted report is absent or differs from its exact receipt identity".into(),
+            )
+        })
 }

@@ -4290,6 +4290,7 @@ impl Store {
         )
     }
 
+    #[allow(clippy::too_many_lines)] // Keep the original atomic rollback boundary in one body.
     fn commit_admitted_collection_inner<T, E, P, F>(
         &mut self,
         collection: &CollectionInput,
@@ -6795,6 +6796,7 @@ impl Store {
 
     /// Explicit public schema-v5 to schema-v12 upgrade. It accepts the exact
     /// public v5 artifact only; unpublished lineage versions are not decoded.
+    #[allow(clippy::too_many_lines)] // Keep this established upgrade's verification order together.
     pub fn upgrade_v5_to_v12(
         path: impl AsRef<Path>,
         receipt: &UpgradeReceiptInput,
