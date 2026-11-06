@@ -900,6 +900,16 @@ not interrupted: the process exits after it finishes, which can follow the
 `stopped` record, and systemd's `TimeoutStopSec` (45 s in the packaged unit)
 bounds the wait, after which SIGKILL rolls back any open transaction.
 
+Qualified ordinary expiry verifies the complete baseline foreign-key closure
+in its existing read snapshot before common writer admission. The exact
+SQLite data version, append frontier and retention boundary must still match
+under the guarded transaction; a concurrent commit refuses that preparation.
+Foreign keys remain enabled and deferred during atomic repacking, and SQLite
+commit rejects a surviving reference. Unqualified Store-only expiry retains
+its full resulting foreign-key check. This moves one retained-history scan
+outside the writer guard; it does not bound total expiry runtime or the other
+planning, candidate-validation and mutation phases.
+
 ### Operational phase timing
 
 For a bounded investigation of a slow collector, the exact environment opt-in
