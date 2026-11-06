@@ -18206,6 +18206,7 @@ sys.stdout.write("\n")
             let path = engine.config.database_path.clone();
             let mut nonmatching = watcher.clone();
             nonmatching.subject = "host:other-prepared-context".to_owned();
+            nonmatching.scope.value = json!({"id": "other-prepared-context"});
             let original = engine.store.latest_binding(&watcher.instance_id).unwrap().unwrap();
             let original_admission = original.admission_id.unwrap();
             let original_digest = original.binding_digest;
