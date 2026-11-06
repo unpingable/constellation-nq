@@ -19930,7 +19930,20 @@ sys.stdout.write("\n")
         noncanonical.canonical_json.push(b'\n');
         assert_eq!(serde_json::from_slice::<Value>(&noncanonical.canonical_json).unwrap(),
             serde_json::from_slice::<Value>(&row.canonical_json).unwrap());
-        for changed in [poisoned, noncanonical] {
+        // A length check alone rejects the newline above. Reorder the root
+        // keys without changing either length or parsed meaning: a mistaken
+        // canonicalize-before-hash implementation would reuse this row.
+        let value: Value = serde_json::from_slice(&row.canonical_json).unwrap();
+        let reversed_fields = value.as_object().unwrap().iter().rev()
+            .map(|(key, value)| format!("{}:{}", serde_json::to_string(key).unwrap(),
+                serde_json::to_string(value).unwrap()))
+            .collect::<Vec<_>>().join(",");
+        let mut reordered = row.clone();
+        reordered.canonical_json = format!("{{{reversed_fields}}}").into_bytes();
+        assert_eq!(reordered.canonical_json.len(), row.canonical_json.len());
+        assert_ne!(reordered.canonical_json, row.canonical_json);
+        assert_eq!(serde_json::from_slice::<Value>(&reordered.canonical_json).unwrap(), value);
+        for (changed, canonical_refusal) in [(poisoned, false), (noncanonical, true), (reordered, true)] {
             assert_eq!(changed.report_id, row.report_id);
             assert_eq!(changed.semantic_digest, row.semantic_digest);
             let before = CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get);
@@ -19939,6 +19952,9 @@ sys.stdout.write("\n")
             let second = report_matches_evaluation_context(&changed, fixture.watcher(),
                 &fixture.profile_digest).unwrap_err().to_string();
             assert_eq!(first, second);
+            if canonical_refusal {
+                assert!(first.contains("not canonical"), "original canonical refusal: {first}");
+            }
             assert_eq!(CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get) - before, 2);
         }
     }
