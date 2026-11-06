@@ -1226,7 +1226,11 @@ is bounded by the new rows, the referenced closure, and the schema:
   existing memo budget remain unchanged. `core.historical_preparation` records
   the preparation cost. Its source/matching vectors and reconstructed reports
   are owned by one operation and moved into the evaluator; memory still grows
-  with retained instance history. Named local-successor exact-current selection
+  with retained instance history. Prepared evaluations retain an additional
+  report copy only for diagnostic artifact emission; ordinary collection and
+  freshness sweeps do not keep that unused diagnostic copy. This reduces
+  temporary report copies, without an RSS bound or measured reduction claim.
+  Named local-successor exact-current selection
   keeps its existing path.
 - Each scoped admitted-run validator groups the uncovered evaluations by run
   once, then reads each newly appended run's exact evaluation rows by rowid.

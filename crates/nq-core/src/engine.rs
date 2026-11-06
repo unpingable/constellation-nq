@@ -3656,6 +3656,7 @@ impl CollectionEngine {
                                         EvaluationReportSelection::AllMatching
                                     },
                                     history.map(|history| (history, Some(report_id.as_str()))),
+                                    diagnostic_context.is_some(),
                                 )?;
                                 let (diagnostic_artifact_id, diagnostic_artifact) =
                                     if let Some(context) = diagnostic_context.as_ref() {
@@ -4495,6 +4496,7 @@ impl CollectionEngine {
                     &evaluator_artifact_digest,
                     EvaluationReportSelection::AllMatching,
                     Some((history, None)),
+                    false,
                 )?;
                 drop(prepare_timing);
                 Ok(prepared
@@ -6207,6 +6209,7 @@ fn prepare_instance_evaluations(
         evaluator_artifact_digest,
         selection,
         None,
+        false,
     )
 }
 
@@ -6220,6 +6223,7 @@ fn prepare_instance_evaluations_with_history(
     evaluator_artifact_digest: &str,
     selection: EvaluationReportSelection<'_>,
     history: Option<(PreparedHistoricalReports, Option<&str>)>,
+    retain_diagnostic_reports: bool,
 ) -> Result<Vec<PreparedEvaluation>, EngineError> {
     let _timing = nq_store::operation_timing::PhaseTiming::start("core.prepare_evaluations");
     let profile_version = watcher.profile.version.to_string();
@@ -6445,7 +6449,12 @@ fn prepare_instance_evaluations_with_history(
                 evaluation,
                 finding,
             },
-            detector_reports: reports.clone(),
+            // Only diagnostic emission consumes these after detector evaluation.
+            detector_reports: if retain_diagnostic_reports {
+                reports.clone()
+            } else {
+                Vec::new()
+            },
         });
     }
     prepared.sort_by(|left, right| {
@@ -6462,7 +6471,13 @@ fn prepare_instance_evaluations_with_history(
     });
     #[cfg(test)]
     PREPARED_DIAGNOSTIC_REPORT_ENTRIES.with(|count| {
-        count.set(count.get() + prepared.iter().map(|item| item.detector_reports.len()).sum::<usize>());
+        count.set(
+            count.get()
+                + prepared
+                    .iter()
+                    .map(|item| item.detector_reports.len())
+                    .sum::<usize>(),
+        );
     });
     Ok(prepared)
 }
@@ -20052,9 +20067,15 @@ sys.stdout.write("\n")
             panic!("fixture admission failed: {error}");
         }
 
+        let copies_before = PREPARED_DIAGNOSTIC_REPORT_ENTRIES.with(std::cell::Cell::get);
         let emitted = engine
             .diagnostic_execute(&watcher)
             .expect("admitted host execution emits a diagnostic");
+        assert_eq!(
+            PREPARED_DIAGNOSTIC_REPORT_ENTRIES.with(std::cell::Cell::get) - copies_before,
+            1,
+            "diagnostic emission retains its exact selected input report",
+        );
         let SupportedDiagnosticExecution::V2(artifact) = emitted else {
             panic!("new live diagnostic executions use the v2 contract");
         };
