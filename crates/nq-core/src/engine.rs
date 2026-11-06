@@ -8572,10 +8572,69 @@ struct ImmutableReportContext {
     binding: nq_protocol::SubjectBinding,
 }
 
+/// Cache-only binding, conditional on SHA-256 collision/second-preimage
+/// resistance. Metadata stays literal; the body commitment is computed from
+/// actual raw bytes, never taken from the stored semantic digest. Store source
+/// reconciliation independently retains its literal byte-equality contract.
+struct AdmittedMemoRow {
+    report_sequence: i64,
+    report_id: String,
+    instance_id: String,
+    profile_id: String,
+    profile_version: String,
+    profile_digest: String,
+    observed_at: String,
+    received_at: String,
+    report_status: String,
+    semantic_digest: String,
+    canonical_len: usize,
+    canonical_sha256: [u8; 32],
+}
+
+impl AdmittedMemoRow {
+    fn body_commitment(bytes: &[u8]) -> [u8; 32] {
+        use sha2::Digest as _;
+        sha2::Sha256::digest(bytes).into()
+    }
+
+    fn from_row(row: &nq_store::AdmittedReportRow) -> Self {
+        Self {
+            report_sequence: row.report_sequence,
+            report_id: row.report_id.clone(),
+            instance_id: row.instance_id.clone(),
+            profile_id: row.profile_id.clone(),
+            profile_version: row.profile_version.clone(),
+            profile_digest: row.profile_digest.clone(),
+            observed_at: row.observed_at.clone(),
+            received_at: row.received_at.clone(),
+            report_status: row.report_status.clone(),
+            semantic_digest: row.semantic_digest.clone(),
+            canonical_len: row.canonical_json.len(),
+            canonical_sha256: Self::body_commitment(&row.canonical_json),
+        }
+    }
+
+    fn matches(&self, row: &nq_store::AdmittedReportRow) -> bool {
+        self.report_sequence == row.report_sequence
+            && self.report_id == row.report_id
+            && self.instance_id == row.instance_id
+            && self.profile_id == row.profile_id
+            && self.profile_version == row.profile_version
+            && self.profile_digest == row.profile_digest
+            && self.observed_at == row.observed_at
+            && self.received_at == row.received_at
+            && self.report_status == row.report_status
+            && self.semantic_digest == row.semantic_digest
+            && self.canonical_len == row.canonical_json.len()
+            && self.canonical_sha256 == Self::body_commitment(&row.canonical_json)
+    }
+}
+
 struct AdmittedMemoEntry {
-    row: nq_store::AdmittedReportRow,
+    row: AdmittedMemoRow,
     context: Option<ImmutableReportContext>,
     report: Option<DetectorReport>,
+    weight: usize,
 }
 
 #[derive(Default)]
@@ -8596,11 +8655,13 @@ impl AdmittedReportMemo {
     fn exact(&self, row: &nq_store::AdmittedReportRow, digest: &str) -> Option<&AdmittedMemoEntry> {
         self.entries
             .get(&(digest.to_owned(), row.report_id.clone()))
-            .filter(|entry| entry.row == *row)
+            .filter(|entry| entry.row.matches(row))
     }
 
-    /// The original estimated row/reconstruction allowance plus explicit
-    /// context storage. This is an estimated memo budget, not an RSS limit.
+    /// Remove only the original retained body copy's allowance; keep the two
+    /// reconstruction allowances, metadata/headroom and context storage. Add
+    /// the raw commitment, length and saved accounting word. This remains an
+    /// estimate, not an exact allocation or RSS bound.
     fn weight(
         row: &nq_store::AdmittedReportRow,
         context: Option<&ImmutableReportContext>,
@@ -8620,8 +8681,10 @@ impl AdmittedReportMemo {
         .fold(
             row.canonical_json
                 .len()
-                .saturating_mul(3)
-                .saturating_add(512),
+                .saturating_mul(2)
+                .saturating_add(512)
+                .saturating_add(std::mem::size_of::<[u8; 32]>())
+                .saturating_add(2 * std::mem::size_of::<usize>()),
             |sum, field| sum.saturating_add(field.len().saturating_mul(2)),
         );
         // Optional context is inline in every HashMap entry, including None.
@@ -8687,6 +8750,7 @@ impl AdmittedReportMemo {
     ) {
         let key = (digest.to_owned(), row.report_id.clone());
         let prior = self.exact(row, digest);
+        let same_row = prior.is_some();
         let size = Self::weight(
             row,
             context
@@ -8698,11 +8762,9 @@ impl AdmittedReportMemo {
         }
         let old = self.entries.remove(&key);
         if let Some(old) = old.as_ref() {
-            self.bytes = self
-                .bytes
-                .saturating_sub(Self::weight(&old.row, old.context.as_ref()));
+            self.bytes = self.bytes.saturating_sub(old.weight);
         }
-        let prior = old.filter(|entry| entry.row == *row);
+        let prior = old.filter(|_| same_row);
         let (old_context, old_report) =
             prior.map_or((None, None), |entry| (entry.context, entry.report));
         if self.bytes.saturating_add(size) > max_bytes {
@@ -8714,17 +8776,19 @@ impl AdmittedReportMemo {
         self.entries.insert(
             key,
             AdmittedMemoEntry {
-                row: row.clone(),
+                row: AdmittedMemoRow::from_row(row),
                 context: context.or(old_context),
                 report: report.or(old_report),
+                weight: size,
             },
         );
         self.bytes = self.bytes.saturating_add(size);
     }
 }
 
-/// Exact successful immutable row/profile results only; current authority is
-/// never memoized. Refusals and poisoned locks retain original validation.
+/// Successful immutable row/profile results, bound to exact metadata and a
+/// freshly checked raw-body SHA-256 commitment. Current authority is never
+/// memoized. Refusals and poisoned locks retain original validation.
 fn reconstruct_admitted_cached(
     row: &nq_store::AdmittedReportRow,
     profile: &'static dyn ProfileModule,
@@ -19546,7 +19610,8 @@ sys.stdout.write("\n")
             assert_eq!(actual, expected, "cache fit cannot change semantic testimony");
         }
         let clears = RECONSTRUCTION_MEMO_CLEARS.with(std::cell::Cell::get) - clears_before;
-        println!("memo_working_set rows=32 passes=2 hits={hits} misses={misses} clears={clears} accounted_bytes={}", memo.bytes);
+        let source_body_bytes: usize = rows.iter().map(|row| row.canonical_json.len()).sum();
+        println!("memo_working_set rows=32 passes=2 hits={hits} misses={misses} clears={clears} accounted_bytes={} source_body_bytes={source_body_bytes}", memo.bytes);
         assert_eq!(hits, 32, "the second pass must reuse this bounded working set");
         assert_eq!(misses, 32);
         assert_eq!(clears, 0);
@@ -19561,8 +19626,9 @@ sys.stdout.write("\n")
             &format!("report:empty-context-budget-{}", Uuid::new_v4()),
         );
         let report = reconstruct_admitted(&row, fixture.profile).unwrap();
-        // Independently retain the pre-change row/reconstruction allowance.
-        // The newly added inline Option occupies storage even for None.
+        // Preserve the old allowance except the removed body copy. The inline
+        // Option occupies storage even for None; commitment/length/accounting
+        // words must not silently consume that context allowance.
         let original_allowance = [
             &row.report_id,
             &row.instance_id,
@@ -19577,8 +19643,10 @@ sys.stdout.write("\n")
         .iter()
         .map(|field| field.len() * 2)
         .sum::<usize>()
-            + row.canonical_json.len() * 3
-            + 512;
+            + row.canonical_json.len() * 2
+            + 512
+            + 32
+            + 2 * std::mem::size_of::<usize>();
         let added_slot = std::mem::size_of::<Option<ImmutableReportContext>>();
         assert!(added_slot > 0);
         let cap = original_allowance + added_slot - 1;
@@ -19815,6 +19883,84 @@ sys.stdout.write("\n")
                 "an unrelated context must not cache false for the original watcher"
             );
         }
+    }
+
+    #[test]
+    fn context_memo_rejects_each_changed_nonbody_field() {
+        let fixture = SemanticLineageFixture::new();
+        let row = reconstruction_fixture_row(&fixture, "report:metadata-commitment");
+        let report = reconstruct_admitted(&row, fixture.profile).unwrap();
+        let mut memo = AdmittedReportMemo::default();
+        memo.remember(&row, &fixture.profile_digest, None, Some(report), ADMITTED_MEMO_MAX_BYTES);
+        assert!(memo.exact(&row, &fixture.profile_digest).is_some());
+        let changes: [fn(&mut nq_store::AdmittedReportRow); 10] = [
+            |r| r.report_sequence += 1,
+            |r| r.report_id.push('x'),
+            |r| r.instance_id.push('x'),
+            |r| r.profile_id.push('x'),
+            |r| r.profile_version.push('x'),
+            |r| r.profile_digest.push('x'),
+            |r| r.observed_at.push('x'),
+            |r| r.received_at.push('x'),
+            |r| r.report_status.push('x'),
+            |r| r.semantic_digest.push('x'),
+        ];
+        for (field, change) in changes.into_iter().enumerate() {
+            let mut changed = row.clone();
+            change(&mut changed);
+            assert!(memo.exact(&changed, &fixture.profile_digest).is_none(),
+                "changed nonbody field {field} reused cached testimony");
+        }
+        assert!(memo.exact(&row, "different compiled descriptor").is_none());
+    }
+
+    #[test]
+    fn context_memo_poisoned_bytes_do_not_reuse_stored_digest() {
+        let fixture = SemanticLineageFixture::new();
+        let row = reconstruction_fixture_row(&fixture,
+            &format!("report:raw-commitment-{}", Uuid::new_v4()));
+        assert!(report_matches_evaluation_context(&row, fixture.watcher(), &fixture.profile_digest).unwrap());
+        reconstruct_admitted_cached(&row, fixture.profile, &fixture.profile_digest).unwrap();
+        let mut poisoned = row.clone();
+        poisoned.canonical_json = String::from_utf8(row.canonical_json.clone()).unwrap()
+            .replace("backend failed", "backend FAILED").into_bytes();
+        assert_ne!(poisoned.canonical_json, row.canonical_json);
+        assert_eq!(poisoned.canonical_json.len(), row.canonical_json.len());
+        let mut noncanonical = row.clone();
+        noncanonical.canonical_json.push(b'\n');
+        assert_eq!(serde_json::from_slice::<Value>(&noncanonical.canonical_json).unwrap(),
+            serde_json::from_slice::<Value>(&row.canonical_json).unwrap());
+        for changed in [poisoned, noncanonical] {
+            assert_eq!(changed.report_id, row.report_id);
+            assert_eq!(changed.semantic_digest, row.semantic_digest);
+            let before = CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get);
+            let first = report_matches_evaluation_context(&changed, fixture.watcher(),
+                &fixture.profile_digest).unwrap_err().to_string();
+            let second = report_matches_evaluation_context(&changed, fixture.watcher(),
+                &fixture.profile_digest).unwrap_err().to_string();
+            assert_eq!(first, second);
+            assert_eq!(CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get) - before, 2);
+        }
+    }
+
+    #[test]
+    fn context_memo_context_only_entry_upgrades_without_changing_testimony() {
+        let fixture = SemanticLineageFixture::new();
+        let row = reconstruction_fixture_row(&fixture, "report:context-first-upgrade");
+        let decoded: nq_protocol::EvidenceReport = serde_json::from_slice(&row.canonical_json).unwrap();
+        let context = ImmutableReportContext { profile: decoded.profile, binding: decoded.binding };
+        let expected = reconstruct_admitted(&row, fixture.profile).unwrap();
+        let mut memo = AdmittedReportMemo::default();
+        let cap = AdmittedReportMemo::weight(&row, Some(&context));
+        memo.remember(&row, &fixture.profile_digest, Some(context), None, cap);
+        let first = memo.exact(&row, &fixture.profile_digest).unwrap();
+        assert!(first.context.is_some() && first.report.is_none());
+        memo.remember(&row, &fixture.profile_digest, None, Some(expected.clone()), cap);
+        let upgraded = memo.exact(&row, &fixture.profile_digest).unwrap();
+        assert!(upgraded.context.is_some());
+        assert_eq!(upgraded.report.as_ref(), Some(&expected));
+        assert_eq!(memo.bytes, cap);
+        assert_eq!(memo.entries.len(), 1);
     }
 
     #[test]

@@ -1184,11 +1184,16 @@ is bounded by the new rows, the referenced closure, and the schema:
   and profile reconstruction share the existing bounded memo. Repeated selection
   reuses validated binding fields, then compares every current watcher field;
   it never reuses a previous match decision or present admission authority.
-  Reuse requires the complete stored row, including its canonical
-  bytes and every metadata field, to be equal to the row that produced the
-  earlier result, under the same compiled profile descriptor digest. A
-  changed or edited row is therefore reconstructed afresh and returns its
-  original refusal. Refusals are never reused. The memo is in memory only,
+  Reuse requires equality of every stored metadata field and the canonical
+  byte length, under the same compiled profile descriptor digest. The memo
+  retains a SHA-256 commitment instead of a second copy of the canonical body;
+  each candidate hit hashes the actual raw bytes again, without trusting the
+  stored semantic digest or canonicalizing edited bytes. This internal cache
+  binding depends on SHA-256 collision/second-preimage resistance, rather than
+  literal body equality. A mismatch runs the original validation and preserves
+  its refusal. Store prepared-source reconciliation and its fallback still use
+  literal byte equality; this cache supplies no current authority. Refusals are
+  never reused. The memo is in memory only,
   is not persisted, and starts empty at every process start. A one-shot
   command (`collect`, `acquire-next-local`) therefore pays the full
   per-report cost above on its first pass. The long-lived daemon's
@@ -1197,12 +1202,18 @@ is bounded by the new rows, the referenced closure, and the schema:
   allocation or RSS bound: it counts the row's variable fields and a fixed
   per-entry allowance, not the exact validated report payload. Added binding
   strings, JSON storage and fixed optional-field slots (even when empty) are
-  explicitly included within that same estimate.
+  explicitly included within that same estimate. Removing the retained body
+  subtracts only one body-length allowance from the previous estimate; both
+  reconstruction allowances and all other headroom remain. The commitment,
+  length and saved accounting word are added to the estimate. This does not
+  make the estimate an exact heap bound or establish that a deployed working
+  set fits. Raw-byte hashing and detector-report cloning still traverse the
+  retained input on warm hits.
   A row heavier than
   the limit is never stored, and the memo is cleared when it fills. When an
   instance's retained reports exceed the memo, repeated clearing can
-  eliminate most reuse. Each miss then also clones the row and the
-  reconstructed report. The opt-in `core.historical_snapshot`,
+  eliminate most reuse. Each miss retains row metadata and a body commitment,
+  and clones the reconstructed report. The opt-in `core.historical_snapshot`,
   `core.historical_selection` and `core.historical_reconstruction` timings
   separate source loading, selection and reconstruction; a combined preparation
   duration alone does not attribute the cost or establish effective reuse. The memo changes no validation rule, profile,
