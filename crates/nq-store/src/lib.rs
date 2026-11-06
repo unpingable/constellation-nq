@@ -28,6 +28,8 @@ pub mod capacity;
 pub mod operation_timing;
 mod full_validation;
 pub use full_validation::FullValidation;
+mod prepared_evidence;
+pub use prepared_evidence::PreparedEvidenceSnapshot;
 mod history_scope;
 mod retention;
 pub use retention::{
@@ -1902,6 +1904,7 @@ pub struct Store {
     path: Option<PathBuf>,
     schema_mode: StoreSchemaMode,
     validation: ValidationState,
+    prepared_handle: std::sync::Arc<()>,
 }
 
 /// What this handle has proven about history, and through which frontier.
@@ -2046,6 +2049,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
+            prepared_handle: std::sync::Arc::new(()),
             capacity: Some(envelope),
         };
         store.validate()?;
@@ -2163,6 +2167,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
+            prepared_handle: std::sync::Arc::new(()),
             capacity: None,
         };
         inspection.validate_identity()?;
@@ -2190,6 +2195,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
+            prepared_handle: std::sync::Arc::new(()),
             capacity: Some(envelope),
         };
         if let Some(full) = require_full {
@@ -2230,6 +2236,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
+            prepared_handle: std::sync::Arc::new(()),
             capacity: None,
         };
         store.validate_on_open(false)?;
@@ -2269,6 +2276,7 @@ impl Store {
             path: Some(canonical_path),
             schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
+            prepared_handle: std::sync::Arc::new(()),
             capacity: None,
         };
         store.validate()?;
@@ -2297,6 +2305,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
+            prepared_handle: std::sync::Arc::new(()),
             capacity: None,
         };
         store.validate_v3_upgrade_source()?;
@@ -2326,6 +2335,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
+            prepared_handle: std::sync::Arc::new(()),
             capacity: None,
         };
         validate_v4_upgrade_source_connection(&store.connection)?;
@@ -2369,6 +2379,7 @@ impl Store {
             path: None,
             schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
+            prepared_handle: std::sync::Arc::new(()),
             capacity: None,
         };
         store.validate()?;
@@ -4247,6 +4258,51 @@ impl Store {
             &CollectionReceipt,
         ) -> Result<AdmittedCollectionCompletion<T>, E>,
     {
+        self.commit_admitted_collection_inner(collection, None, validate, |view, receipt, _| {
+            build(view, receipt)
+        })
+    }
+
+    /// The same atomic admitted commit with one consumed prepared source.
+    /// Resolve its handle, generation and pre-read stamp after `validate` and
+    /// immediately before insertion; changed stamps reconcile exact full source.
+    pub fn commit_admitted_collection_prepared_validated<T, E, P, F>(
+        &mut self,
+        collection: &CollectionInput,
+        prepared: PreparedEvidenceSnapshot,
+        validate: P,
+        build: F,
+    ) -> Result<ProviderIntakeCommit<T>, E>
+    where
+        E: From<StoreError>,
+        P: FnOnce(&Self, &HistoryFrontier) -> Result<(), E>,
+        F: FnOnce(&AdmittedCollectionView<'_, '_>, &CollectionReceipt, EvidenceSnapshot)
+            -> Result<AdmittedCollectionCompletion<T>, E>,
+    {
+        self.commit_admitted_collection_inner(
+            collection, Some(prepared), validate,
+            |view, receipt, snapshot| {
+                let snapshot = snapshot.ok_or_else(|| E::from(StoreError::Invariant(
+                    "prepared collection lost its resolved snapshot".into(),
+                )))?;
+                build(view, receipt, snapshot)
+            },
+        )
+    }
+
+    fn commit_admitted_collection_inner<T, E, P, F>(
+        &mut self,
+        collection: &CollectionInput,
+        prepared: Option<PreparedEvidenceSnapshot>,
+        validate: P,
+        build: F,
+    ) -> Result<ProviderIntakeCommit<T>, E>
+    where
+        E: From<StoreError>,
+        P: FnOnce(&Self, &HistoryFrontier) -> Result<(), E>,
+        F: FnOnce(&AdmittedCollectionView<'_, '_>, &CollectionReceipt, Option<EvidenceSnapshot>)
+            -> Result<AdmittedCollectionCompletion<T>, E>,
+    {
         let _timing = operation_timing::PhaseTiming::start("store.admitted_commit");
         validate_collection(collection).map_err(E::from)?;
         if !is_admitted_collection(collection) {
@@ -4277,19 +4333,38 @@ impl Store {
         validate(self, &bounds)?;
         drop(prevalidation_timing);
         let insertion_timing = operation_timing::PhaseTiming::start("store.collection_insert");
+        // The proof is checked after validate, immediately before our first
+        // insertion. No caller-supplied changed flag or reusable stamp escapes.
+        let prepared = prepared.map(|proof| {
+            proof.require_instance(&collection.run.instance_id)?;
+            proof.resolve(self, &transaction)
+        })
+            .transpose().map_err(E::from)?;
         let receipt = insert_collection(&transaction, collection).map_err(E::from)?;
         if receipt.report_sequence.is_none() || receipt.semantic_digest.is_none() {
             return Err(E::from(StoreError::Invariant(
                 "admitted collection did not allocate its report identity".into(),
             )));
         }
+        let snapshot = prepared.map(|proof| {
+            let Some(SubmissionInput { disposition: SubmissionDisposition::Admitted(report), .. }) =
+                collection.submission.as_ref() else {
+                    return Err(StoreError::Invariant("prepared collection lacks its admitted report".into()));
+                };
+            proof.finish(&transaction, Some((
+                &collection.run.instance_id, &report.report_id,
+                receipt.report_sequence.ok_or_else(|| StoreError::Invariant(
+                    "prepared collection lacks its report sequence".into(),
+                ))?,
+            )))
+        }).transpose().map_err(E::from)?;
         drop(insertion_timing);
         let build_timing = operation_timing::PhaseTiming::start("store.admitted_build");
         let completion = {
             let view = AdmittedCollectionView {
                 transaction: &transaction,
             };
-            build(&view, &receipt)?
+            build(&view, &receipt, snapshot)?
         };
         drop(build_timing);
         let validation_timing = operation_timing::PhaseTiming::start("store.admitted_insert_validate");
@@ -6487,6 +6562,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
+            prepared_handle: std::sync::Arc::new(()),
             capacity: None,
         };
         store.validate_v3_upgrade_source()?;
@@ -6650,6 +6726,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
+            prepared_handle: std::sync::Arc::new(()),
             capacity: None,
         };
         validate_v4_upgrade_source_connection(&store.connection)?;
@@ -6765,6 +6842,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
+            prepared_handle: std::sync::Arc::new(()),
             capacity: None,
         };
         let transaction = store
@@ -6931,6 +7009,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             schema_mode: StoreSchemaMode::LegacyUpgradeV14,
             validation: ValidationState::default(),
+            prepared_handle: std::sync::Arc::new(()),
             capacity: Some(maintenance_envelope),
         };
         store.validate()?;
@@ -7083,6 +7162,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             schema_mode: StoreSchemaMode::Current,
             validation: ValidationState::default(),
+            prepared_handle: std::sync::Arc::new(()),
             capacity: Some(envelope),
         };
         store.validate()?;
@@ -7166,6 +7246,7 @@ impl Store {
             path: Some(path.to_path_buf()),
             schema_mode: StoreSchemaMode::LegacyUpgradeV13,
             validation: ValidationState::default(),
+            prepared_handle: std::sync::Arc::new(()),
             capacity: None,
         };
         store.validate()?;
@@ -7319,6 +7400,46 @@ impl Store {
             &HistoryFrontier,
         ) -> Result<(Vec<EvaluationCommitInput>, T), E>,
     {
+        self.commit_evaluations_inner(None, |_, _| Ok(()), |store, view, bounds, _| {
+            build(store, view, bounds)
+        })
+    }
+
+    /// Resolve one prepared source inside the original guarded transaction,
+    /// after `validate` and before detector construction or evaluation insertion.
+    /// `build` receives current metadata and citations with that resolved source.
+    pub fn commit_evaluations_prepared_validated<T, E, P, F>(
+        &mut self,
+        prepared: PreparedEvidenceSnapshot,
+        validate: P,
+        build: F,
+    ) -> Result<T, E>
+    where
+        E: From<StoreError>,
+        P: FnOnce(&Self, &HistoryFrontier) -> Result<(), E>,
+        F: FnOnce(&Self, &AdmittedCollectionView<'_, '_>, &HistoryFrontier, EvidenceSnapshot)
+            -> Result<(Vec<EvaluationCommitInput>, T), E>,
+    {
+        self.commit_evaluations_inner(Some(prepared), validate, |store, view, bounds, snapshot| {
+            let snapshot = snapshot.ok_or_else(|| E::from(StoreError::Invariant(
+                "prepared evaluation lost its resolved snapshot".into(),
+            )))?;
+            build(store, view, bounds, snapshot)
+        })
+    }
+
+    fn commit_evaluations_inner<T, E, P, F>(
+        &mut self,
+        prepared: Option<PreparedEvidenceSnapshot>,
+        validate: P,
+        build: F,
+    ) -> Result<T, E>
+    where
+        E: From<StoreError>,
+        P: FnOnce(&Self, &HistoryFrontier) -> Result<(), E>,
+        F: FnOnce(&Self, &AdmittedCollectionView<'_, '_>, &HistoryFrontier, Option<EvidenceSnapshot>)
+            -> Result<(Vec<EvaluationCommitInput>, T), E>,
+    {
         let _timing = operation_timing::PhaseTiming::start("store.evaluation_commit");
         self.observe_retention_boundary().map_err(E::from)?;
         let validated = self.validation.store_validated.clone();
@@ -7326,11 +7447,15 @@ impl Store {
         let transaction = self.shared_immediate_transaction().map_err(E::from)?;
         let bounds = HistoryFrontier::capture_bounds(&transaction).map_err(E::from)?;
         let build_timing = operation_timing::PhaseTiming::start("store.evaluation_build");
+        validate(self, &bounds)?;
+        let snapshot = prepared.map(|proof| {
+            proof.resolve(self, &transaction)?.finish(&transaction, None)
+        }).transpose().map_err(E::from)?;
         let (evaluations, value) = {
             let view = AdmittedCollectionView {
                 transaction: &transaction,
             };
-            build(self, &view, &bounds)?
+            build(self, &view, &bounds, snapshot)?
         };
         drop(build_timing);
         let validation_timing = operation_timing::PhaseTiming::start("store.evaluation_insert_validate");
@@ -10237,20 +10362,38 @@ const EXPIRED_CITATIONS_SQL: &str = "SELECT DISTINCT report.report_sequence, rep
                  WHERE report.instance_id = ?1 AND report.source_expired = 1
                  ORDER BY report.report_sequence";
 
-fn evidence_snapshot_from_connection(
+const ADMITTED_REPORT_COLUMNS: &str = "report_sequence, report_id, instance_id, profile_id,
+    profile_version, profile_digest, observed_at, received_at, report_status,
+    canonical_json, semantic_digest";
+
+fn decode_admitted_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<AdmittedReportRow> {
+    Ok(AdmittedReportRow {
+        report_sequence: row.get(0)?,
+        report_id: row.get(1)?,
+        instance_id: row.get(2)?,
+        profile_id: row.get(3)?,
+        profile_version: row.get(4)?,
+        profile_digest: row.get(5)?,
+        observed_at: row.get(6)?,
+        received_at: row.get(7)?,
+        report_status: row.get(8)?,
+        canonical_json: row.get(9)?,
+        semantic_digest: row.get(10)?,
+    })
+}
+
+fn evidence_snapshot_metadata_from_connection(
     connection: &Connection,
     instance_ids: &[String],
-) -> Result<EvidenceSnapshot, StoreError> {
-    let mut instances = BTreeSet::new();
-    instances.extend(instance_ids.iter().cloned());
+) -> Result<(Vec<EvaluationWatermark>, Vec<AdmittedReportRow>), StoreError> {
+    let instances: BTreeSet<_> = instance_ids.iter().collect();
     let mut watermarks = Vec::with_capacity(instances.len());
-    let mut reports = Vec::new();
     let mut expired_citations = Vec::new();
     for instance_id in instances {
         let max_report_sequence: i64 = connection.query_row(
             "SELECT COALESCE(MAX(report_sequence), 0)
              FROM admitted_reports WHERE instance_id = ?1",
-            [&instance_id],
+            [instance_id],
             |row| row.get(0),
         )?;
         let watermark_received_at = if max_report_sequence == 0 {
@@ -10268,60 +10411,37 @@ fn evidence_snapshot_from_connection(
             max_report_sequence,
             watermark_received_at,
         });
-
-        // Source-expired reports are retained identities, not evidence.
-        let mut statement = connection.prepare(&format!(
-            "SELECT report_sequence, report_id, instance_id, profile_id,
-                    profile_version, profile_digest, observed_at, received_at,
-                    report_status, canonical_json, semantic_digest
-             FROM admitted_reports AS report
-             WHERE instance_id = ?1 AND report_sequence <= ?2 AND {}
-             ORDER BY report_sequence",
-            retention::full_source_condition(connection, "report")?
-        ))?;
-        let rows = statement.query_map(params![instance_id, max_report_sequence], |row| {
-            Ok(AdmittedReportRow {
-                report_sequence: row.get(0)?,
-                report_id: row.get(1)?,
-                instance_id: row.get(2)?,
-                profile_id: row.get(3)?,
-                profile_version: row.get(4)?,
-                profile_digest: row.get(5)?,
-                observed_at: row.get(6)?,
-                received_at: row.get(7)?,
-                report_status: row.get(8)?,
-                canonical_json: row.get(9)?,
-                semantic_digest: row.get(10)?,
-            })
-        })?;
-        reports.extend(rows.collect::<Result<Vec<_>, _>>()?);
         if retention::holes_schema(connection)? {
-            let mut statement = connection.prepare(
-                EXPIRED_CITATIONS_SQL,
-            )?;
-            let rows = statement.query_map([&instance_id], |row| {
-                Ok(AdmittedReportRow {
-                    report_sequence: row.get(0)?,
-                    report_id: row.get(1)?,
-                    instance_id: row.get(2)?,
-                    profile_id: row.get(3)?,
-                    profile_version: row.get(4)?,
-                    profile_digest: row.get(5)?,
-                    observed_at: row.get(6)?,
-                    received_at: row.get(7)?,
-                    report_status: row.get(8)?,
-                    canonical_json: row.get(9)?,
-                    semantic_digest: row.get(10)?,
-                })
-            })?;
-            expired_citations.extend(rows.collect::<Result<Vec<_>, _>>()?);
+            let mut statement = connection.prepare(EXPIRED_CITATIONS_SQL)?;
+            expired_citations.extend(statement.query_map([instance_id], decode_admitted_report)?
+                .collect::<Result<Vec<_>, _>>()?);
         }
     }
-    Ok(EvidenceSnapshot {
-        watermarks,
-        reports,
-        expired_citations,
-    })
+    Ok((watermarks, expired_citations))
+}
+
+fn evidence_snapshot_from_connection(
+    connection: &Connection,
+    instance_ids: &[String],
+) -> Result<EvidenceSnapshot, StoreError> {
+    let (watermarks, expired_citations) =
+        evidence_snapshot_metadata_from_connection(connection, instance_ids)?;
+    let instances: BTreeSet<_> = instance_ids.iter().collect();
+    let mut reports = Vec::new();
+    for instance_id in instances {
+        // Source-expired reports are retained identities, not detector evidence.
+        let mut statement = connection.prepare(&format!(
+            "SELECT {ADMITTED_REPORT_COLUMNS} FROM admitted_reports AS report
+             WHERE instance_id = ?1 AND report_sequence <= ?2 AND {}
+             ORDER BY report_sequence",
+            retention::full_source_condition(connection, "report")?,
+        ))?;
+        let watermark = watermarks.iter().find(|mark| &mark.instance_id == instance_id)
+            .ok_or_else(|| StoreError::Invariant("evidence snapshot lacks instance watermark".into()))?;
+        reports.extend(statement.query_map(params![instance_id, watermark.max_report_sequence],
+            decode_admitted_report)?.collect::<Result<Vec<_>, _>>()?);
+    }
+    Ok(EvidenceSnapshot { watermarks, reports, expired_citations })
 }
 
 fn finding_snapshots_from_connection(
@@ -14943,6 +15063,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    mod prepared_evidence_tests {
+        use super::*;
+        include!("prepared_evidence_tests.rs");
+    }
 
     const TIME: &str = "2026-07-16T12:00:00.000Z";
     const ADMISSION_A: &str = "00000000-0000-4000-8000-000000000000";

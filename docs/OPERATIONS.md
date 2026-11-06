@@ -1217,16 +1217,25 @@ is bounded by the new rows, the referenced closure, and the schema:
   provenance link between the retired generation and the new store.
 - Ordinary collection and freshness sweeps prepare historical context selection
   and report reconstruction before taking the common writer guard. The guarded
-  transaction rechecks the captured retention generation and exact source rows
-  for that instance, then handles the new current report, detectors, findings
-  and atomic commit as before. A changed same-instance report set refuses,
+  transaction rechecks the captured retention generation. A consumed Store-owned
+  snapshot binds the complete prepared source to its originating handle and
+  pre-read SQLite data version, total-change counter and schema cookie. If those
+  stamps still match after guarded validation, the existing source vector moves
+  into the transaction's resolved snapshot. A changed stamp or different handle
+  instead reads the complete current source and compares exact membership and
+  bytes. An unrelated commit or rollback can therefore fall back and succeed.
+  The newly inserted report is read by its exact instance, report identity and
+  receipt sequence; watermarks, compact citations and findings are read in the
+  current transaction. A changed same-instance report set refuses,
   including an appended report outside the matching profile/context; an append
   for another instance alone does not. This is conservative optimistic admission,
   not a fairness or latency guarantee. The five-second guard refusal and the
   existing memo budget remain unchanged. `core.historical_preparation` records
   the preparation cost. Its source/matching vectors and reconstructed reports
-  are owned by one operation and moved into the evaluator; memory still grows
-  with retained instance history. Prepared evaluations retain an additional
+  are owned by one operation. The unchanged path avoids a second retained-source
+  materialization; the fallback still reads the full current source. Preparation
+  and detector inputs still grow with retained instance history. Prepared
+  evaluations retain an additional
   report copy only for diagnostic artifact emission; ordinary collection and
   freshness sweeps do not keep that unused diagnostic copy. This reduces
   temporary report copies, without an RSS bound or measured reduction claim.

@@ -3612,132 +3612,144 @@ impl CollectionEngine {
                             submission: Some(submission),
                         };
                         ensure_replay_cursor(&self.store, &mut self.replay)?;
-                        let history = if local_successor_acquisition_id.is_none() {
-                            Some(PreparedHistoricalReports::prepare(
-                                &mut self.store,
-                                watcher,
-                                profile,
-                            )?)
+                        let (prepared_snapshot, history) = if local_successor_acquisition_id.is_none() {
+                            let (source, history) = PreparedHistoricalReports::prepare(
+                                &mut self.store, watcher, profile,
+                            )?;
+                            (Some(source), Some(history))
                         } else {
-                            None
+                            (None, None)
                         };
                         let generation = history.as_ref().map(|history| history.generation);
                         let replay = &mut self.replay;
-                        let committed = self.store.commit_admitted_collection_validated(
-                            &collection,
-                            |store, bounds| {
-                                if let Some(generation) = generation {
-                                    PreparedHistoricalReports::require_generation(store, generation)?;
-                                }
-                                advance_engine_cursor(store, replay, bounds)
-                            },
-                            |view, receipt| {
-                                let snapshot = view.evidence_snapshot(std::slice::from_ref(
+                        let validate = |store: &Store, bounds: &nq_store::HistoryFrontier| {
+                            if let Some(generation) = generation {
+                                PreparedHistoricalReports::require_generation(store, generation)?;
+                            }
+                            advance_engine_cursor(store, replay, bounds)
+                        };
+                        let build = |view: &nq_store::AdmittedCollectionView<'_, '_>,
+                                     receipt: &nq_store::CollectionReceipt,
+                                     snapshot: Option<EvidenceSnapshot>| {
+                            let snapshot = match snapshot {
+                                Some(snapshot) => snapshot,
+                                None => view.evidence_snapshot(std::slice::from_ref(
                                     &watcher.instance_id,
-                                ))?;
-                                if emit_diagnostic {
-                                    if local_successor_acquisition_id.is_some() {
-                                        require_successor_diagnostic_snapshot(&snapshot, watcher, descriptor_digest.as_str(), &report_id)?;
-                                    } else {
-                                        require_fresh_diagnostic_snapshot(&snapshot, watcher, descriptor_digest.as_str(), &report_id)?;
-                                    }
+                                ))?,
+                            };
+                            if emit_diagnostic {
+                                if local_successor_acquisition_id.is_some() {
+                                    require_successor_diagnostic_snapshot(&snapshot, watcher, descriptor_digest.as_str(), &report_id)?;
+                                } else {
+                                    require_fresh_diagnostic_snapshot(&snapshot, watcher, descriptor_digest.as_str(), &report_id)?;
                                 }
-                                let current_findings = view.finding_snapshots()?;
-                                let prepared = prepare_instance_evaluations_with_history(
-                                    watcher,
-                                    profile,
-                                    Some(&run_id),
-                                    &snapshot,
-                                    &current_findings,
-                                    &evaluator_artifact_digest,
-                                    if local_successor_acquisition_id.is_some() {
-                                        EvaluationReportSelection::ExactCurrent(&report_id)
-                                    } else {
-                                        EvaluationReportSelection::AllMatching
-                                    },
-                                    history.map(|history| (history, Some(report_id.as_str()))),
-                                    diagnostic_context.is_some(),
-                                )?;
-                                let (diagnostic_artifact_id, diagnostic_artifact) =
-                                    if let Some(context) = diagnostic_context.as_ref() {
-                                        let [evaluation] = prepared.as_slice() else {
-                                            return Err(EngineError::Invariant(
-                                                "diagnostic execution requires exactly one prepared evaluation"
-                                                    .into(),
-                                            ));
-                                        };
-                                        let artifact = context.finish(
-                                            &evaluation.envelope,
-                                            &evaluation.detector_reports,
-                                        )?;
-                                        let artifact_id = artifact.artifact_id.0.clone();
-                                        let canonical_bytes =
-                                            CanonicalDocument::from_canonical_bytes(
-                                                artifact.canonical_bytes().map_err(|error| {
-                                                    EngineError::Canonical(error.to_string())
-                                                })?,
-                                            )?;
-                                        (
-                                            Some(artifact_id.clone()),
-                                            Some(DiagnosticArtifactCommitInput {
-                                                artifact_id,
-                                                contract_schema:
-                                                    DIAGNOSTIC_EXECUTION_V2_SCHEMA.to_owned(),
-                                                canonical_bytes,
-                                                local_origin:
-                                                    DiagnosticArtifactLocalOriginInput {
-                                                        run_id: run_id.clone(),
-                                                        evaluation_id: Some(
-                                                            evaluation
-                                                                .envelope
-                                                                .evaluation_id
-                                                                .clone(),
-                                                        ),
-                                                        completed_at: timestamp(
-                                                            artifact.completed_at,
-                                                        ),
-                                                    },
-                                            }),
-                                        )
-                                    } else {
-                                        (None, None)
-                                    };
-                                let evaluations = prepared
-                                    .iter()
-                                    .map(|prepared| prepared.envelope.clone())
-                                    .collect();
-                                let outcome = CollectionOutcome::admitted(
-                                    watcher.instance_id.clone(),
-                                    run_id.clone(),
-                                    report_id.clone(),
-                                    report_status.clone(),
-                                    receipt.semantic_digest.clone().ok_or_else(|| {
-                                        EngineError::Invariant(
-                                            "admitted collection returned no semantic digest"
+                            }
+                            let current_findings = view.finding_snapshots()?;
+                            let prepared = prepare_instance_evaluations_with_history(
+                                watcher,
+                                profile,
+                                Some(&run_id),
+                                &snapshot,
+                                &current_findings,
+                                &evaluator_artifact_digest,
+                                if local_successor_acquisition_id.is_some() {
+                                    EvaluationReportSelection::ExactCurrent(&report_id)
+                                } else {
+                                    EvaluationReportSelection::AllMatching
+                                },
+                                history.map(|history| (history, Some(report_id.as_str()))),
+                                diagnostic_context.is_some(),
+                            )?;
+                            let (diagnostic_artifact_id, diagnostic_artifact) =
+                                if let Some(context) = diagnostic_context.as_ref() {
+                                    let [evaluation] = prepared.as_slice() else {
+                                        return Err(EngineError::Invariant(
+                                            "diagnostic execution requires exactly one prepared evaluation"
                                                 .into(),
-                                        )
-                                    })?,
-                                    evaluations,
-                                );
-                                validate_provider_input_downstream_correspondence(
-                                    &collection.intake,
-                                    &outcome,
-                                )?;
-                                Ok::<_, EngineError>(AdmittedCollectionCompletion {
-                                    status: instance_status_event(watcher, &outcome)?,
-                                    evaluations: prepared
-                                        .into_iter()
-                                        .map(|prepared| prepared.commit)
-                                        .collect(),
-                                    diagnostic_artifact,
-                                    value: CollectionExecution {
-                                        outcome,
-                                        diagnostic: None,
-                                        diagnostic_artifact_id,
-                                    },
-                                })
-                            },
-                        )?;
+                                        ));
+                                    };
+                                    let artifact = context.finish(
+                                        &evaluation.envelope,
+                                        &evaluation.detector_reports,
+                                    )?;
+                                    let artifact_id = artifact.artifact_id.0.clone();
+                                    let canonical_bytes =
+                                        CanonicalDocument::from_canonical_bytes(
+                                            artifact.canonical_bytes().map_err(|error| {
+                                                EngineError::Canonical(error.to_string())
+                                            })?,
+                                        )?;
+                                    (
+                                        Some(artifact_id.clone()),
+                                        Some(DiagnosticArtifactCommitInput {
+                                            artifact_id,
+                                            contract_schema:
+                                                DIAGNOSTIC_EXECUTION_V2_SCHEMA.to_owned(),
+                                            canonical_bytes,
+                                            local_origin:
+                                                DiagnosticArtifactLocalOriginInput {
+                                                    run_id: run_id.clone(),
+                                                    evaluation_id: Some(
+                                                        evaluation
+                                                            .envelope
+                                                            .evaluation_id
+                                                            .clone(),
+                                                    ),
+                                                    completed_at: timestamp(
+                                                        artifact.completed_at,
+                                                    ),
+                                                },
+                                        }),
+                                    )
+                                } else {
+                                    (None, None)
+                                };
+                            let evaluations = prepared
+                                .iter()
+                                .map(|prepared| prepared.envelope.clone())
+                                .collect();
+                            let outcome = CollectionOutcome::admitted(
+                                watcher.instance_id.clone(),
+                                run_id.clone(),
+                                report_id.clone(),
+                                report_status.clone(),
+                                receipt.semantic_digest.clone().ok_or_else(|| {
+                                    EngineError::Invariant(
+                                        "admitted collection returned no semantic digest"
+                                            .into(),
+                                    )
+                                })?,
+                                evaluations,
+                            );
+                            validate_provider_input_downstream_correspondence(
+                                &collection.intake,
+                                &outcome,
+                            )?;
+                            Ok::<_, EngineError>(AdmittedCollectionCompletion {
+                                status: instance_status_event(watcher, &outcome)?,
+                                evaluations: prepared
+                                    .into_iter()
+                                    .map(|prepared| prepared.commit)
+                                    .collect(),
+                                diagnostic_artifact,
+                                value: CollectionExecution {
+                                    outcome,
+                                    diagnostic: None,
+                                    diagnostic_artifact_id,
+                                },
+                            })
+                        };
+                        let committed = if let Some(source) = prepared_snapshot {
+                            self.store.commit_admitted_collection_prepared_validated(
+                                &collection, source, validate,
+                                |view, receipt, snapshot| build(view, receipt, Some(snapshot)),
+                            )?
+                        } else {
+                            self.store.commit_admitted_collection_validated(
+                                &collection, validate,
+                                |view, receipt| build(view, receipt, None),
+                            )?
+                        };
                         match committed {
                             ProviderIntakeCommit::Committed { mut value, .. } => {
                                 if local_successor_acquisition_id.is_none()
@@ -4465,45 +4477,47 @@ impl CollectionEngine {
             .as_str()
             .to_owned();
         ensure_replay_cursor(&self.store, &mut self.replay)?;
-        let history = PreparedHistoricalReports::prepare(&mut self.store, watcher, profile)?;
+        let (source, history) = PreparedHistoricalReports::prepare(&mut self.store, watcher, profile)?;
+        let generation = history.generation;
         let replay = &mut self.replay;
         // Pure historical selection/reconstruction is outside writer admission.
         // Recheck its exact source and retention boundary under the original
         // IMMEDIATE transaction; detectors/findings and the atomic commit stay
         // inside that transaction.
         self.store
-            .commit_evaluations_validated(|store, view, bounds| {
-                PreparedHistoricalReports::require_generation(store, history.generation)?;
-                let snapshot_timing =
-                    nq_store::operation_timing::PhaseTiming::start("core.evaluation_snapshot");
-                let snapshot =
-                    view.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
-                drop(snapshot_timing);
-                let replay_timing = nq_store::operation_timing::PhaseTiming::start("core.evaluation_replay");
-                advance_engine_cursor(store, replay, bounds)?;
-                drop(replay_timing);
-                let findings_timing = nq_store::operation_timing::PhaseTiming::start("core.evaluation_findings");
-                let current_findings = view.finding_snapshots()?;
-                drop(findings_timing);
-                let prepare_timing =
-                    nq_store::operation_timing::PhaseTiming::start("core.evaluation_prepare");
-                let prepared = prepare_instance_evaluations_with_history(
-                    watcher,
-                    profile,
-                    trigger_run_id,
-                    &snapshot,
-                    &current_findings,
-                    &evaluator_artifact_digest,
-                    EvaluationReportSelection::AllMatching,
-                    Some((history, None)),
-                    false,
-                )?;
-                drop(prepare_timing);
-                Ok(prepared
-                    .into_iter()
-                    .map(|prepared| (prepared.commit, prepared.envelope))
-                    .unzip())
-            })
+            .commit_evaluations_prepared_validated(
+                source,
+                |store, bounds| {
+                    PreparedHistoricalReports::require_generation(store, generation)?;
+                    let replay_timing = nq_store::operation_timing::PhaseTiming::start("core.evaluation_replay");
+                    advance_engine_cursor(store, replay, bounds)?;
+                    drop(replay_timing);
+                    Ok::<_, EngineError>(())
+                },
+                |_, view, _, snapshot| {
+                    let findings_timing = nq_store::operation_timing::PhaseTiming::start("core.evaluation_findings");
+                    let current_findings = view.finding_snapshots()?;
+                    drop(findings_timing);
+                    let prepare_timing =
+                        nq_store::operation_timing::PhaseTiming::start("core.evaluation_prepare");
+                    let prepared = prepare_instance_evaluations_with_history(
+                        watcher,
+                        profile,
+                        trigger_run_id,
+                        &snapshot,
+                        &current_findings,
+                        &evaluator_artifact_digest,
+                        EvaluationReportSelection::AllMatching,
+                        Some((history, None)),
+                        false,
+                    )?;
+                    drop(prepare_timing);
+                    Ok(prepared
+                        .into_iter()
+                        .map(|prepared| (prepared.commit, prepared.envelope))
+                        .unzip())
+                },
+            )
     }
 }
 
@@ -6047,7 +6061,6 @@ struct PreparedEvaluation {
 /// at admission rather than silently become this context's new boundary.
 struct PreparedHistoricalReports {
     generation: i64,
-    source_rows: Vec<nq_store::AdmittedReportRow>,
     matching_rows: Vec<nq_store::AdmittedReportRow>,
     reports: Vec<DetectorReport>,
 }
@@ -6057,12 +6070,13 @@ impl PreparedHistoricalReports {
         store: &mut Store,
         watcher: &WatcherConfig,
         profile: &'static dyn ProfileModule,
-    ) -> Result<Self, EngineError> {
+    ) -> Result<(nq_store::PreparedEvidenceSnapshot, Self), EngineError> {
         let _timing = nq_store::operation_timing::PhaseTiming::start("core.historical_preparation");
-        let generation = store.retention_generation()?;
         let snapshot_timing =
             nq_store::operation_timing::PhaseTiming::start("core.historical_snapshot");
-        let snapshot = store.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
+        let source = store.prepare_evidence_snapshot(&watcher.instance_id)?;
+        let generation = source.retention_generation();
+        let snapshot = source.snapshot();
         snapshot_timing.value("report_rows", snapshot.reports.len() as i64);
         drop(snapshot_timing);
         let digest = profile
@@ -6088,12 +6102,11 @@ impl PreparedHistoricalReports {
             .map(|row| reconstruct_admitted_cached(row, profile, digest.as_str()))
             .collect::<Result<Vec<_>, _>>()?;
         drop(reconstruction_timing);
-        Ok(Self {
+        Ok((source, Self {
             generation,
-            source_rows: snapshot.reports,
             matching_rows,
             reports,
-        })
+        }))
     }
 
     fn require_generation(store: &Store, generation: i64) -> Result<(), EngineError> {
@@ -6105,10 +6118,9 @@ impl PreparedHistoricalReports {
         Ok(())
     }
 
-    /// Recheck exact same-instance source membership/bytes while the original
-    /// writer guard is held. A newly inserted current report is the sole extra
-    /// row; its context and reconstruction are still checked here. Other
-    /// same-instance appends conservatively refuse, even if nonmatching.
+    /// Store has consumed and resolved the complete immutable source under the
+    /// original writer guard. The newly inserted current occurrence is the
+    /// sole extra row; its identity, context and reconstruction stay checked here.
     fn reconcile(
         self,
         snapshot: &EvidenceSnapshot,
@@ -6117,9 +6129,9 @@ impl PreparedHistoricalReports {
         digest: &str,
         current_report_id: Option<&str>,
     ) -> Result<(Vec<nq_store::AdmittedReportRow>, Vec<DetectorReport>), EngineError> {
-        let (current_history, current) = match current_report_id {
+        let current = match current_report_id {
             Some(id) => {
-                let (current, history) = snapshot.reports.split_last().ok_or_else(|| {
+                let (current, _) = snapshot.reports.split_last().ok_or_else(|| {
                     EngineError::Invariant(
                         "newly admitted report is absent from its snapshot".into(),
                     )
@@ -6129,24 +6141,15 @@ impl PreparedHistoricalReports {
                         "newly admitted report is not the snapshot's last report".into(),
                     ));
                 }
-                (history, Some(current))
+                Some(current)
             }
-            None => (snapshot.reports.as_slice(), None),
+            None => None,
         };
         let Self {
-            source_rows,
             mut matching_rows,
             mut reports,
             ..
         } = self;
-        if source_rows.as_slice() != current_history {
-            return Err(
-                nq_store::StoreError::Refused(nq_store::Refusal::HistoryChanged("during")).into(),
-            );
-        }
-        // Release the old source vector before detector/finding preparation;
-        // matching rows and reconstructions move into the existing evaluator.
-        drop(source_rows);
         if let Some(current) = current
             && report_matches_evaluation_context(current, watcher, digest)?
         {
@@ -18103,7 +18106,7 @@ sys.stdout.write("\n")
             }).unwrap();
             REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = Some(None));
             commit_real_host_detector_report(&mut store,&watcher,"report-first","coherent",Utc::now(),1.0,None);
-            let history = PreparedHistoricalReports::prepare(&mut store,&watcher,profile).unwrap();
+            let (source, history) = PreparedHistoricalReports::prepare(&mut store,&watcher,profile).unwrap();
             let admission = store.latest_binding(&watcher.instance_id).unwrap().unwrap().admission_id.unwrap();
             let concurrent = watcher.clone();
             let (_,_,mut late) = std::thread::spawn(move || {
@@ -18124,18 +18127,17 @@ sys.stdout.write("\n")
                 let admission = store.latest_binding(&watcher.instance_id).unwrap().unwrap().admission_id.unwrap();
                 let run = test_run(&store,profile,&watcher.instance_id,"pending",admission,AcquisitionOutcome::Response);
                 let pending = test_collection(&mut store,run,Some(submission),"pending");
-                store.commit_admitted_collection_validated::<(),EngineError,_,_>(
-                    &pending,
+                store.commit_admitted_collection_prepared_validated::<(),EngineError,_,_>(
+                    &pending, source,
                     |_,_| Ok(()),
-                    |view,_| {
-                        let snapshot = view.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
+                    |_,_,snapshot| {
                         history.reconcile(&snapshot,&watcher,profile,digest.as_str(),Some("report-pending"))?;
                         unreachable!("changed historical source must refuse before completion")
                     },
                 ).unwrap_err()
             } else {
-                store.commit_evaluations_validated::<(),EngineError,_>(|_,view,_| {
-                    let snapshot = view.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
+                store.commit_evaluations_prepared_validated::<(),EngineError,_,_>(source,
+                  |_,_| Ok(()), |_,_,_,snapshot| {
                     history.reconcile(&snapshot,&watcher,profile,digest.as_str(),None)?;
                     Ok((Vec::new(),()))
                 }).unwrap_err()
@@ -18194,46 +18196,80 @@ sys.stdout.write("\n")
     }
 
     #[test]
-    fn prepared_context_rejects_retention_and_exact_byte_or_membership_changes() {
-        let root = tempfile::tempdir().unwrap();
-        let (mut engine, watcher, _) = admitted_host_diagnostic_fixture(
-            root.path(),
-            "prepared-context-genesis",
-            b"prepared-context-evaluator",
-        )
-        .expect("the real helper consumer must run for this regression");
-        engine.collect(&watcher).unwrap();
-        let profile = resolve(&watcher).unwrap();
-        let digest = profile.descriptor().digest().unwrap();
-        for mutation in ["bytes", "membership"] {
-            let mut prepared =
-                PreparedHistoricalReports::prepare(&mut engine.store, &watcher, profile).unwrap();
-            assert!(!prepared.source_rows.is_empty());
-            if mutation == "bytes" {
-                prepared.source_rows[0].canonical_json.push(b' ');
+    fn same_instance_nonmatching_append_still_refuses_prepared_source() {
+        for freshness in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (mut engine, watcher, _) = admitted_host_diagnostic_fixture(
+                root.path(), "nonmatching-append-genesis", b"nonmatching-append-evaluator",
+            ).expect("the real helper consumer must run for this regression");
+            engine.collect(&watcher).unwrap();
+            let path = engine.config.database_path.clone();
+            let mut nonmatching = watcher.clone();
+            nonmatching.subject = "host:other-prepared-context".to_owned();
+            HISTORICAL_RECONSTRUCTION_FOR_TEST.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || {
+                    std::thread::spawn(move || {
+                        let mut writer = Store::open(path).unwrap();
+                        commit_real_host_detector_report(&mut writer, &nonmatching,
+                            "report-nonmatching-context", "nonmatching-context",
+                            Utc::now(), 1.0, None);
+                        validate_semantic_history(&writer).expect("the competing report is valid history");
+                    }).join().expect("real nonmatching same-instance append");
+                }));
+            });
+            let error = if freshness {
+                engine.freshness_sweep(&watcher).map(|_| ()).unwrap_err()
             } else {
-                prepared.source_rows.clear();
-            }
-            let snapshot = engine
-                .store
-                .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))
-                .unwrap();
+                engine.collect(&watcher).map(|_| ()).unwrap_err()
+            };
+            assert!(matches!(error, EngineError::Store(nq_store::StoreError::Refused(
+                nq_store::Refusal::HistoryChanged(_)
+            ))), "unexpected refusal: {error:?}");
+            let snapshot = engine.store.evidence_snapshot(&[watcher.instance_id.clone()]).unwrap();
+            assert_eq!(snapshot.reports.len(), 2, "only the two committed reports survive");
+            assert_eq!(engine.store.latest_evaluation_sequence().unwrap(), 2);
+            validate_semantic_history(&engine.store).expect("refusal leaves exact valid history");
+        }
+    }
+
+    #[test]
+    fn prepared_context_rejects_retention_and_exact_byte_or_membership_changes() {
+        // Proof rows are shared-only. Exercise real foreign source edits instead
+        // of manufacturing different bytes inside a caller-owned source vector.
+        for sql in [
+            "UPDATE admitted_reports SET canonical_json=CAST('{}' AS BLOB)",
+            "DELETE FROM admitted_reports",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (mut engine, watcher, _) = admitted_host_diagnostic_fixture(
+                root.path(), "prepared-context-genesis", b"prepared-context-evaluator",
+            ).expect("the real helper consumer must run for this regression");
+            engine.collect(&watcher).unwrap();
+            let profile = resolve(&watcher).unwrap();
+            let (source, _) = PreparedHistoricalReports::prepare(
+                &mut engine.store, &watcher, profile,
+            ).unwrap();
+            assert!(!source.snapshot().reports.is_empty());
+            let generation = source.retention_generation();
             assert!(matches!(
-                prepared.reconcile(&snapshot, &watcher, profile, digest.as_str(), None),
+                PreparedHistoricalReports::require_generation(&engine.store, generation + 1),
                 Err(EngineError::Store(nq_store::StoreError::Refused(
                     nq_store::Refusal::HistoryChanged(_)
                 )))
             ));
-        }
-        let prepared =
-            PreparedHistoricalReports::prepare(&mut engine.store, &watcher, profile).unwrap();
-        assert!(matches!(
-            PreparedHistoricalReports::require_generation(&engine.store, prepared.generation + 1),
-            Err(EngineError::Store(nq_store::StoreError::Refused(
+            mutate_bypassing_triggers(&engine.config.database_path, "admitted_reports", sql);
+            let before = engine.store.latest_evaluation_sequence().unwrap();
+            let error = engine.store.commit_evaluations_prepared_validated::<(), EngineError, _, _>(
+                source, |_, _| Ok(()),
+                |_, _, _, _| panic!("changed source must refuse before the evaluator"),
+            ).unwrap_err();
+            assert!(matches!(error, EngineError::Store(nq_store::StoreError::Refused(
                 nq_store::Refusal::HistoryChanged(_)
-            )))
-        ));
-        validate_semantic_history(&engine.store).unwrap();
+            ))), "unexpected refusal: {error:?}");
+            assert_eq!(engine.store.latest_evaluation_sequence().unwrap(), before);
+            assert!(validate_semantic_history(&engine.store).is_err(),
+                "the intentional foreign source substitution is not a passing store");
+        }
     }
 
     #[test]
@@ -19428,11 +19464,11 @@ sys.stdout.write("\n")
         let clears = RECONSTRUCTION_MEMO_CLEARS.with(std::cell::Cell::get);
         let first = PreparedHistoricalReports::prepare(&mut store, &watcher, profile).unwrap();
         let second = PreparedHistoricalReports::prepare(&mut store, &watcher, profile).unwrap();
-        assert_eq!(first.source_rows.len(), 12);
-        assert_eq!(first.source_rows, second.source_rows);
-        assert_eq!(first.matching_rows, second.matching_rows);
-        assert_eq!(first.reports, second.reports);
-        assert_eq!(first.generation, generation);
+        assert_eq!(first.0.snapshot().reports.len(), 12);
+        assert_eq!(first.0.snapshot().reports, second.0.snapshot().reports);
+        assert_eq!(first.1.matching_rows, second.1.matching_rows);
+        assert_eq!(first.1.reports, second.1.reports);
+        assert_eq!(first.1.generation, generation);
         assert_eq!(store.retention_generation().unwrap(), generation);
         let calls = CONTEXT_SELECTOR_CALLS.with(std::cell::Cell::get) - calls;
         let validations = CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get) - validations;
