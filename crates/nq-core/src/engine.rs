@@ -18206,6 +18206,9 @@ sys.stdout.write("\n")
             let path = engine.config.database_path.clone();
             let mut nonmatching = watcher.clone();
             nonmatching.subject = "host:other-prepared-context".to_owned();
+            let original = engine.store.latest_binding(&watcher.instance_id).unwrap().unwrap();
+            let original_admission = original.admission_id.unwrap();
+            let original_digest = original.binding_digest;
             HISTORICAL_RECONSTRUCTION_FOR_TEST.with(|hook| {
                 *hook.borrow_mut() = Some(Box::new(move || {
                     std::thread::spawn(move || {
@@ -18213,6 +18216,11 @@ sys.stdout.write("\n")
                         commit_real_host_detector_report(&mut writer, &nonmatching,
                             "report-nonmatching-context", "nonmatching-context",
                             Utc::now(), 1.0, None);
+                        // The source change is the variable under test. Restore
+                        // the original active admission through real transitions
+                        // so current provider authority is not a second cause.
+                        activate_test_admission(&mut writer, &nonmatching.instance_id,
+                            &original_admission, &original_digest);
                         validate_semantic_history(&writer).expect("the competing report is valid history");
                     }).join().expect("real nonmatching same-instance append");
                 }));
