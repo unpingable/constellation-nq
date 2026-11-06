@@ -6460,6 +6460,10 @@ fn prepare_instance_evaluations_with_history(
                 &right.envelope.evaluation_id,
             ))
     });
+    #[cfg(test)]
+    PREPARED_DIAGNOSTIC_REPORT_ENTRIES.with(|count| {
+        count.set(count.get() + prepared.iter().map(|item| item.detector_reports.len()).sum::<usize>());
+    });
     Ok(prepared)
 }
 
@@ -8538,6 +8542,8 @@ thread_local! {
     static RECONSTRUCTION_MEMO_CLEARS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// One test pauses the real reconstruction consumer to try another writer.
     static HISTORICAL_RECONSTRUCTION_FOR_TEST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Reports kept after evaluation solely for diagnostic emission.
+    static PREPARED_DIAGNOSTIC_REPORT_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Immutable canonical/protocol testimony, independent of current config,
@@ -13719,6 +13725,9 @@ if mode == "helper_refusal":
         "echo": echo,
         "outcome": {"kind": "refusal", "refusal": refusal},
     }
+elif mode == "present":
+    report["observations"][0]["payload"]["load_1m"] = 16.0
+    response = {"schema": "nq.helper.response.v1", "echo": echo, "outcome": {"kind": "report", "report": report}}
 elif mode == "partial":
     report["status"] = "partial"
     report["coverage"][2]["state"] = "partial"
@@ -17887,6 +17896,81 @@ sys.stdout.write("\n")
             panic!("fixture admission failed: {error}");
         }
         Some((engine, watcher, mode))
+    }
+
+    #[test]
+    fn ordinary_collection_and_freshness_do_not_retain_diagnostic_report_copies() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let (mut engine, watcher, mode) = admitted_host_diagnostic_fixture(
+            root.path(),
+            "ordinary-report-custody",
+            b"ordinary-report-custody-evaluator",
+        )
+        .expect("the real helper consumer must run for this regression");
+        fs::write(&mode, "present\n").expect("present condition fixture");
+        let seed = engine.collect(&watcher).expect("first real collection");
+        let CollectionResult::Admitted { evaluations, .. } = seed.result else {
+            panic!("first collection must be admitted");
+        };
+        assert_eq!(evaluations.len(), 1);
+        assert_eq!(evaluations[0].result.state, DetectorState::Present);
+        let opened = engine.store.finding_snapshots().expect("opened finding");
+        assert_eq!(opened.len(), 1);
+
+        let before = PREPARED_DIAGNOSTIC_REPORT_ENTRIES.with(std::cell::Cell::get);
+        let outcome = engine.collect(&watcher).expect("second real collection");
+        let collection_copies =
+            PREPARED_DIAGNOSTIC_REPORT_ENTRIES.with(std::cell::Cell::get) - before;
+        let CollectionResult::Admitted {
+            report_id,
+            semantic_digest,
+            evaluations,
+            ..
+        } = outcome.result else {
+            panic!("second collection must be admitted");
+        };
+        assert_eq!(evaluations.len(), 1);
+        let evaluation = &evaluations[0];
+        evaluation.validate().expect("exact evaluation contract");
+        assert_eq!(evaluation.result.state, DetectorState::Present);
+        assert_eq!(evaluation.watermark.max_report_sequence, 2);
+        assert_eq!(evaluation.result.evidence.len(), 1);
+        assert_eq!(evaluation.result.evidence[0].report_id, report_id);
+        assert_eq!(evaluation.result.evidence[0].report_sequence, 2);
+        assert_eq!(evaluation.result.evidence[0].report_digest, semantic_digest);
+        assert_eq!(
+            engine.store.evaluation_origin(&evaluation.evaluation_id).unwrap().unwrap().trigger_run_id,
+            outcome.run_id,
+        );
+        let current = engine.store.finding_snapshots().expect("updated finding");
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].finding_id, opened[0].finding_id);
+        assert_eq!(current[0].condition_state, "present");
+        assert_eq!(current[0].evaluation_id, evaluation.evaluation_id);
+        let evidence: Value = serde_json::from_str(&current[0].evidence_json).unwrap();
+        assert_eq!(evidence[0]["report_id"], report_id);
+
+        let before = PREPARED_DIAGNOSTIC_REPORT_ENTRIES.with(std::cell::Cell::get);
+        assert_eq!(engine.freshness_sweep(&watcher).expect("real freshness sweep"), 1);
+        let freshness_copies =
+            PREPARED_DIAGNOSTIC_REPORT_ENTRIES.with(std::cell::Cell::get) - before;
+        let swept = engine.store.finding_snapshots().expect("swept finding");
+        assert_eq!(swept.len(), 1);
+        assert_eq!(swept[0].finding_id, current[0].finding_id);
+        assert_eq!(swept[0].condition_state, "present");
+        assert_eq!(swept[0].evidence_json, current[0].evidence_json);
+        assert_eq!(
+            engine.store.evaluation_origin(&swept[0].evaluation_id).unwrap().unwrap().trigger_run_id,
+            None,
+        );
+        assert_eq!(engine.store.latest_evaluation_sequence().unwrap(), 3);
+        let provenance = validate_provider_intake_history(&engine.store).expect("exact provider custody");
+        assert_eq!(provenance.provider_intakes, 2);
+        assert_eq!(provenance.acknowledgments, 2);
+        validate_semantic_history(&engine.store).expect("exact evaluation and finding replay");
+        println!("diagnostic_report_custody retained_reports=2 collection_copies={collection_copies} freshness_copies={freshness_copies}");
+        assert_eq!((collection_copies, freshness_copies), (0, 0),
+            "ordinary collection and freshness must not copy reports for an absent diagnostic consumer");
     }
 
     fn install_guard_competition_check(store: &mut Store) {
