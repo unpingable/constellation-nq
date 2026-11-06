@@ -55,6 +55,17 @@ fn expiry_test_hook(connection: &Connection, phase: &str) -> Result<(), StoreErr
     Ok(())
 }
 
+// This is a full referential check, not an advisory watermark shortcut.
+// The qualified path runs it in its validated read snapshot; its exact
+// data_version/frontier/retention proof must still match under writer admission.
+fn expiry_foreign_key_violations(connection: &Connection) -> Result<i64, StoreError> {
+    let _timing = PhaseTiming::start("expiry.foreign_key_check");
+    #[cfg(test)]
+    expiry_test_hook(connection, "baseline_foreign_key_check")?;
+    connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))
+        .map_err(StoreError::from)
+}
+
 fn present(connection: &Connection) -> Result<bool, StoreError> {
     Ok(connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='retention_state')",
@@ -1212,6 +1223,10 @@ impl Store {
             .map_err(E::from)?;
         let snapshot_timing = PhaseTiming::start("expiry.snapshot_validation");
         let (proof, promoted) = self.with_read_snapshot(|store, bounds| {
+            let violations = expiry_foreign_key_violations(&store.connection).map_err(E::from)?;
+            if violations != 0 {
+                return Err(E::from(StoreError::Integrity(format!("{violations} foreign-key violations"))));
+            }
             let comparison = match engine_rules {
                 Some(rules) => store.promotion_comparison(bounds, rules).map_err(E::from)?,
                 None => None,
@@ -1504,6 +1519,10 @@ impl Store {
                 return Err(StoreError::Refused(crate::Refusal::HistoryChanged("after")));
             }
         }
+        // Deferred checks are effective only while this exact connection has
+        // enforcement enabled. Without it, retain the original resulting scan.
+        let foreign_keys_enabled: i64 = tx.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+        let qualified_references = proof.is_some() && foreign_keys_enabled == 1;
         let before_witness = witness(&tx)?;
         let carry = store.carriable_watermark(&before_witness);
         // Scoped in-lock validation requires both a certification this handle
@@ -1717,13 +1736,12 @@ impl Store {
             validate_boundary(&tx)?;
         }
         drop(boundary_timing);
-        let fk_timing = PhaseTiming::start("expiry.foreign_key_check");
-        let violations: i64 =
-            tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
-                r.get(0)
-            })?;
-        drop(fk_timing);
-        if violations != 0 {
+        // A qualified ordinary expiry checked every baseline reference in its
+        // read snapshot and reconciled that exact source at writer admission.
+        // With foreign_keys enabled and deferred during repacking, SQLite's
+        // commit rejects any surviving reference introduced by this transaction.
+        // Unqualified Store-only calls retain the original full resulting check.
+        if !qualified_references && expiry_foreign_key_violations(&tx)? != 0 {
             return Err(StoreError::Integrity(
                 "expiry closure has surviving foreign-key references".into(),
             ));
