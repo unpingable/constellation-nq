@@ -15653,6 +15653,169 @@ mod tests {
         boundary
     }
 
+    // Real Store admission/expiry fixtures. These detector documents establish
+    // Store laws; they do not certify core profile semantics or CLI scheduling.
+    fn retention_window_fixture(path: &Path, tail: usize) -> Store {
+        let mut store = Store::initialize_with_capacity(path, 604800,
+            Some(if tail > 96 {512 * 1024 * 1024} else {128 * 1024 * 1024}), Some(1024 * 1024), Some(1024 * 1024)).unwrap();
+        store.append_genesis(&GenesisInput { genesis_id: "retention-window".into(),
+            legacy_manifest_digest: None, created_at: TIME.into(), detail: document(json!({})) }).unwrap();
+        let profile = append_fixture_descriptor(&mut store);
+        for i in 0..3 { commit_ordinary_evaluated_for_crash(&mut store, &profile, &format!("window-old-{i}")); }
+        if tail > 96 { drop(store); store=Store::open(path).unwrap(); }
+        for i in 0..tail { commit_ordinary_evaluated_received(&mut store, &profile,
+            &format!("window-recent-{i}"), "2100-01-02T00:00:01Z"); }
+        let definition = document(json!({"schema":"nq.saved-check-definition/v1",
+            "reference":"sqlite.retention-window", "source_identity":"retention-window",
+            "currentness_seconds":60, "name":"retention-window", "sql_text":"SELECT 1 WHERE 0",
+            "mode":"non_empty", "threshold":null,"column":null,"description":null}));
+        store.install_saved_check(&SavedCheckDefinitionInput {
+            definition_id:"retention-window-check".into(),stable_reference:"sqlite.retention-window".into(),
+            definition_digest:definition.digest().into(),definition,installed_at:TIME.into() }).unwrap();
+        drop(store);
+        let store=Store::open(path).unwrap();
+        store.record_validation_watermark(SemanticCertification::NotEstablished,"fixture-engine-rules").unwrap().unwrap();
+        store
+    }
+
+    fn retention_window_expire(store: &mut Store) -> Result<RetentionResult,StoreError> {
+        store.expire_ordinary_before_promoting("2100-01-01T00:00:00Z","fixture-engine-rules",Some(3),
+            |s,_,_| { s.validate()?; Ok::<_,StoreError>(SemanticCertification::NotEstablished) },
+            Some(|s:&Store,c:&ExpiryCandidates| {
+                for id in &c.report_ids { s.verify_admitted_snapshot(id)
+                    .map_err(|e|StoreError::Integrity(e.to_string()))?; }
+                for id in &c.intake_ids { s.provider_intake_raw_bytes(id)?; }
+                Ok(())
+            }))
+    }
+
+    #[test]
+    fn retention_baseline_fk_preparation_does_not_exclude_saved_check_writer() {
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("retention-window.db");
+        let mut store=retention_window_fixture(&path,12);
+        let before=store.retention_boundary().unwrap();let writer_path=path.clone();
+        retention::EXPIRY_TEST_HOOK.with(|slot| *slot.borrow_mut()=Some(("baseline_foreign_key_check",Box::new(move |_| {
+            let began=std::time::Instant::now();
+            let result=std::thread::spawn(move || {
+                let mut writer=Store::open(&writer_path)?;
+                let detail=document(json!({"binding":{"fixture":"retention-window"}}));
+                assert!(writer.claim_saved_check_evaluation("retention-window-check","during-baseline-fk",TIME,&detail)?);
+                writer.append_saved_check_event(&SavedCheckEventInput { definition_id:"retention-window-check".into(),
+                    event_number:0,occurred_at:TIME.into(),outcome:"passed".into(),detail,
+                    evaluation_id:Some("during-baseline-fk".into()) })?;
+                Ok::<_,StoreError>(())
+            }).join().unwrap();
+            eprintln!("RETENTION_WRITER_RESULT elapsed_ms={} passed={}",began.elapsed().as_millis(),result.is_ok());
+            assert!(result.is_ok(),"baseline referential preparation excluded actual saved-check admission: {result:?}");
+            Ok(())
+        }))));
+        let error=retention_window_expire(&mut store).expect_err("concurrent saved-check commit invalidates prepared source");
+        assert!(matches!(error,StoreError::Refused(Refusal::HistoryChanged(_))),"{error}");
+        assert_eq!(store.retention_boundary().unwrap(),before);
+        assert_eq!(store.saved_check_event_by_evaluation_id("during-baseline-fk").unwrap().unwrap().outcome,"passed");
+    }
+
+    #[test]
+    fn retention_foreign_generation_during_baseline_refuses_second_retirement() {
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("foreign-retirement.db");
+        let mut store=retention_window_fixture(&path,12);let other=path.clone();
+        retention::EXPIRY_TEST_HOOK.with(|slot| *slot.borrow_mut()=Some(("baseline_foreign_key_check",Box::new(move |_| {
+            std::thread::spawn(move || {
+                let mut writer=Store::open(other)?;
+                let retired=writer.expire_ordinary_before("2100-01-01T00:00:00Z")?;
+                assert_eq!(retired.boundary.generation,1);Ok::<_,StoreError>(())
+            }).join().unwrap()?;Ok(())
+        }))));
+        let error=retention_window_expire(&mut store).expect_err("foreign retirement invalidates preparation");
+        assert!(matches!(error,StoreError::Refused(Refusal::HistoryChanged(_))),"{error}");
+        assert_eq!(store.retention_boundary().unwrap().generation,1,"only the competing retirement committed");
+        store.validate().unwrap();
+    }
+
+    #[test]
+    fn retention_disabled_fk_connection_keeps_full_result_scan_and_rollback() {
+        use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("disabled-enforcement.db");
+        let mut store=retention_window_fixture(&path,12);let before=store.retention_boundary().unwrap();
+        store.connection.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+        let calls=Arc::new(AtomicUsize::new(0));let observed=calls.clone();
+        retention::EXPIRY_TEST_HOOK.with(|slot| *slot.borrow_mut()=Some(("baseline_foreign_key_check",Box::new(move |_| {
+            observed.fetch_add(1,Ordering::SeqCst);let again=observed.clone();
+            retention::EXPIRY_TEST_HOOK.with(|slot| *slot.borrow_mut()=Some(("baseline_foreign_key_check",Box::new(move |c| {
+                again.fetch_add(1,Ordering::SeqCst);
+                c.execute_batch("INSERT INTO evaluation_watermarks VALUES('fallback-missing','fixture-a',0,NULL)")?;Ok(())
+            }))));Ok(())
+        }))));
+        let error=retention_window_expire(&mut store).expect_err("disabled enforcement requires explicit resulting FK check");
+        assert!(matches!(&error,StoreError::Integrity(t) if t.contains("surviving foreign-key references")),"{error}");
+        assert_eq!(calls.load(Ordering::SeqCst),2,"baseline plus original full resulting check");
+        assert_eq!(store.retention_boundary().unwrap(),before);
+        assert_eq!(store.connection.query_row("SELECT COUNT(*) FROM evaluation_watermarks WHERE evaluation_id='fallback-missing'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        store.connection.execute_batch("PRAGMA foreign_keys=ON").unwrap();store.validate().unwrap();
+    }
+
+    #[test]
+    fn retention_real_held_guard_keeps_five_second_refusal() {
+        let root=tempfile::tempdir().unwrap();let path=root.path().join("real-held-guard.db");
+        let mut store=retention_window_fixture(&path,12);
+        let contender=path.clone();
+        store.commit_evaluations_validated::<_,StoreError,_>(|_,_,_| {
+            let began=std::time::Instant::now();
+            let error=std::thread::spawn(move || Store::open(contender).map(|_|())).join().unwrap()
+                .expect_err("the actual guarded transaction excludes another writable opener");
+            assert!(matches!(error,StoreError::Refused(Refusal::Contention(ref t)) if t.contains("concurrent writer owns operation guard after bounded wait")));
+            assert!(began.elapsed()>=std::time::Duration::from_secs(5));
+            Ok((Vec::new(),()))
+        }).unwrap();
+    }
+
+    #[test]
+    fn retention_whole_operation_work_with_unchanged_tail() {
+        let scales=std::env::var("NQ_RETENTION_WORK_SCALES").ok().map(|x|x.split(',')
+            .map(|s|s.parse::<usize>().unwrap()).collect::<Vec<_>>()).unwrap_or_else(||vec![12,96]);
+        assert!(!scales.is_empty() && scales.iter().all(|n|*n<=16384));
+        for tail in scales {
+            let root=tempfile::tempdir().unwrap();let path=root.path().join("measured-expiry.db");
+            let mut store=retention_window_fixture(&path,tail);
+            let counting=std::env::var("NQ_RETENTION_WORK_COUNT").as_deref()!=Ok("0");
+            if counting { history_scope::start_sql_work_count();store.count_sql_work_on_this_handle(); }
+            let started=std::time::Instant::now();let result=retention_window_expire(&mut store).unwrap();
+            let elapsed=started.elapsed();let work=history_scope::stop_sql_work_count().unwrap_or(0);
+            assert!(result.deleted_rows>0);assert_eq!(result.boundary.report_floor,3);
+            assert_eq!(store.connection.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            store.validate().unwrap();
+            eprintln!("RETENTION_WHOLE_WORK tail={tail} counting={counting} sql_ticks={work} elapsed_us={} deleted_rows={}",elapsed.as_micros(),result.deleted_rows);
+        }
+    }
+
+    #[test]
+    fn retention_malformed_baseline_and_surviving_reference_never_commit() {
+        for malformed in [true,false] {
+            let root=tempfile::tempdir().unwrap();let path=root.path().join("refused-expiry.db");
+            let mut store=retention_window_fixture(&path,12);let before=store.retention_boundary().unwrap();
+            let reports:i64=store.connection.query_row("SELECT COUNT(*) FROM admitted_reports",[],|r|r.get(0)).unwrap();
+            let orphan="INSERT INTO evaluation_watermarks VALUES('missing-evaluation','fixture-a',0,NULL)";
+            if malformed {
+                let c=Connection::open(&path).unwrap();c.execute_batch("PRAGMA foreign_keys=OFF").unwrap();c.execute_batch(orphan).unwrap();
+            } else {
+                retention::EXPIRY_TEST_HOOK.with(|slot| *slot.borrow_mut()=Some(("commit_boundary",Box::new(move |c| {
+                    c.execute_batch(orphan)?;Ok(())
+                }))));
+            }
+            let error=retention_window_expire(&mut store).expect_err("an orphan cannot commit expiry");
+            if malformed {
+                assert!(matches!(&error,StoreError::Integrity(t) if t.contains("foreign-key violations")),"{error}");
+            } else {
+                assert!(matches!(&error,StoreError::Sqlite(rusqlite::Error::SqliteFailure(code,_))
+                    if code.extended_code==rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),"actual deferred FK commit must reject: {error}");
+            }
+            assert_eq!(store.retention_boundary().unwrap(),before);
+            assert_eq!(store.connection.query_row("SELECT COUNT(*) FROM admitted_reports",[],|r|r.get::<_,i64>(0)).unwrap(),reports);
+            if !malformed { assert_eq!(store.connection.query_row("SELECT COUNT(*) FROM evaluation_watermarks WHERE evaluation_id='missing-evaluation'",[],|r|r.get::<_,i64>(0)).unwrap(),0);store.validate().unwrap(); }
+            eprintln!("RETENTION_FK_NEGATIVE malformed_baseline={malformed} refused=true error={error}");
+        }
+    }
+
     fn sidecar(path: &Path) -> ValidationWatermark {
         serde_json::from_slice(&std::fs::read(history_scope::watermark_path(path)).unwrap()).unwrap()
     }
