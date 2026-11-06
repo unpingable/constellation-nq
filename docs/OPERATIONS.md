@@ -1172,16 +1172,19 @@ is bounded by the new rows, the referenced closure, and the schema:
   acquisition, and on the reference machine 16 ms to 27 ms for such a `qualify`
   between 500 and 5,000 retained acquisitions (roughly 0.25 s at 100,000).
   Indexing these columns needs a schema change.
-- Each collection still decodes and re-checks every retained admitted report
-  of its instance to select its evaluation context. That is evaluation input,
-  not open validation; on the reference machine one `acquire-next-local` took
+- Each evaluation still reads every retained admitted report of its instance
+  and compares its immutable binding against the current configured context.
+  This is evaluation input, not open validation. Earlier cold-pass measurements
+  on the reference machine found one `acquire-next-local` took
   about 0.2 s, 0.6 s, and 2.1 to 2.6 s with 500, 2,000, and 5,000 retained
   acquisitions, about 0.45 ms per retained report. At that slope an
   acquisition reaches a 60-second bound at roughly 100,000 retained
   acquisitions, about 70 to 80 days at one acquisition per minute.
-  Within one process, a report that was already reconstructed successfully
-  is reused instead of being decoded, canonicalized, hashed and validated
-  again. Reuse requires the complete stored row, including its canonical
+  Within one process, successful immutable canonical/protocol context validation
+  and profile reconstruction share the existing bounded memo. Repeated selection
+  reuses validated binding fields, then compares every current watcher field;
+  it never reuses a previous match decision or present admission authority.
+  Reuse requires the complete stored row, including its canonical
   bytes and every metadata field, to be equal to the row that produced the
   earlier result, under the same compiled profile descriptor digest. A
   changed or edited row is therefore reconstructed afresh and returns its
@@ -1192,12 +1195,17 @@ is bounded by the new rows, the referenced closure, and the schema:
   collection engine benefits on later collections and sweeps. The memo is
   limited to an estimated 512 MiB of row weight. The estimate is not an exact
   allocation or RSS bound: it counts the row's variable fields and a fixed
-  per-entry allowance, not the validated report payload. A row heavier than
+  per-entry allowance, not the exact validated report payload. Added binding
+  strings, JSON storage and fixed optional-field slots (even when empty) are
+  explicitly included within that same estimate.
+  A row heavier than
   the limit is never stored, and the memo is cleared when it fills. When an
   instance's retained reports exceed the memo, repeated clearing can
   eliminate most reuse. Each miss then also clones the row and the
-  reconstructed report. Phase timing (`core.profile_validation`) shows
-  whether reuse is effective. The memo changes no validation rule, profile,
+  reconstructed report. The opt-in `core.historical_snapshot`,
+  `core.historical_selection` and `core.historical_reconstruction` timings
+  separate source loading, selection and reconstruction; a combined preparation
+  duration alone does not attribute the cost or establish effective reuse. The memo changes no validation rule, profile,
   schema, `profile_semantic_id`, retention horizon or capacity policy.
   Before a
   store approaches that size, archive it (`nq admin archive`) and initialize a

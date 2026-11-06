@@ -6058,12 +6058,20 @@ impl PreparedHistoricalReports {
     ) -> Result<Self, EngineError> {
         let _timing = nq_store::operation_timing::PhaseTiming::start("core.historical_preparation");
         let generation = store.retention_generation()?;
+        let snapshot_timing =
+            nq_store::operation_timing::PhaseTiming::start("core.historical_snapshot");
         let snapshot = store.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))?;
+        snapshot_timing.value("report_rows", snapshot.reports.len() as i64);
+        drop(snapshot_timing);
         let digest = profile
             .descriptor()
             .digest()
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        let selection_timing =
+            nq_store::operation_timing::PhaseTiming::start("core.historical_selection");
         let matching_rows = evaluation_context_rows(&snapshot.reports, watcher, digest.as_str())?;
+        selection_timing.value("selected_rows", matching_rows.len() as i64);
+        drop(selection_timing);
         #[cfg(test)]
         HISTORICAL_RECONSTRUCTION_FOR_TEST.with(|hook| {
             let hook = hook.borrow_mut().take();
@@ -6071,10 +6079,13 @@ impl PreparedHistoricalReports {
                 hook();
             }
         });
+        let reconstruction_timing =
+            nq_store::operation_timing::PhaseTiming::start("core.historical_reconstruction");
         let reports = matching_rows
             .iter()
             .map(|row| reconstruct_admitted_cached(row, profile, digest.as_str()))
             .collect::<Result<Vec<_>, _>>()?;
+        drop(reconstruction_timing);
         Ok(Self {
             generation,
             source_rows: snapshot.reports,
@@ -6468,6 +6479,8 @@ fn report_matches_evaluation_context(
     watcher: &WatcherConfig,
     profile_digest: &str,
 ) -> Result<bool, EngineError> {
+    #[cfg(test)]
+    CONTEXT_SELECTOR_CALLS.with(|count| count.set(count.get() + 1));
     if !report_matches_profile_contract(
         row,
         &watcher.profile.id,
@@ -6476,25 +6489,55 @@ fn report_matches_evaluation_context(
     ) {
         return Ok(false);
     }
-    let document = CanonicalDocument::from_canonical_bytes(row.canonical_json.clone())?;
-    if document.digest() != row.semantic_digest {
-        return Err(EngineError::Invariant(format!(
-            "admitted report {} semantic digest was substituted",
-            row.report_id
-        )));
-    }
-    let report: nq_protocol::EvidenceReport = serde_json::from_slice(document.as_bytes())
-        .map_err(|error| EngineError::Invariant(format!("stored report cannot decode: {error}")))?;
-    nq_protocol::validate_report(&report)
-        .map_err(|error| EngineError::Invariant(format!("stored report is invalid: {error}")))?;
-    Ok(report.profile.id.as_str() == watcher.profile.id
-        && report.profile.version.to_string() == watcher.profile.version.to_string()
-        && report.profile.digest.as_str() == profile_digest
-        && report.binding.subject.as_str() == watcher.subject
-        && report.binding.scope.kind.as_str() == watcher.scope.kind
-        && report.binding.scope.value == watcher.scope.value
-        && report.binding.vantage.kind.as_str() == watcher.vantage.kind
-        && report.binding.vantage.value == watcher.vantage.value)
+    let context = admitted_report_memo().lock().ok().and_then(|memo| {
+        memo.exact(row, profile_digest)
+            .and_then(|entry| entry.context.clone())
+    });
+    let context = match context {
+        Some(context) => context,
+        None => {
+            #[cfg(test)]
+            CONTEXT_SELECTOR_VALIDATIONS.with(|count| count.set(count.get() + 1));
+            let document = CanonicalDocument::from_canonical_bytes(row.canonical_json.clone())?;
+            if document.digest() != row.semantic_digest {
+                return Err(EngineError::Invariant(format!(
+                    "admitted report {} semantic digest was substituted",
+                    row.report_id
+                )));
+            }
+            let report: nq_protocol::EvidenceReport = serde_json::from_slice(document.as_bytes())
+                .map_err(|error| {
+                EngineError::Invariant(format!("stored report cannot decode: {error}"))
+            })?;
+            nq_protocol::validate_report(&report).map_err(|error| {
+                EngineError::Invariant(format!("stored report is invalid: {error}"))
+            })?;
+            let context = ImmutableReportContext {
+                profile: report.profile,
+                binding: report.binding,
+            };
+            if let Ok(mut memo) = admitted_report_memo().lock() {
+                memo.remember(
+                    row,
+                    profile_digest,
+                    Some(context.clone()),
+                    None,
+                    ADMITTED_MEMO_MAX_BYTES,
+                );
+            }
+            context
+        }
+    };
+    // The memo contains immutable testimony only. Current configuration is
+    // compared afresh; neither a prior true nor false is a reusable decision.
+    Ok(context.profile.id.as_str() == watcher.profile.id
+        && context.profile.version.to_string() == watcher.profile.version.to_string()
+        && context.profile.digest.as_str() == profile_digest
+        && context.binding.subject.as_str() == watcher.subject
+        && context.binding.scope.kind.as_str() == watcher.scope.kind
+        && context.binding.scope.value == watcher.scope.value
+        && context.binding.vantage.kind.as_str() == watcher.vantage.kind
+        && context.binding.vantage.value == watcher.vantage.value)
 }
 
 fn evaluation_context_rows(
@@ -8488,41 +8531,57 @@ fn reconstruct_admitted(
 thread_local! {
     /// Test-only count of full admitted-report reconstructions on this thread.
     static RECONSTRUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Actual selector calls/full canonical-protocol validations on this thread.
+    static CONTEXT_SELECTOR_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CONTEXT_SELECTOR_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RECONSTRUCTION_MEMO_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RECONSTRUCTION_MEMO_CLEARS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// One test pauses the real reconstruction consumer to try another writer.
     static HISTORICAL_RECONSTRUCTION_FOR_TEST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Reconstruct an admitted report for detector input, reusing an exact prior
-/// result for an unchanged immutable row.
-///
-/// `reconstruct_admitted` is a pure function of the stored row and the compiled
-/// profile (its validation context is the row's own `received_at`; no clock is
-/// read). The memo returns a prior result only when every stored field of the
-/// row, including the full canonical bytes, is byte-equal to the row that
-/// produced it under the same compiled profile digest, so changed or tampered
-/// rows are always revalidated with the exact original refusal. Refusals are
-/// never memoized. The process-local memo is limited by an estimated row weight
-/// (not an exact allocation or RSS bound: it counts the row's variable fields and
-/// a fixed per-entry allowance, not the validated report). A row heavier than
-/// the limit is never
-/// stored, and the memo is cleared when full. A poisoned lock falls back to
-/// full reconstruction.
-fn reconstruct_admitted_cached(
-    row: &nq_store::AdmittedReportRow,
-    profile: &'static dyn ProfileModule,
-    profile_digest: &str,
-) -> Result<DetectorReport, EngineError> {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    type Entry = (nq_store::AdmittedReportRow, DetectorReport);
-    struct Memo {
-        entries: HashMap<(String, String), Entry>,
-        bytes: usize,
+/// Immutable canonical/protocol testimony, independent of current config,
+/// helper custody, admission or evaluation time. Never a cached match decision.
+#[derive(Clone)]
+struct ImmutableReportContext {
+    profile: nq_protocol::ProfileBinding,
+    binding: nq_protocol::SubjectBinding,
+}
+
+struct AdmittedMemoEntry {
+    row: nq_store::AdmittedReportRow,
+    context: Option<ImmutableReportContext>,
+    report: Option<DetectorReport>,
+}
+
+#[derive(Default)]
+struct AdmittedReportMemo {
+    entries: std::collections::HashMap<(String, String), AdmittedMemoEntry>,
+    bytes: usize,
+}
+
+const ADMITTED_MEMO_MAX_BYTES: usize = 512 << 20;
+
+fn admitted_report_memo() -> &'static std::sync::Mutex<AdmittedReportMemo> {
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<AdmittedReportMemo>> =
+        std::sync::OnceLock::new();
+    MEMO.get_or_init(|| std::sync::Mutex::new(AdmittedReportMemo::default()))
+}
+
+impl AdmittedReportMemo {
+    fn exact(&self, row: &nq_store::AdmittedReportRow, digest: &str) -> Option<&AdmittedMemoEntry> {
+        self.entries
+            .get(&(digest.to_owned(), row.report_id.clone()))
+            .filter(|entry| entry.row == *row)
     }
-    const MAX_BYTES: usize = 512 << 20;
-    static MEMO: OnceLock<Mutex<Memo>> = OnceLock::new();
-    let weight = |row: &nq_store::AdmittedReportRow| {
-        [
+
+    /// The original estimated row/reconstruction allowance plus explicit
+    /// context storage. This is an estimated memo budget, not an RSS limit.
+    fn weight(
+        row: &nq_store::AdmittedReportRow,
+        context: Option<&ImmutableReportContext>,
+    ) -> usize {
+        let original = [
             &row.report_id,
             &row.instance_id,
             &row.profile_id,
@@ -8540,35 +8599,131 @@ fn reconstruct_admitted_cached(
                 .saturating_mul(3)
                 .saturating_add(512),
             |sum, field| sum.saturating_add(field.len().saturating_mul(2)),
-        )
-    };
-    let memo = MEMO.get_or_init(|| {
-        Mutex::new(Memo {
-            entries: HashMap::new(),
-            bytes: 0,
-        })
-    });
-    let key = (profile_digest.to_owned(), row.report_id.clone());
-    if let Ok(guard) = memo.lock()
-        && let Some((cached_row, report)) = guard.entries.get(&key)
-        && cached_row == row
+        );
+        // Optional context is inline in every HashMap entry, including None.
+        // Also count any tag storage added by making the old report optional.
+        let with_added_slots = original
+            .saturating_add(std::mem::size_of::<Option<ImmutableReportContext>>())
+            .saturating_add(
+                std::mem::size_of::<Option<DetectorReport>>()
+                    .saturating_sub(std::mem::size_of::<DetectorReport>()),
+            );
+        let Some(context) = context else {
+            return with_added_slots;
+        };
+        // JSON object nodes reserve headroom for B-tree allocation; arrays
+        // account capacity, not just occupied slots. Every owned string/value
+        // added by this change is included, even when the report is absent.
+        fn json_weight(value: &Value) -> usize {
+            let payload = match value {
+                Value::String(s) => s.capacity(),
+                Value::Array(values) => values.iter().fold(
+                    values
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<Value>()),
+                    |sum, value| sum.saturating_add(json_weight(value)),
+                ),
+                Value::Object(values) => values.iter().fold(1024usize, |sum, (key, value)| {
+                    sum.saturating_add(256)
+                        .saturating_add(key.capacity())
+                        .saturating_add(json_weight(value))
+                }),
+                _ => 0,
+            };
+            std::mem::size_of::<Value>().saturating_add(payload)
+        }
+        let context_strings = [
+            context.profile.id.as_str(),
+            context.profile.version.as_str(),
+            context.profile.digest.as_str(),
+            context.binding.subject.as_str(),
+            context.binding.scope.kind.as_str(),
+            context.binding.vantage.kind.as_str(),
+        ]
+        .iter()
+        .fold(1024usize, |sum, value| {
+            sum.saturating_add(value.len().saturating_mul(2))
+        });
+        with_added_slots
+            .saturating_add(context_strings)
+            .saturating_add(json_weight(&context.binding.scope.value))
+            .saturating_add(json_weight(&context.binding.vantage.value))
+    }
+
+    /// Extend the same bounded entry, preserving its other successful result
+    /// only for an exact row/profile hit. Oversized entries never displace
+    /// existing entries; full storage is cleared, as in the original memo.
+    fn remember(
+        &mut self,
+        row: &nq_store::AdmittedReportRow,
+        digest: &str,
+        context: Option<ImmutableReportContext>,
+        report: Option<DetectorReport>,
+        max_bytes: usize,
+    ) {
+        let key = (digest.to_owned(), row.report_id.clone());
+        let prior = self.exact(row, digest);
+        let size = Self::weight(
+            row,
+            context
+                .as_ref()
+                .or_else(|| prior.and_then(|entry| entry.context.as_ref())),
+        );
+        if size > max_bytes {
+            return;
+        }
+        let old = self.entries.remove(&key);
+        if let Some(old) = old.as_ref() {
+            self.bytes = self
+                .bytes
+                .saturating_sub(Self::weight(&old.row, old.context.as_ref()));
+        }
+        let prior = old.filter(|entry| entry.row == *row);
+        let (old_context, old_report) =
+            prior.map_or((None, None), |entry| (entry.context, entry.report));
+        if self.bytes.saturating_add(size) > max_bytes {
+            #[cfg(test)]
+            RECONSTRUCTION_MEMO_CLEARS.with(|count| count.set(count.get() + 1));
+            self.entries.clear();
+            self.bytes = 0;
+        }
+        self.entries.insert(
+            key,
+            AdmittedMemoEntry {
+                row: row.clone(),
+                context: context.or(old_context),
+                report: report.or(old_report),
+            },
+        );
+        self.bytes = self.bytes.saturating_add(size);
+    }
+}
+
+/// Exact successful immutable row/profile results only; current authority is
+/// never memoized. Refusals and poisoned locks retain original validation.
+fn reconstruct_admitted_cached(
+    row: &nq_store::AdmittedReportRow,
+    profile: &'static dyn ProfileModule,
+    profile_digest: &str,
+) -> Result<DetectorReport, EngineError> {
+    if let Ok(memo) = admitted_report_memo().lock()
+        && let Some(report) = memo
+            .exact(row, profile_digest)
+            .and_then(|entry| entry.report.as_ref())
     {
+        #[cfg(test)]
+        RECONSTRUCTION_MEMO_HITS.with(|count| count.set(count.get() + 1));
         return Ok(report.clone());
     }
     let report = reconstruct_admitted(row, profile)?;
-    if let Ok(mut guard) = memo.lock() {
-        let size = weight(row);
-        if size > MAX_BYTES {
-            return Ok(report);
-        }
-        if guard.bytes.saturating_add(size) > MAX_BYTES {
-            guard.entries.clear();
-            guard.bytes = 0;
-        }
-        if let Some((old, _)) = guard.entries.insert(key, (row.clone(), report.clone())) {
-            guard.bytes = guard.bytes.saturating_sub(weight(&old));
-        }
-        guard.bytes = guard.bytes.saturating_add(size);
+    if let Ok(mut memo) = admitted_report_memo().lock() {
+        memo.remember(
+            row,
+            profile_digest,
+            None,
+            Some(report.clone()),
+            ADMITTED_MEMO_MAX_BYTES,
+        );
     }
     Ok(report)
 }
@@ -19130,6 +19285,467 @@ sys.stdout.write("\n")
                 .expect("report digest")
                 .to_string(),
         }
+    }
+
+    /// Constructed owning Store fixture; never reads a deployed store. Run
+    /// alone with the existing timing opt-in to separate SQLite snapshot,
+    /// canonical selection and reconstruction costs on two unchanged passes.
+    #[test]
+    #[ignore = "bounded native subphase/count observation, not a latency qualification"]
+    fn context_memo_historical_preparation_measurement() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("historical-preparation.db");
+        let config = holes_engine_config(&path);
+        let watcher = config.watchers[0].clone();
+        let profile = resolve(&watcher).unwrap();
+        let mut store = Store::initialize(&path).unwrap();
+        store
+            .append_genesis(&GenesisInput {
+                genesis_id: "context-measurement-genesis".to_owned(),
+                legacy_manifest_digest: None,
+                created_at: timestamp(Utc::now()),
+                detail: canonical(&json!({"source":"context-measurement-fixture"})).unwrap(),
+            })
+            .unwrap();
+        REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = Some(None));
+        for sequence in 1..=12 {
+            let suffix = format!("context-measurement-{sequence}");
+            commit_real_host_detector_report(
+                &mut store,
+                &watcher,
+                &format!("report-{suffix}"),
+                &suffix,
+                Utc::now() - Duration::seconds(1),
+                1.0,
+                None,
+            );
+        }
+        REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = None);
+        let generation = store.retention_generation().unwrap();
+        let calls = CONTEXT_SELECTOR_CALLS.with(std::cell::Cell::get);
+        let validations = CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get);
+        let reconstructions = RECONSTRUCTIONS.with(std::cell::Cell::get);
+        let hits = RECONSTRUCTION_MEMO_HITS.with(std::cell::Cell::get);
+        let clears = RECONSTRUCTION_MEMO_CLEARS.with(std::cell::Cell::get);
+        let first = PreparedHistoricalReports::prepare(&mut store, &watcher, profile).unwrap();
+        let second = PreparedHistoricalReports::prepare(&mut store, &watcher, profile).unwrap();
+        assert_eq!(first.source_rows.len(), 12);
+        assert_eq!(first.source_rows, second.source_rows);
+        assert_eq!(first.matching_rows, second.matching_rows);
+        assert_eq!(first.reports, second.reports);
+        assert_eq!(first.generation, generation);
+        assert_eq!(store.retention_generation().unwrap(), generation);
+        let calls = CONTEXT_SELECTOR_CALLS.with(std::cell::Cell::get) - calls;
+        let validations = CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get) - validations;
+        let reconstructions = RECONSTRUCTIONS.with(std::cell::Cell::get) - reconstructions;
+        let hits = RECONSTRUCTION_MEMO_HITS.with(std::cell::Cell::get) - hits;
+        let clears = RECONSTRUCTION_MEMO_CLEARS.with(std::cell::Cell::get) - clears;
+        println!(
+            "context_preparation rows=12 passes=2 selector_calls={calls} selector_validations={validations} reconstructions={reconstructions} reconstruction_hits={hits} memo_clears={clears}"
+        );
+        assert_eq!(calls, 24);
+        assert_eq!(
+            reconstructions, 0,
+            "the owning seed consumer already reconstructed every row"
+        );
+        assert_eq!(hits, 24);
+        assert_eq!(clears, 0);
+    }
+
+    #[test]
+    fn context_memo_counts_the_inline_context_slot_even_when_absent() {
+        let fixture = SemanticLineageFixture::new();
+        let row = reconstruction_fixture_row(
+            &fixture,
+            &format!("report:empty-context-budget-{}", Uuid::new_v4()),
+        );
+        let report = reconstruct_admitted(&row, fixture.profile).unwrap();
+        // Independently retain the pre-change row/reconstruction allowance.
+        // The newly added inline Option occupies storage even for None.
+        let original_allowance = [
+            &row.report_id,
+            &row.instance_id,
+            &row.profile_id,
+            &row.profile_version,
+            &row.profile_digest,
+            &row.observed_at,
+            &row.received_at,
+            &row.report_status,
+            &row.semantic_digest,
+        ]
+        .iter()
+        .map(|field| field.len() * 2)
+        .sum::<usize>()
+            + row.canonical_json.len() * 3
+            + 512;
+        let added_slot = std::mem::size_of::<Option<ImmutableReportContext>>();
+        assert!(added_slot > 0);
+        let cap = original_allowance + added_slot - 1;
+        let mut memo = AdmittedReportMemo::default();
+        memo.remember(&row, &fixture.profile_digest, None, Some(report), cap);
+        println!(
+            "context_budget original_allowance={original_allowance} added_slot={added_slot} entry_weight={} retained_entries={}",
+            AdmittedReportMemo::weight(&row, None),
+            memo.entries.len()
+        );
+        assert!(
+            memo.exact(&row, &fixture.profile_digest).is_none(),
+            "the added empty context slot must consume the existing budget"
+        );
+        assert_eq!(memo.bytes, 0);
+    }
+
+    #[test]
+    fn context_memo_binding_storage_counts_toward_the_existing_entry_budget() {
+        let fixture = SemanticLineageFixture::new();
+        let row = reconstruction_fixture_row(
+            &fixture,
+            &format!("report:context-budget-{}", Uuid::new_v4()),
+        );
+        let decoded: nq_protocol::EvidenceReport =
+            serde_json::from_slice(&row.canonical_json).unwrap();
+        let mut context = ImmutableReportContext {
+            profile: decoded.profile,
+            binding: decoded.binding,
+        };
+        context.binding.scope.value =
+            json!({"large": "s".repeat(4096), "nested": [true, {"v": "x".repeat(2048)}]});
+        context.binding.vantage.value = json!({"large": "v".repeat(8192)});
+        let report = reconstruct_admitted(&row, fixture.profile).unwrap();
+        let base = AdmittedReportMemo::weight(&row, None);
+        let with_context = AdmittedReportMemo::weight(&row, Some(&context));
+        assert!(
+            with_context >= base + 4096 + 2048 + 8192,
+            "new owned binding strings/JSON must consume the same bounded budget"
+        );
+        let mut memo = AdmittedReportMemo::default();
+        memo.remember(
+            &row,
+            &fixture.profile_digest,
+            None,
+            Some(report.clone()),
+            base,
+        );
+        memo.remember(
+            &row,
+            &fixture.profile_digest,
+            Some(context.clone()),
+            None,
+            base,
+        );
+        let entry = memo.exact(&row, &fixture.profile_digest).unwrap();
+        assert!(
+            entry.context.is_none(),
+            "oversized context must not be silently added"
+        );
+        assert!(
+            entry.report.is_some(),
+            "an oversized extension preserves the existing bounded result"
+        );
+        assert_eq!(memo.bytes, base);
+        memo.remember(
+            &row,
+            &fixture.profile_digest,
+            Some(context),
+            None,
+            with_context,
+        );
+        let entry = memo.exact(&row, &fixture.profile_digest).unwrap();
+        assert!(entry.context.is_some() && entry.report.is_some());
+        assert_eq!(
+            memo.bytes, with_context,
+            "extending an exact entry counts it once"
+        );
+        memo.remember(
+            &row,
+            &fixture.profile_digest,
+            None,
+            Some(report),
+            with_context,
+        );
+        assert_eq!(
+            memo.bytes, with_context,
+            "adding reconstruction cannot discard context accounting"
+        );
+    }
+
+    #[test]
+    fn context_memo_full_storage_evicts_and_oversized_entries_are_not_retained() {
+        let fixture = SemanticLineageFixture::new();
+        let prefix = Uuid::new_v4();
+        let first = reconstruction_fixture_row(&fixture, &format!("report:budget-a-{prefix}"));
+        let second = reconstruction_fixture_row(&fixture, &format!("report:budget-b-{prefix}"));
+        let decoded: nq_protocol::EvidenceReport =
+            serde_json::from_slice(&first.canonical_json).unwrap();
+        let context = ImmutableReportContext {
+            profile: decoded.profile,
+            binding: decoded.binding,
+        };
+        let first_report = reconstruct_admitted(&first, fixture.profile).unwrap();
+        let second_report = reconstruct_admitted(&second, fixture.profile).unwrap();
+        let cap = AdmittedReportMemo::weight(&first, Some(&context));
+        let mut memo = AdmittedReportMemo::default();
+        memo.remember(
+            &first,
+            &fixture.profile_digest,
+            Some(context.clone()),
+            Some(first_report),
+            cap,
+        );
+        memo.remember(
+            &second,
+            &fixture.profile_digest,
+            Some(context.clone()),
+            Some(second_report),
+            cap,
+        );
+        assert!(
+            memo.exact(&first, &fixture.profile_digest).is_none(),
+            "full bounded storage clears old entries"
+        );
+        assert!(memo.exact(&second, &fixture.profile_digest).is_some());
+        assert_eq!(memo.entries.len(), 1);
+        assert_eq!(memo.bytes, cap);
+        let mut oversized = context;
+        oversized.binding.scope.value = json!({"oversized": "x".repeat(cap)});
+        assert!(AdmittedReportMemo::weight(&first, Some(&oversized)) > cap);
+        memo.remember(&first, &fixture.profile_digest, Some(oversized), None, cap);
+        assert!(memo.exact(&first, &fixture.profile_digest).is_none());
+        assert!(
+            memo.exact(&second, &fixture.profile_digest).is_some(),
+            "an oversized row cannot displace the existing cache"
+        );
+        assert_eq!(memo.bytes, cap);
+    }
+
+    // This measures the real selection and reconstruction consumers. Unique
+    // occurrence IDs avoid another parallel test supplying the initial entries.
+    #[test]
+    fn context_memo_unchanged_history_validates_each_immutable_row_once() {
+        let fixture = SemanticLineageFixture::new();
+        let prefix = Uuid::new_v4();
+        let rows: Vec<_> = (1..=96)
+            .map(|sequence| {
+                let mut row = reconstruction_fixture_row(
+                    &fixture,
+                    &format!("report:context-reuse-{prefix}-{sequence}"),
+                );
+                row.report_sequence = sequence;
+                row
+            })
+            .collect();
+        let calls = CONTEXT_SELECTOR_CALLS.with(std::cell::Cell::get);
+        let validations = CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get);
+        let reconstructions = RECONSTRUCTIONS.with(std::cell::Cell::get);
+        let hits = RECONSTRUCTION_MEMO_HITS.with(std::cell::Cell::get);
+        let clears = RECONSTRUCTION_MEMO_CLEARS.with(std::cell::Cell::get);
+        let mut outputs = Vec::new();
+        for _ in 0..2 {
+            let selected =
+                evaluation_context_rows(&rows, fixture.watcher(), &fixture.profile_digest)
+                    .expect("exact context selection");
+            assert_eq!(selected, rows);
+            outputs.push(
+                selected
+                    .iter()
+                    .map(|row| {
+                        reconstruct_admitted_cached(row, fixture.profile, &fixture.profile_digest)
+                            .expect("real profile reconstruction")
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(outputs[0], outputs[1]);
+        let calls = CONTEXT_SELECTOR_CALLS.with(std::cell::Cell::get) - calls;
+        let validations = CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get) - validations;
+        let reconstructions = RECONSTRUCTIONS.with(std::cell::Cell::get) - reconstructions;
+        let hits = RECONSTRUCTION_MEMO_HITS.with(std::cell::Cell::get) - hits;
+        let clears = RECONSTRUCTION_MEMO_CLEARS.with(std::cell::Cell::get) - clears;
+        println!(
+            "context_memo rows=96 passes=2 selector_calls={calls} selector_validations={validations} reconstructions={reconstructions} reconstruction_hits={hits} memo_clears={clears}"
+        );
+        assert_eq!(calls, 192, "every row still compares the current context");
+        assert_eq!(
+            validations, 96,
+            "unchanged exact rows must reuse successful immutable validation"
+        );
+        assert_eq!(reconstructions, 96);
+        assert_eq!(hits, 96);
+        assert_eq!(clears, 0, "this bounded fixture must fit the existing memo");
+    }
+
+    #[test]
+    fn context_memo_compares_current_watcher_fields_on_every_call() {
+        let fixture = SemanticLineageFixture::new();
+        let watcher = fixture.watcher();
+        let row = reconstruction_fixture_row(
+            &fixture,
+            &format!("report:current-context-{}", Uuid::new_v4()),
+        );
+        assert!(report_matches_evaluation_context(&row, watcher, &fixture.profile_digest).unwrap());
+        reconstruct_admitted_cached(&row, fixture.profile, &fixture.profile_digest).unwrap();
+        let mut changed = Vec::new();
+        let mut subject = watcher.clone();
+        subject.subject.push_str("-other");
+        changed.push(subject);
+        let mut scope_kind = watcher.clone();
+        scope_kind.scope.kind.push_str("-other");
+        changed.push(scope_kind);
+        let mut scope_value = watcher.clone();
+        scope_value.scope.value = json!({"other":true});
+        changed.push(scope_value);
+        let mut vantage_kind = watcher.clone();
+        vantage_kind.vantage.kind.push_str("-other");
+        changed.push(vantage_kind);
+        let mut vantage_value = watcher.clone();
+        vantage_value.vantage.value = json!({"other":true});
+        changed.push(vantage_value);
+        let mut profile = watcher.clone();
+        profile.profile.id.push_str("-other");
+        changed.push(profile);
+        for current in changed {
+            assert!(
+                !report_matches_evaluation_context(&row, &current, &fixture.profile_digest)
+                    .unwrap(),
+                "cached true must not survive a changed current context"
+            );
+            assert!(
+                report_matches_evaluation_context(&row, watcher, &fixture.profile_digest).unwrap(),
+                "an unrelated context must not cache false for the original watcher"
+            );
+        }
+    }
+
+    #[test]
+    fn context_memo_revalidates_changed_stored_fields_and_selected_profile() {
+        let fixture = SemanticLineageFixture::new();
+        let watcher = fixture.watcher();
+        let row = reconstruction_fixture_row(
+            &fixture,
+            &format!("report:changed-context-{}", Uuid::new_v4()),
+        );
+        assert!(report_matches_evaluation_context(&row, watcher, &fixture.profile_digest).unwrap());
+        reconstruct_admitted_cached(&row, fixture.profile, &fixture.profile_digest).unwrap();
+        let mut changes = Vec::new();
+        let mut sequence = row.clone();
+        sequence.report_sequence += 1;
+        changes.push(sequence);
+        let mut received = row.clone();
+        received.received_at = timestamp(fixture.observed_at + Duration::seconds(1));
+        changes.push(received);
+        let mut instance = row.clone();
+        instance.instance_id.push_str("-other");
+        changes.push(instance);
+        let mut status = row.clone();
+        status.report_status = "partial".to_owned();
+        changes.push(status);
+        for changed in changes {
+            let before = CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get);
+            assert!(
+                report_matches_evaluation_context(&changed, watcher, &fixture.profile_digest)
+                    .unwrap()
+            );
+            assert_eq!(
+                CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get) - before,
+                1,
+                "any changed stored field must fall back to full validation"
+            );
+        }
+        let other_digest = format!("sha256:{}", "0".repeat(64));
+        let mut changed_profile = row.clone();
+        changed_profile.profile_digest = other_digest.clone();
+        let before = CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get);
+        assert!(
+            !report_matches_evaluation_context(&changed_profile, watcher, &other_digest).unwrap(),
+            "canonical report still binds the original profile"
+        );
+        assert_eq!(
+            CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get) - before,
+            1
+        );
+    }
+
+    #[test]
+    fn context_memo_never_reuses_success_for_changed_bytes_or_caches_refusals() {
+        let fixture = SemanticLineageFixture::new();
+        let row = reconstruction_fixture_row(
+            &fixture,
+            &format!("report:context-refusal-{}", Uuid::new_v4()),
+        );
+        assert!(
+            report_matches_evaluation_context(&row, fixture.watcher(), &fixture.profile_digest)
+                .unwrap()
+        );
+        reconstruct_admitted_cached(&row, fixture.profile, &fixture.profile_digest).unwrap();
+        let mut malformed = row.clone();
+        malformed.canonical_json = b"{ }".to_vec();
+        let mut substituted = row;
+        substituted.semantic_digest = format!("sha256:{}", "0".repeat(64));
+        for changed in [malformed, substituted] {
+            let before = CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get);
+            let first = report_matches_evaluation_context(
+                &changed,
+                fixture.watcher(),
+                &fixture.profile_digest,
+            )
+            .unwrap_err()
+            .to_string();
+            let second = report_matches_evaluation_context(
+                &changed,
+                fixture.watcher(),
+                &fixture.profile_digest,
+            )
+            .unwrap_err()
+            .to_string();
+            assert_eq!(
+                first, second,
+                "repeated refusal preserves the original result"
+            );
+            assert_eq!(
+                CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get) - before,
+                2,
+                "refusals are not memoized"
+            );
+        }
+    }
+
+    #[test]
+    fn context_memo_validates_all_selectors_before_any_reconstruction() {
+        let fixture = SemanticLineageFixture::new();
+        let first = reconstruction_fixture_row(
+            &fixture,
+            &format!("report:selector-order-{}", Uuid::new_v4()),
+        );
+        let mut second = first.clone();
+        second.report_id.push_str("-invalid");
+        second.report_sequence += 1;
+        second.canonical_json = b"{ }".to_vec();
+        let snapshot = EvidenceSnapshot {
+            watermarks: Vec::new(),
+            reports: vec![first, second],
+            expired_citations: Vec::new(),
+        };
+        let before = RECONSTRUCTIONS.with(std::cell::Cell::get);
+        let error = prepare_instance_evaluations(
+            fixture.watcher(),
+            fixture.profile,
+            None,
+            &snapshot,
+            &[],
+            &format!("sha256:{}", "a".repeat(64)),
+            EvaluationReportSelection::AllMatching,
+        )
+        .err()
+        .expect("the later invalid selector must refuse");
+        assert!(
+            error.to_string().contains("not canonical"),
+            "original selector refusal: {error}"
+        );
+        assert_eq!(
+            RECONSTRUCTIONS.with(std::cell::Cell::get) - before,
+            0,
+            "even the valid first report must wait for all selector checks"
+        );
     }
 
     #[test]
