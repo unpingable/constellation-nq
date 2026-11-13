@@ -238,6 +238,87 @@ sys.stdout.write("\n")
     }
 
     #[test]
+    fn ordinary_current_freshness_materializes_one_source_and_bounds_memo_retention() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut engine, watcher, _) = live_fixture(root.path(), false);
+        for _ in 0..4 {
+            assert!(engine.collect(&watcher).unwrap().is_success());
+        }
+        assert!(
+            engine.store.finding_snapshots().unwrap().is_empty(),
+            "healthy testimony has no older finding citations to acquire"
+        );
+        let full = engine
+            .store
+            .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))
+            .unwrap();
+        assert_eq!(
+            full.reports.len(),
+            4,
+            "full source API keeps retained history"
+        );
+        let newest_body_bytes = full.reports.last().unwrap().canonical_json.len();
+        assert!(newest_body_bytes > 0);
+        drop(full);
+        let memo_after_collect = admitted_report_memo()
+            .lock()
+            .unwrap()
+            .entries
+            .values()
+            .filter(|entry| entry.row.instance_id == watcher.instance_id)
+            .count();
+
+        PREPARED_SOURCE_ROWS_MATERIALIZED.with(|count| count.set(0));
+        PREPARED_SOURCE_BYTES_MATERIALIZED.with(|count| count.set(0));
+        assert_eq!(
+            engine
+                .freshness_sweep(&watcher)
+                .expect("real ordinary freshness sweep"),
+            1
+        );
+        let source_rows = PREPARED_SOURCE_ROWS_MATERIALIZED.with(std::cell::Cell::get);
+        let source_bytes = PREPARED_SOURCE_BYTES_MATERIALIZED.with(std::cell::Cell::get);
+        let memo_after_sweep = admitted_report_memo()
+            .lock()
+            .unwrap()
+            .entries
+            .values()
+            .filter(|entry| entry.row.instance_id == watcher.instance_id)
+            .count();
+        assert_eq!(
+            engine
+                .store
+                .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))
+                .unwrap()
+                .reports
+                .len(),
+            4,
+            "scoped preparation does not retire full history"
+        );
+        println!(
+            "ordinary_current_freshness retained_reports=4 source_rows={source_rows} \
+            source_bytes={source_bytes} newest_body_bytes={newest_body_bytes} \
+            memo_after_collect={memo_after_collect} memo_after_sweep={memo_after_sweep}"
+        );
+        assert_eq!(
+            source_rows, 1,
+            "ordinary current-only freshness must materialize its head, not all retained source"
+        );
+        assert_eq!(
+            source_bytes, newest_body_bytes,
+            "healthy current-only freshness must materialize only the newest canonical body"
+        );
+        assert!(
+            memo_after_collect <= 2,
+            "ordinary current-only collection must prune obsolete full memo entries: {memo_after_collect}"
+        );
+        assert!(
+            memo_after_sweep <= 2,
+            "ordinary current-only freshness must keep the question's memo bounded: {memo_after_sweep}"
+        );
+    }
+
+    #[test]
     fn audited_current_profile_preparation_retains_only_newest_detector_report() {
         for count in [1, 4, 64] {
             let root = tempfile::tempdir().unwrap();

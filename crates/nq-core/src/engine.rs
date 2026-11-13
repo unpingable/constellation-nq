@@ -6127,6 +6127,19 @@ impl PreparedHistoricalReports {
         let source = store.prepare_evidence_snapshot(&watcher.instance_id)?;
         let generation = source.retention_generation();
         let snapshot = source.snapshot();
+        #[cfg(test)]
+        {
+            PREPARED_SOURCE_ROWS_MATERIALIZED.with(|count| {
+                count.set(count.get() + snapshot.reports.len());
+            });
+            PREPARED_SOURCE_BYTES_MATERIALIZED.with(|count| {
+                count.set(
+                    count.get()
+                        + snapshot.reports.iter()
+                            .map(|row| row.canonical_json.len()).sum::<usize>(),
+                );
+            });
+        }
         snapshot_timing.value("report_rows", snapshot.reports.len() as i64);
         drop(snapshot_timing);
         let digest = profile
@@ -8753,6 +8766,9 @@ thread_local! {
     static MEMO_BODY_BYTES_HASHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Deep copies into prepared detector inputs, excluding shared Arc handles.
     static PREPARED_REPORT_DEEP_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Canonical source rows and bytes materialized by historical preparation.
+    static PREPARED_SOURCE_ROWS_MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PREPARED_SOURCE_BYTES_MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// One test pauses the real reconstruction consumer to try another writer.
     static HISTORICAL_RECONSTRUCTION_FOR_TEST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     /// Reports kept after evaluation solely for diagnostic emission.
