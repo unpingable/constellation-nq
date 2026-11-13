@@ -8584,6 +8584,8 @@ thread_local! {
     static CONTEXT_SELECTOR_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RECONSTRUCTION_MEMO_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RECONSTRUCTION_MEMO_CLEARS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Actual raw canonical bytes hashed to bind immutable memo testimony.
+    static MEMO_BODY_BYTES_HASHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// One test pauses the real reconstruction consumer to try another writer.
     static HISTORICAL_RECONSTRUCTION_FOR_TEST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     /// Reports kept after evaluation solely for diagnostic emission.
@@ -8619,6 +8621,8 @@ struct AdmittedMemoRow {
 
 impl AdmittedMemoRow {
     fn body_commitment(bytes: &[u8]) -> [u8; 32] {
+        #[cfg(test)]
+        MEMO_BODY_BYTES_HASHED.with(|count| count.set(count.get() + bytes.len()));
         use sha2::Digest as _;
         sha2::Sha256::digest(bytes).into()
     }
@@ -19693,6 +19697,43 @@ sys.stdout.write("\n")
         );
         assert_eq!(hits, 24);
         assert_eq!(clears, 0);
+    }
+
+    #[test]
+    fn historical_preparation_checks_each_warm_body_once() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("single-body-check.db");
+        let config = holes_engine_config(&path);
+        let watcher = config.watchers[0].clone();
+        let profile = resolve(&watcher).unwrap();
+        let mut store = Store::initialize(&path).unwrap();
+        store.append_genesis(&GenesisInput {
+            genesis_id: Uuid::new_v4().to_string(),
+            legacy_manifest_digest: None,
+            created_at: timestamp(Utc::now()),
+            detail: canonical(&json!({"source":"single-body-check-fixture"})).unwrap(),
+        }).unwrap();
+        REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = Some(None));
+        for sequence in 1..=12 {
+            let suffix = format!("single-body-check-{}-{sequence}", Uuid::new_v4());
+            commit_real_host_detector_report(
+                &mut store, &watcher, &format!("report-{suffix}"), &suffix,
+                Utc::now() - Duration::seconds(1), 1.0, None,
+            );
+        }
+        REUSED_ADMISSION_FOR_TEST.with(|cell| *cell.borrow_mut() = None);
+        let first = PreparedHistoricalReports::prepare(&mut store, &watcher, profile).unwrap();
+        let expected_bytes: usize = first.0.snapshot().reports.iter()
+            .map(|row| row.canonical_json.len()).sum();
+        let before = MEMO_BODY_BYTES_HASHED.with(std::cell::Cell::get);
+        let second = PreparedHistoricalReports::prepare(&mut store, &watcher, profile).unwrap();
+        let hashed_bytes = MEMO_BODY_BYTES_HASHED.with(std::cell::Cell::get) - before;
+        assert_eq!(first.0.snapshot().reports, second.0.snapshot().reports);
+        assert_eq!(first.1.matching_indices, second.1.matching_indices);
+        assert_eq!(first.1.reports, second.1.reports);
+        println!("warm_history rows=12 source_bytes={expected_bytes} hashed_bytes={hashed_bytes}");
+        assert_eq!(hashed_bytes, expected_bytes,
+            "one preparation must bind the actual warm body once, not hash it again for reconstruction");
     }
 
     /// The same real validated rows fit a bounded memo only when its duplicate
