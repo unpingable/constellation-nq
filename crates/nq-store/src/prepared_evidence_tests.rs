@@ -1,6 +1,8 @@
 // Real Store transactions and existing public-data fixtures. These establish
 // source custody and fallback laws; Core separately checks typed evaluations.
 
+include!("current_evidence_tests.rs");
+
 fn resolve_freshness(
     store: &mut Store,
     prepared: PreparedEvidenceSnapshot,
