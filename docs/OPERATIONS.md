@@ -782,7 +782,8 @@ A replaced database path or foreign sidecar refuses.
 A long read snapshot can retain WAL pages and cause the existing writer capacity
 or checkpoint admission to refuse; this is not an unconditional writer progress
 guarantee. Ordinary cold opens without an applicable watermark keep their
-existing serialized validation behavior.
+serialized store-open checks; their later engine semantic pass does not use
+this whole-operation read snapshot.
 
 ### Status and findings exports
 
@@ -962,6 +963,15 @@ at its frontier ("certified semantic state ... disagrees"). On success it record
 watermark and prints its commitment digest. An existing store has no
 watermark until its first engine open or explicit full validation; that first
 validation costs a full validation.
+
+The full engine semantic pass uses the status-history validator's complete
+watcher-run audit without repeating it in the outer orchestrator. Run-result
+linkage, resource outcomes, profile identities, and status/refusal correspondence
+remain checked. This removes one duplicate traversal from exhaustive engine
+paths, including an engine open without semantic certification and an expiry's
+full-validation fallback. It does not change certified warm collection or make
+whole-store validation constant-cost. The snapshot and change-reconciliation
+boundaries of each caller remain unchanged.
 
 ### Retention lookup allocation
 
@@ -1280,7 +1290,8 @@ is bounded by the new rows, the referenced closure, and the schema:
   including errors; covered runs retain their complete lookup.
 - Full validation is linear in history apart from those lookups: about 7 s,
   27 s, and 81 s at those sizes, and 3.5 s on a 208-acquisition production
-  store copy.
+  store copy. Those retained timings predate removal of the duplicate
+  watcher-run audit; they are not a timing bound for the current path.
 
 The `hot_path_work_does_not_grow_with_covered_history` test counts every
 SQLite virtual-machine operation and asserts that a read-only open plus

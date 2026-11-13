@@ -9629,7 +9629,6 @@ fn validate_semantic_planes_in_full_through(
     let (_, heads) = replay_evaluation_history_in_full_through(store, through, comparison)?;
     *evaluation = Some(heads.clone());
     validate_admitted_report_history(store)?;
-    validate_watcher_run_history(store)?;
     validate_status_history_v2_with_page_size(store, 256, EvaluationHistory::AlreadyValidated)?;
     validate_rejected_custody_history_with_page_size(
         store,
