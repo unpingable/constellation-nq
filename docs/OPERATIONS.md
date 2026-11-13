@@ -1306,6 +1306,31 @@ is bounded by the new rows, the referenced closure, and the schema:
   nor this query correction establishes a whole-operation time or resource bound.
   Named local-successor exact-current selection
   keeps its existing path.
+- Store also exposes a separate opt-in `PreparedCurrentEvidenceSnapshot` for
+  ordinary current questions. `prepare_current_evidence_snapshot` captures the
+  absolute instance head, including compact rows as an append sentinel, and the
+  exact finding lineage's current citation closure. A compact absolute head
+  returns `None` for complete-source fallback. The caller still owns eligibility
+  of the exact compiled detector law, canonical context/profile validation and
+  fallback; the presence of this Store API does not switch ordinary collection
+  or diagnostic selection to it.
+  Its two `*_current_prepared_validated` commit methods consume this distinct
+  proof under the existing writer guard. Retention-generation changes refuse.
+  Changed handle/stamp paths reselect both the absolute head and current
+  citation membership, comparing selected report bodies, metadata, compact
+  citation identities and ordered references literally. Missing citation
+  targets or mismatched digests refuse. A same-instance append changes the
+  absolute sentinel even if its context differs; an unrelated change or an
+  operator update retaining identical support may succeed. An admitted commit
+  adds only its exact new occurrence, and refuses a diagnostic artifact.
+  Unreferenced older report bytes are explicitly outside this new proof:
+  changing them need not conflict here. `PreparedEvidenceSnapshot`, its full
+  commit APIs and the complete administrative audit keep their existing
+  historical-integrity obligations. This does not skip those independent
+  integrity checks or narrow their claims. Current-finding pointer selection
+  still depends on the number of current lineages, and replay/open work is
+  unchanged; no whole-operation CPU, RSS, latency or constant-cost guarantee
+  follows from selecting fewer evidence bodies.
 - Each scoped admitted-run validator groups the uncovered evaluations by run
   once, then reads each newly appended run's exact evaluation rows by rowid.
   A covered run selected by newly linked history still reopens its complete

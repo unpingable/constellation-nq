@@ -30,6 +30,9 @@ mod full_validation;
 pub use full_validation::FullValidation;
 mod prepared_evidence;
 pub use prepared_evidence::PreparedEvidenceSnapshot;
+use prepared_evidence::PreparedSource;
+mod current_evidence;
+pub use current_evidence::PreparedCurrentEvidenceSnapshot;
 mod history_scope;
 mod retention;
 pub use retention::{
@@ -4285,10 +4288,37 @@ impl Store {
             -> Result<AdmittedCollectionCompletion<T>, E>,
     {
         self.commit_admitted_collection_inner(
-            collection, Some(prepared), validate,
+            collection, Some(PreparedSource::Full(prepared)), validate,
             |view, receipt, snapshot| {
                 let snapshot = snapshot.ok_or_else(|| E::from(StoreError::Invariant(
                     "prepared collection lost its resolved snapshot".into(),
+                )))?;
+                build(view, receipt, snapshot)
+            },
+        )
+    }
+
+    /// Ordinary admitted completion with a separately scoped current-evidence
+    /// proof. Unreferenced older bytes are outside that proof. Diagnostic
+    /// artifacts require the existing complete-source path and are refused.
+    pub fn commit_admitted_collection_current_prepared_validated<T, E, P, F>(
+        &mut self,
+        collection: &CollectionInput,
+        prepared: PreparedCurrentEvidenceSnapshot,
+        validate: P,
+        build: F,
+    ) -> Result<ProviderIntakeCommit<T>, E>
+    where
+        E: From<StoreError>,
+        P: FnOnce(&Self, &HistoryFrontier) -> Result<(), E>,
+        F: FnOnce(&AdmittedCollectionView<'_, '_>, &CollectionReceipt, EvidenceSnapshot)
+            -> Result<AdmittedCollectionCompletion<T>, E>,
+    {
+        self.commit_admitted_collection_inner(
+            collection, Some(PreparedSource::Current(Box::new(prepared))), validate,
+            |view, receipt, snapshot| {
+                let snapshot = snapshot.ok_or_else(|| E::from(StoreError::Invariant(
+                    "current prepared collection lost its resolved snapshot".into(),
                 )))?;
                 build(view, receipt, snapshot)
             },
@@ -4299,7 +4329,7 @@ impl Store {
     fn commit_admitted_collection_inner<T, E, P, F>(
         &mut self,
         collection: &CollectionInput,
-        prepared: Option<PreparedEvidenceSnapshot>,
+        prepared: Option<PreparedSource>,
         validate: P,
         build: F,
     ) -> Result<ProviderIntakeCommit<T>, E>
@@ -4310,6 +4340,7 @@ impl Store {
             -> Result<AdmittedCollectionCompletion<T>, E>,
     {
         let _timing = operation_timing::PhaseTiming::start("store.admitted_commit");
+        let current_only = prepared.as_ref().is_some_and(PreparedSource::is_current);
         validate_collection(collection).map_err(E::from)?;
         if !is_admitted_collection(collection) {
             return Err(E::from(StoreError::Invariant(
@@ -4372,6 +4403,11 @@ impl Store {
             };
             build(&view, &receipt, snapshot)?
         };
+        if current_only && completion.diagnostic_artifact.is_some() {
+            return Err(E::from(StoreError::Invariant(
+                "current-evidence preparation is ordinary only; diagnostic artifacts require complete source".into(),
+            )));
+        }
         drop(build_timing);
         let validation_timing = operation_timing::PhaseTiming::start("store.admitted_insert_validate");
         validate_admitted_completion(collection, &receipt, &completion).map_err(E::from)?;
@@ -7444,7 +7480,7 @@ impl Store {
         F: FnOnce(&Self, &AdmittedCollectionView<'_, '_>, &HistoryFrontier, EvidenceSnapshot)
             -> Result<(Vec<EvaluationCommitInput>, T), E>,
     {
-        self.commit_evaluations_inner(Some(prepared), validate, |store, view, bounds, snapshot| {
+        self.commit_evaluations_inner(Some(PreparedSource::Full(prepared)), validate, |store, view, bounds, snapshot| {
             let snapshot = snapshot.ok_or_else(|| E::from(StoreError::Invariant(
                 "prepared evaluation lost its resolved snapshot".into(),
             )))?;
@@ -7452,9 +7488,33 @@ impl Store {
         })
     }
 
+    /// Resolve the separately scoped current-question source under the same
+    /// writer guard. The full prepared-evidence API retains its old contract.
+    pub fn commit_evaluations_current_prepared_validated<T, E, P, F>(
+        &mut self,
+        prepared: PreparedCurrentEvidenceSnapshot,
+        validate: P,
+        build: F,
+    ) -> Result<T, E>
+    where
+        E: From<StoreError>,
+        P: FnOnce(&Self, &HistoryFrontier) -> Result<(), E>,
+        F: FnOnce(&Self, &AdmittedCollectionView<'_, '_>, &HistoryFrontier, EvidenceSnapshot)
+            -> Result<(Vec<EvaluationCommitInput>, T), E>,
+    {
+        self.commit_evaluations_inner(Some(PreparedSource::Current(Box::new(prepared))), validate,
+            |store, view, bounds, snapshot| {
+                let snapshot = snapshot.ok_or_else(|| E::from(StoreError::Invariant(
+                    "current prepared evaluation lost its resolved snapshot".into(),
+                )))?;
+                build(store, view, bounds, snapshot)
+            },
+        )
+    }
+
     fn commit_evaluations_inner<T, E, P, F>(
         &mut self,
-        prepared: Option<PreparedEvidenceSnapshot>,
+        prepared: Option<PreparedSource>,
         validate: P,
         build: F,
     ) -> Result<T, E>
@@ -17932,6 +17992,18 @@ mod tests {
         Sha256Digest,
         Result<ProviderIntakeCommit<()>, StoreError>,
     ) {
+        diagnostic_artifact_fixture_with_current_proof(
+            store, suffix, profile_digest, artifact_evaluation_id, false,
+        )
+    }
+
+    fn diagnostic_artifact_fixture_with_current_proof(
+        store: &mut Store,
+        suffix: &str,
+        profile_digest: &str,
+        artifact_evaluation_id: &str,
+        current_only: bool,
+    ) -> (String, Sha256Digest, Result<ProviderIntakeCommit<()>, StoreError>) {
         let detector_digest = digest(&format!("diagnostic-detector-{suffix}"));
         let evaluator_digest = typed_digest(&format!("diagnostic-evaluator-{suffix}"));
         let mut identity = fixture_identity();
@@ -17982,7 +18054,7 @@ mod tests {
             "completed_at": TIME,
             "fixture": suffix,
         }));
-        let result = store.commit_admitted_collection(&collection, |_view, receipt| {
+        let build = |_view: &AdmittedCollectionView<'_, '_>, receipt: &CollectionReceipt| {
             let report_sequence = receipt.report_sequence.expect("pending report sequence");
             Ok::<_, StoreError>(AdmittedCollectionCompletion {
                 value: (),
@@ -18039,7 +18111,23 @@ mod tests {
                     observed_at: TIME.to_owned(),
                 },
             })
-        });
+        };
+        let result = if current_only {
+            let lineage = EvaluationFindingLineage {
+                instance_id: "fixture-a".into(), detector_id: "fixture.detector".into(),
+                detector_version: "1".into(), detector_digest: detector_digest.clone(),
+                profile_id: "fixture.health".into(), profile_version: "1".into(),
+                profile_digest: profile_digest.into(), profile_semantic_id: digest("profile-semantic"),
+                subject_json: document(json!("fixture:fixture-a")).as_bytes().to_vec(),
+                condition_name: "fixture.detector".into(), basis_json: document(json!({})).as_bytes().to_vec(),
+            };
+            let proof = store.prepare_current_evidence_snapshot(&lineage).unwrap().unwrap();
+            store.commit_admitted_collection_current_prepared_validated(
+                &collection, proof, |_, _| Ok(()), |view, receipt, _| build(view, receipt),
+            )
+        } else {
+            store.commit_admitted_collection(&collection, build)
+        };
         (run_id, artifact_id, result)
     }
 

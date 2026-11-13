@@ -11,19 +11,70 @@ use super::{
 };
 
 #[derive(PartialEq, Eq)]
-struct SnapshotStamp {
+pub(super) struct SnapshotStamp {
     data_version: i64,
     total_changes: u64,
     schema_cookie: i64,
 }
 
 impl SnapshotStamp {
-    fn capture(connection: &Connection) -> Result<Self, StoreError> {
+    pub(super) fn capture(connection: &Connection) -> Result<Self, StoreError> {
         Ok(Self {
             data_version: connection.query_row("PRAGMA data_version", [], |row| row.get(0))?,
             total_changes: connection.total_changes(),
             schema_cookie: connection.query_row("PRAGMA schema_version", [], |row| row.get(0))?,
         })
+    }
+}
+
+/// Private dispatch only: the public complete and current proof types remain
+/// distinct so callers cannot silently narrow the old source contract.
+pub(super) enum PreparedSource {
+    Full(PreparedEvidenceSnapshot),
+    Current(Box<super::PreparedCurrentEvidenceSnapshot>),
+}
+
+impl PreparedSource {
+    pub(super) fn is_current(&self) -> bool {
+        matches!(self, Self::Current(_))
+    }
+
+    pub(super) fn require_instance(&self, instance: &str) -> Result<(), StoreError> {
+        match self {
+            Self::Full(proof) => proof.require_instance(instance),
+            Self::Current(proof) => proof.require_instance(instance),
+        }
+    }
+
+    pub(super) fn resolve(
+        self,
+        store: &Store,
+        transaction: &Transaction<'_>,
+    ) -> Result<ResolvedSource, StoreError> {
+        match self {
+            Self::Full(proof) => proof.resolve(store, transaction).map(ResolvedSource::Full),
+            Self::Current(proof) => proof
+                .resolve(store, transaction)
+                .map(ResolvedSource::Current),
+        }
+    }
+}
+
+pub(super) enum ResolvedSource {
+    Full(ResolvedPreparedSnapshot),
+    Current(super::current_evidence::ResolvedCurrentSnapshot),
+}
+
+impl ResolvedSource {
+    pub(super) fn finish(
+        self,
+        transaction: &Transaction<'_>,
+        current: Option<(&str, &str, i64)>,
+    ) -> Result<EvidenceSnapshot, StoreError> {
+        match self {
+            Self::Full(proof) => proof.finish(transaction, current),
+            Self::Current(proof) => proof.finish(transaction, current),
+        }
     }
 }
 

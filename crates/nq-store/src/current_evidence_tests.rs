@@ -264,6 +264,17 @@ fn append_current_finding(
     cited: &str,
     opened: bool,
 ) {
+    append_current_finding_state(store, profile, suffix, cited, opened, false);
+}
+
+fn append_current_finding_state(
+    store: &mut Store,
+    profile: &str,
+    suffix: &str,
+    cited: &str,
+    opened: bool,
+    resolved: bool,
+) {
     let snapshot = store.evidence_snapshot(&["fixture-a".into()]).unwrap();
     let report = snapshot
         .reports
@@ -279,7 +290,12 @@ fn append_current_finding(
         evaluator_artifact_digest: digest("evaluator-artifact"),
         started_at: TIME.into(),
         evaluated_at: TIME.into(),
-        outcome: "condition_present".into(),
+        outcome: if resolved {
+            "condition_explicitly_absent"
+        } else {
+            "condition_present"
+        }
+        .into(),
         detail: document(json!({})),
         profile: evaluation_profile(profile),
         watermarks: snapshot.watermarks.clone(),
@@ -288,14 +304,26 @@ fn append_current_finding(
     let finding = FindingEventInput {
         event_id: format!("event-current-{suffix}"),
         finding_id: "finding-current-evidence".into(),
-        event_kind: if opened { "opened" } else { "updated" }.into(),
+        event_kind: if resolved {
+            "resolved"
+        } else if opened {
+            "opened"
+        } else {
+            "updated"
+        }
+        .into(),
         instance_id: "fixture-a".into(),
         profile_id: "fixture.health".into(),
         profile_version: "1".into(),
         profile_digest: profile.into(),
         subject: document(json!({"fixture":"finding"})),
         condition_name: "fixture.unhealthy".into(),
-        condition_state: "present".into(),
+        condition_state: if resolved {
+            "explicitly_absent"
+        } else {
+            "present"
+        }
+        .into(),
         visibility_state: "sufficient".into(),
         operator_work_state: if opened {
             "unacknowledged"
@@ -431,5 +459,259 @@ fn current_evidence_admitted_commit_adds_only_its_exact_current_occurrence() {
         },
     ).unwrap();
     assert!(matches!(result, ProviderIntakeCommit::Committed { .. }));
+    store.validate().unwrap();
+}
+
+fn compact_current_citation_fixture() -> (Store, String) {
+    let (mut store, profile) = current_source_fixture(3);
+    append_current_finding(&mut store, &profile, "opened", "report-current-001", true);
+    append_current_finding_state(
+        &mut store,
+        &profile,
+        "resolved",
+        "report-current-001",
+        false,
+        true,
+    );
+    store
+        .expire_ordinary_before("2100-01-01T00:00:00Z")
+        .unwrap();
+    let compact: bool = store
+        .connection
+        .query_row(
+            "SELECT source_expired FROM admitted_reports WHERE report_id='report-current-001'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        compact,
+        "real expiry must compact the resolved finding's released source"
+    );
+    (store, profile)
+}
+
+#[test]
+fn current_evidence_retains_only_its_exact_compact_citation_metadata() {
+    let (mut store, profile) = compact_current_citation_fixture();
+    let proof = store
+        .prepare_current_evidence_snapshot(&current_lineage(&profile))
+        .unwrap()
+        .unwrap();
+    let snapshot = proof.snapshot();
+    assert_eq!(snapshot.reports.len(), 1);
+    assert_eq!(snapshot.reports[0].report_id, "report-current-003");
+    assert_eq!(snapshot.watermarks[0].max_report_sequence, 3);
+    assert_eq!(snapshot.expired_citations.len(), 1);
+    assert_eq!(
+        snapshot.expired_citations[0].report_id,
+        "report-current-001"
+    );
+    assert_eq!(snapshot.expired_citations[0].canonical_json, b"{}");
+    let expected = snapshot.clone();
+    assert_eq!(resolve_current(&mut store, proof).unwrap(), expected);
+    store.validate().unwrap();
+}
+
+#[test]
+fn current_evidence_compact_citation_metadata_substitution_refuses() {
+    let (mut store, profile) = compact_current_citation_fixture();
+    let proof = store
+        .prepare_current_evidence_snapshot(&current_lineage(&profile))
+        .unwrap()
+        .unwrap();
+    let original = proof.snapshot().expired_citations[0].received_at.clone();
+    let trigger: String = store
+        .connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='immutable_admitted_reports_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    store
+        .connection
+        .execute_batch("DROP TRIGGER immutable_admitted_reports_update")
+        .unwrap();
+    store.connection.execute("UPDATE admitted_reports SET received_at='2099-01-01T00:00:00.000Z' WHERE report_id='report-current-001'", []).unwrap();
+    assert_current_history_changed(resolve_current(&mut store, proof));
+    store
+        .connection
+        .execute(
+            "UPDATE admitted_reports SET received_at=?1 WHERE report_id='report-current-001'",
+            [&original],
+        )
+        .unwrap();
+    store.connection.execute_batch(&trigger).unwrap();
+    store.validate().unwrap();
+}
+
+#[test]
+fn current_evidence_missing_cited_source_never_disappears_during_initial_selection() {
+    let (mut store, profile) = current_source_fixture(2);
+    append_current_finding(&mut store, &profile, "opened", "report-current-001", true);
+    let proof = store
+        .prepare_current_evidence_snapshot(&current_lineage(&profile))
+        .unwrap()
+        .unwrap();
+    let trigger: String = store
+        .connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='immutable_admitted_reports_delete'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    store.connection.execute_batch("PRAGMA foreign_keys=OFF;
+        DROP TRIGGER immutable_admitted_reports_delete;
+        CREATE TEMP TABLE removed_current_source AS SELECT * FROM admitted_reports WHERE report_id='report-current-001';
+        DELETE FROM admitted_reports WHERE report_id='report-current-001';").unwrap();
+    assert!(
+        store
+            .prepare_current_evidence_snapshot(&current_lineage(&profile))
+            .is_err(),
+        "a missing citation target cannot be hidden by a join"
+    );
+    assert!(
+        resolve_current(&mut store, proof).is_err(),
+        "selected citation deletion also refuses guarded resolution"
+    );
+    store
+        .connection
+        .execute_batch(
+            "INSERT INTO admitted_reports SELECT * FROM removed_current_source;
+        DROP TABLE removed_current_source;",
+        )
+        .unwrap();
+    store.connection.execute_batch(&trigger).unwrap();
+    store
+        .connection
+        .execute_batch("PRAGMA foreign_keys=ON")
+        .unwrap();
+    store.validate().unwrap();
+}
+
+#[test]
+fn current_evidence_cited_digest_mismatch_never_disappears_during_initial_selection() {
+    let (mut store, profile) = current_source_fixture(2);
+    append_current_finding(&mut store, &profile, "opened", "report-current-001", true);
+    let original: String = store.connection.query_row("SELECT report_semantic_digest FROM finding_evidence WHERE event_id='event-current-opened'", [], |row| row.get(0)).unwrap();
+    let trigger: String = store
+        .connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='immutable_finding_evidence_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    store
+        .connection
+        .execute_batch("PRAGMA foreign_keys=OFF; DROP TRIGGER immutable_finding_evidence_update;")
+        .unwrap();
+    store.connection.execute("UPDATE finding_evidence SET report_semantic_digest=?1 WHERE event_id='event-current-opened'", [digest("substituted-citation")]).unwrap();
+    assert!(
+        store
+            .prepare_current_evidence_snapshot(&current_lineage(&profile))
+            .is_err(),
+        "a mismatched citation digest cannot be hidden by a join"
+    );
+    store.connection.execute("UPDATE finding_evidence SET report_semantic_digest=?1 WHERE event_id='event-current-opened'", [&original]).unwrap();
+    store.connection.execute_batch(&trigger).unwrap();
+    store
+        .connection
+        .execute_batch("PRAGMA foreign_keys=ON")
+        .unwrap();
+    store.validate().unwrap();
+}
+
+#[test]
+fn current_evidence_compact_absolute_head_returns_fallback_without_scanning_backwards() {
+    let (mut store, profile) = current_source_fixture(2);
+    let original: (Vec<u8>, Vec<u8>, Option<Vec<u8>>) = store.connection.query_row(
+        "SELECT canonical_json, validated_report_json, next_checkpoint_json FROM admitted_reports WHERE report_id='report-current-002'", [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+    // Deliberate compact-head input, not a globally valid expiry verdict.
+    // Ordinary retention protects its head; restore it exactly after fallback.
+    store.connection.execute_batch("UPDATE retention_state SET delete_enabled=1;
+        UPDATE admitted_reports SET source_expired=1, canonical_json=CAST('{}' AS BLOB), validated_report_json=CAST('{}' AS BLOB), next_checkpoint_json=NULL WHERE report_id='report-current-002';
+        UPDATE retention_state SET delete_enabled=0;").unwrap();
+    assert!(
+        store
+            .prepare_current_evidence_snapshot(&current_lineage(&profile))
+            .unwrap()
+            .is_none()
+    );
+    let trigger: String = store
+        .connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='immutable_admitted_reports_update'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    store
+        .connection
+        .execute_batch("DROP TRIGGER immutable_admitted_reports_update")
+        .unwrap();
+    store.connection.execute("UPDATE admitted_reports SET source_expired=0, canonical_json=?1, validated_report_json=?2, next_checkpoint_json=?3 WHERE report_id='report-current-002'",
+        params![original.0, original.1, original.2]).unwrap();
+    store.connection.execute_batch(&trigger).unwrap();
+    store.validate().unwrap();
+}
+
+#[test]
+fn current_evidence_diagnostic_artifact_is_refused_while_the_full_api_accepts_it() {
+    for current_only in [false, true] {
+        let (mut store, profile) = configured_store();
+        let suffix = "current-diagnostic-guard";
+        let (run_id, artifact_id, result) = diagnostic_artifact_fixture_with_current_proof(
+            &mut store,
+            suffix,
+            &profile,
+            &format!("evaluation-{suffix}"),
+            current_only,
+        );
+        if current_only {
+            assert!(matches!(result, Err(StoreError::Invariant(message))
+                if message.contains("ordinary only")));
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM watcher_runs WHERE run_id=?1",
+                        [&run_id],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0,
+                "ordinary-only refusal rolls back the complete admitted occurrence"
+            );
+            assert!(matches!(
+                store
+                    .diagnostic_artifact(&artifact_id, &["nq.diagnostic_execution.v1"])
+                    .unwrap(),
+                DiagnosticArtifactLookup::NotFound
+            ));
+        } else {
+            assert!(
+                matches!(result, Ok(ProviderIntakeCommit::Committed { .. })),
+                "the same well-formed diagnostic fixture is supported by the existing full API"
+            );
+        }
+        store.validate().unwrap();
+    }
+}
+
+#[test]
+fn current_evidence_new_current_finding_support_without_report_append_refuses() {
+    let (mut store, profile) = current_source_fixture(2);
+    let proof = store
+        .prepare_current_evidence_snapshot(&current_lineage(&profile))
+        .unwrap()
+        .unwrap();
+    assert_eq!(proof.snapshot().reports.len(), 1);
+    append_current_finding(&mut store, &profile, "appeared", "report-current-001", true);
+    assert_current_history_changed(resolve_current(&mut store, proof));
     store.validate().unwrap();
 }
