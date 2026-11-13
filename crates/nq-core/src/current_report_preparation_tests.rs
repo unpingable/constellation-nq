@@ -5,6 +5,7 @@
 mod current_report_preparation {
     use super::*;
     include!("current_report_cost_measurement.rs");
+    include!("current_evidence_core_tests.rs");
 
     const MACHINE: &str = "0123456789abcdef0123456789abcdef";
 
@@ -232,8 +233,7 @@ sys.stdout.write("\n")
             .map(|(key, _)| key.clone())
             .collect();
         for key in keys {
-            let removed = memo.entries.remove(&key).unwrap();
-            memo.bytes = memo.bytes.saturating_sub(removed.weight);
+            memo.remove(&key).unwrap();
         }
     }
 

@@ -3614,9 +3614,14 @@ impl CollectionEngine {
                         };
                         ensure_replay_cursor(&self.store, &mut self.replay)?;
                         let (prepared_snapshot, history) = if local_successor_acquisition_id.is_none() {
-                            let (source, history) = PreparedHistoricalReports::prepare(
-                                &mut self.store, watcher, profile,
-                            )?;
+                            let (source, history) = if emit_diagnostic {
+                                let (source, history) = PreparedHistoricalReports::prepare(
+                                    &mut self.store, watcher, profile,
+                                )?;
+                                (PreparedHistoricalSource::Full(source), history)
+                            } else {
+                                PreparedHistoricalReports::prepare_ordinary(&mut self.store, watcher, profile)?
+                            };
                             (Some(source), Some(history))
                         } else {
                             (None, None)
@@ -3740,16 +3745,19 @@ impl CollectionEngine {
                                 },
                             })
                         };
-                        let committed = if let Some(source) = prepared_snapshot {
-                            self.store.commit_admitted_collection_prepared_validated(
+                        let committed = match prepared_snapshot {
+                            Some(PreparedHistoricalSource::Full(source)) => self.store.commit_admitted_collection_prepared_validated(
                                 &collection, source, validate,
                                 |view, receipt, snapshot| build(view, receipt, Some(snapshot)),
-                            )?
-                        } else {
-                            self.store.commit_admitted_collection_validated(
+                            )?,
+                            Some(PreparedHistoricalSource::Current(source)) => self.store.commit_admitted_collection_current_prepared_validated(
+                                &collection, source, validate,
+                                |view, receipt, snapshot| build(view, receipt, Some(snapshot)),
+                            )?,
+                            None => self.store.commit_admitted_collection_validated(
                                 &collection, validate,
                                 |view, receipt| build(view, receipt, None),
-                            )?
+                            )?,
                         };
                         match committed {
                             ProviderIntakeCommit::Committed { mut value, .. } => {
@@ -4478,47 +4486,57 @@ impl CollectionEngine {
             .as_str()
             .to_owned();
         ensure_replay_cursor(&self.store, &mut self.replay)?;
-        let (source, history) = PreparedHistoricalReports::prepare(&mut self.store, watcher, profile)?;
+        let (source, history) =
+            PreparedHistoricalReports::prepare_ordinary(&mut self.store, watcher, profile)?;
         let generation = history.generation;
         let replay = &mut self.replay;
         // Pure historical selection/reconstruction is outside writer admission.
         // Recheck its exact source and retention boundary under the original
         // IMMEDIATE transaction; detectors/findings and the atomic commit stay
         // inside that transaction.
-        self.store
-            .commit_evaluations_prepared_validated(
-                source,
-                |store, bounds| {
-                    PreparedHistoricalReports::require_generation(store, generation)?;
-                    let replay_timing = nq_store::operation_timing::PhaseTiming::start("core.evaluation_replay");
-                    advance_engine_cursor(store, replay, bounds)?;
-                    drop(replay_timing);
-                    Ok::<_, EngineError>(())
-                },
-                |_, view, _, snapshot| {
-                    let findings_timing = nq_store::operation_timing::PhaseTiming::start("core.evaluation_findings");
-                    let current_findings = view.finding_snapshots()?;
-                    drop(findings_timing);
-                    let prepare_timing =
-                        nq_store::operation_timing::PhaseTiming::start("core.evaluation_prepare");
-                    let prepared = prepare_instance_evaluations_with_history(
-                        watcher,
-                        profile,
-                        trigger_run_id,
-                        &snapshot,
-                        &current_findings,
-                        &evaluator_artifact_digest,
-                        EvaluationReportSelection::AllMatching,
-                        Some((history, None)),
-                        false,
-                    )?;
-                    drop(prepare_timing);
-                    Ok(prepared
-                        .into_iter()
-                        .map(|prepared| (prepared.commit, prepared.envelope))
-                        .unzip())
-                },
-            )
+        let validate = |store: &Store, bounds: &nq_store::HistoryFrontier| {
+            PreparedHistoricalReports::require_generation(store, generation)?;
+            let replay_timing =
+                nq_store::operation_timing::PhaseTiming::start("core.evaluation_replay");
+            advance_engine_cursor(store, replay, bounds)?;
+            drop(replay_timing);
+            Ok::<_, EngineError>(())
+        };
+        let build = |_: &Store,
+                     view: &nq_store::AdmittedCollectionView<'_, '_>,
+                     _: &nq_store::HistoryFrontier,
+                     snapshot: EvidenceSnapshot| {
+            let findings_timing =
+                nq_store::operation_timing::PhaseTiming::start("core.evaluation_findings");
+            let current_findings = view.finding_snapshots()?;
+            drop(findings_timing);
+            let prepare_timing =
+                nq_store::operation_timing::PhaseTiming::start("core.evaluation_prepare");
+            let prepared = prepare_instance_evaluations_with_history(
+                watcher,
+                profile,
+                trigger_run_id,
+                &snapshot,
+                &current_findings,
+                &evaluator_artifact_digest,
+                EvaluationReportSelection::AllMatching,
+                Some((history, None)),
+                false,
+            )?;
+            drop(prepare_timing);
+            Ok(prepared
+                .into_iter()
+                .map(|prepared| (prepared.commit, prepared.envelope))
+                .unzip())
+        };
+        match source {
+            PreparedHistoricalSource::Full(source) => self
+                .store
+                .commit_evaluations_prepared_validated(source, validate, build),
+            PreparedHistoricalSource::Current(source) => self
+                .store
+                .commit_evaluations_current_prepared_validated(source, validate, build),
+        }
     }
 }
 
@@ -6057,6 +6075,55 @@ struct PreparedEvaluation {
     detector_reports: Vec<DetectorReport>,
 }
 
+/// Distinct Store proof contracts; current support never masquerades as a
+/// complete historical source proof.
+enum PreparedHistoricalSource {
+    Full(nq_store::PreparedEvidenceSnapshot),
+    Current(nq_store::PreparedCurrentEvidenceSnapshot),
+}
+
+fn current_question_lineage(
+    watcher: &WatcherConfig,
+    profile: &'static dyn ProfileModule,
+) -> Result<nq_store::EvaluationFindingLineage, EngineError> {
+    let [detector] = profile.detectors() else {
+        return Err(EngineError::Invariant(
+            "current evidence requires one audited detector".into(),
+        ));
+    };
+    let descriptor = detector.descriptor();
+    let profile_digest = profile
+        .descriptor()
+        .digest()
+        .map_err(|error| EngineError::Canonical(error.to_string()))?;
+    Ok(nq_store::EvaluationFindingLineage {
+        instance_id: watcher.instance_id.clone(),
+        detector_id: descriptor.id.clone(),
+        detector_version: descriptor.version.to_string(),
+        detector_digest: descriptor
+            .digest()
+            .map_err(EngineError::Canonical)?
+            .as_str()
+            .to_owned(),
+        profile_id: watcher.profile.id.clone(),
+        profile_version: watcher.profile.version.to_string(),
+        profile_digest: profile_digest.as_str().to_owned(),
+        profile_semantic_id: profile_semantic_id(profile.descriptor())
+            .map_err(|error| EngineError::Canonical(error.to_string()))?
+            .as_str()
+            .to_owned(),
+        subject_json: canonical(&watcher.subject)?.as_bytes().to_vec(),
+        condition_name: descriptor.condition.clone(),
+        basis_json: canonical(&json!({
+            "profile_digest": profile_digest.as_str(),
+            "vantage": watcher.vantage,
+            "scope": watcher.scope,
+        }))?
+        .as_bytes()
+        .to_vec(),
+    })
+}
+
 /// One call's immutable historical context, not another persistent memo.
 /// Capture generation before reading: an expiry during preparation must refuse
 /// at admission rather than silently become this context's new boundary.
@@ -6125,8 +6192,62 @@ impl PreparedHistoricalReports {
         let snapshot_timing =
             nq_store::operation_timing::PhaseTiming::start("core.historical_snapshot");
         let source = store.prepare_evidence_snapshot(&watcher.instance_id)?;
-        let generation = source.retention_generation();
-        let snapshot = source.snapshot();
+        snapshot_timing.value("report_rows", source.snapshot().reports.len() as i64);
+        drop(snapshot_timing);
+        let history = Self::from_snapshot(
+            source.snapshot(),
+            source.retention_generation(),
+            watcher,
+            profile,
+            false,
+        )?
+        .ok_or_else(|| {
+            EngineError::Invariant("complete historical preparation declined its source".into())
+        })?;
+        Ok((source, history))
+    }
+
+    fn prepare_ordinary(
+        store: &mut Store,
+        watcher: &WatcherConfig,
+        profile: &'static dyn ProfileModule,
+    ) -> Result<(PreparedHistoricalSource, Self), EngineError> {
+        let _timing = nq_store::operation_timing::PhaseTiming::start("core.historical_preparation");
+        if HistoricalInputLaw::for_profile(profile)? == HistoricalInputLaw::NewestCurrent {
+            let lineage = current_question_lineage(watcher, profile)?;
+            let snapshot_timing =
+                nq_store::operation_timing::PhaseTiming::start("core.historical_snapshot");
+            let current = store.prepare_current_evidence_snapshot(&lineage)?;
+            snapshot_timing.value(
+                "report_rows",
+                current
+                    .as_ref()
+                    .map_or(0, |source| source.snapshot().reports.len()) as i64,
+            );
+            drop(snapshot_timing);
+            if let Some(source) = current
+                && let Some(history) = Self::from_snapshot(
+                    source.snapshot(),
+                    source.retention_generation(),
+                    watcher,
+                    profile,
+                    true,
+                )?
+            {
+                return Ok((PreparedHistoricalSource::Current(source), history));
+            }
+        }
+        let (source, history) = Self::prepare(store, watcher, profile)?;
+        Ok((PreparedHistoricalSource::Full(source), history))
+    }
+
+    fn from_snapshot(
+        snapshot: &EvidenceSnapshot,
+        generation: i64,
+        watcher: &WatcherConfig,
+        profile: &'static dyn ProfileModule,
+        current_only: bool,
+    ) -> Result<Option<Self>, EngineError> {
         #[cfg(test)]
         {
             PREPARED_SOURCE_ROWS_MATERIALIZED.with(|count| {
@@ -6135,13 +6256,14 @@ impl PreparedHistoricalReports {
             PREPARED_SOURCE_BYTES_MATERIALIZED.with(|count| {
                 count.set(
                     count.get()
-                        + snapshot.reports.iter()
-                            .map(|row| row.canonical_json.len()).sum::<usize>(),
+                        + snapshot
+                            .reports
+                            .iter()
+                            .map(|row| row.canonical_json.len())
+                            .sum::<usize>(),
                 );
             });
         }
-        snapshot_timing.value("report_rows", snapshot.reports.len() as i64);
-        drop(snapshot_timing);
         let digest = profile
             .descriptor()
             .digest()
@@ -6149,6 +6271,19 @@ impl PreparedHistoricalReports {
         let selection_timing =
             nq_store::operation_timing::PhaseTiming::start("core.historical_selection");
         let selected = select_historical_reports(&snapshot.reports, watcher, digest.as_str())?;
+        if current_only && selected.len() != snapshot.reports.len() {
+            // A different canonical context selects the legacy complete proof,
+            // before any profile reconstruction or question-specific pruning.
+            return Ok(None);
+        }
+        if current_only && let Ok(mut memo) = admitted_report_memo().lock() {
+            let keep = snapshot
+                .reports
+                .iter()
+                .map(|row| row.report_id.as_str())
+                .collect();
+            memo.retain_question_sources(digest.as_str(), &watcher.instance_id, &keep);
+        }
         let matching_indices = selected.iter().map(|(index, _)| *index).collect::<Vec<_>>();
         selection_timing.value("selected_rows", matching_indices.len() as i64);
         drop(selection_timing);
@@ -6164,24 +6299,29 @@ impl PreparedHistoricalReports {
         let input_law = HistoricalInputLaw::for_profile(profile)?;
         let mut reports = Vec::new();
         let mut newest: Option<Arc<DetectorReport>> = None;
-        // Preserve every old profile validation and its refusal order. Only
-        // the retained parsed detector input changes for audited current laws.
+        // Validate every selected cold row in order. A complete proof selects
+        // all matching history; a current proof selects its head/citation support.
         for (_, selected) in selected {
             let report = selected.reconstruct_shared(profile)?;
             match input_law {
                 HistoricalInputLaw::AllMatching => reports.push(clone_detector_report(&report)),
-                HistoricalInputLaw::NewestCurrent if newest_current_candidate(
-                    &report, newest.as_deref(), &watcher.instance_id) => {
+                HistoricalInputLaw::NewestCurrent
+                    if newest_current_candidate(
+                        &report,
+                        newest.as_deref(),
+                        &watcher.instance_id,
+                    ) =>
+                {
                     newest = Some(report);
                 }
-                HistoricalInputLaw::NewestCurrent => {},
+                HistoricalInputLaw::NewestCurrent => {}
             }
         }
         if let Some(report) = newest {
             reports.push(clone_detector_report(&report));
         }
         drop(reconstruction_timing);
-        Ok((source, Self {
+        Ok(Some(Self {
             generation,
             matching_indices,
             reports,
@@ -6198,8 +6338,9 @@ impl PreparedHistoricalReports {
         Ok(())
     }
 
-    /// Store has consumed and resolved the complete immutable source under the
-    /// original writer guard. The newly inserted current occurrence is the
+    /// Store has resolved the immutable source within the selected proof's
+    /// scope under the original writer guard: complete source for Full,
+    /// head/citation closure for Current. The newly inserted occurrence is the
     /// sole extra row; its identity, context and reconstruction stay checked here.
     fn reconcile<'snapshot>(
         self,
@@ -6231,9 +6372,9 @@ impl PreparedHistoricalReports {
             input_law,
             ..
         } = self;
-        // The consumed Store proof has already reconciled the complete source,
-        // including row order, under its writer guard. Keep only positions
-        // during preparation and borrow the resolved rows for this evaluation.
+        // The consumed Store proof has reconciled its selected source and row
+        // order under the writer guard. Keep only positions during preparation
+        // and borrow those resolved rows for this evaluation.
         let mut matching_rows = matching_indices
             .into_iter()
             .map(|index| {
@@ -6253,10 +6394,10 @@ impl PreparedHistoricalReports {
     }
 }
 
-/// The normal evaluator retains its complete matching source context for
-/// provenance; audited current-only prepared inputs may project the detector
-/// slice without discarding that context. A named local successor has a
-/// separately retained selection law: its newly admitted
+/// Matching source context follows the selected proof: complete source for
+/// Full fallback, head/citation closure for Current. Audited current-only inputs
+/// may project the detector slice while retaining that context. A named local
+/// successor has a separately retained selection law: its newly admitted
 /// occurrence is the only detector input while earlier matching reports remain
 /// durable history, deliberately excluded from that detector invocation.
 #[derive(Clone, Copy)]
@@ -8769,6 +8910,8 @@ thread_local! {
     /// Canonical source rows and bytes materialized by historical preparation.
     static PREPARED_SOURCE_ROWS_MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PREPARED_SOURCE_BYTES_MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Question-local keys inspected during current memo pruning.
+    static MEMO_PRUNE_VISITED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// One test pauses the real reconstruction consumer to try another writer.
     static HISTORICAL_RECONSTRUCTION_FOR_TEST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     /// Reports kept after evaluation solely for diagnostic emission.
@@ -8857,6 +9000,9 @@ struct AdmittedMemoEntry {
 #[derive(Default)]
 struct AdmittedReportMemo {
     entries: std::collections::HashMap<(String, String), AdmittedMemoEntry>,
+    // Only this question's keys are visited when ordinary current support is
+    // pruned. Full/audit establishment may populate a larger question once.
+    by_question: std::collections::HashMap<(String, String), std::collections::BTreeSet<String>>,
     bytes: usize,
 }
 
@@ -8869,6 +9015,47 @@ fn admitted_report_memo() -> &'static std::sync::Mutex<AdmittedReportMemo> {
 }
 
 impl AdmittedReportMemo {
+    fn remove(&mut self, key: &(String, String)) -> Option<AdmittedMemoEntry> {
+        let old = self.entries.remove(key)?;
+        self.bytes = self.bytes.saturating_sub(old.weight);
+        let question = (key.0.clone(), old.row.instance_id.clone());
+        if let Some(ids) = self.by_question.get_mut(&question) {
+            ids.remove(&key.1);
+            if ids.is_empty() {
+                self.by_question.remove(&question);
+            }
+        }
+        Some(old)
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.by_question.clear();
+        self.bytes = 0;
+    }
+
+    fn retain_question_sources(
+        &mut self,
+        digest: &str,
+        instance: &str,
+        keep: &std::collections::BTreeSet<&str>,
+    ) {
+        let question = (digest.to_owned(), instance.to_owned());
+        let Some(ids) = self.by_question.get(&question) else {
+            return;
+        };
+        #[cfg(test)]
+        MEMO_PRUNE_VISITED.with(|count| count.set(count.get() + ids.len()));
+        let obsolete = ids
+            .iter()
+            .filter(|id| !keep.contains(id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in obsolete {
+            self.remove(&(digest.to_owned(), id));
+        }
+    }
+
     fn exact(&self, row: &nq_store::AdmittedReportRow, digest: &str) -> Option<&AdmittedMemoEntry> {
         self.entries
             .get(&(digest.to_owned(), row.report_id.clone()))
@@ -8919,7 +9106,13 @@ impl AdmittedReportMemo {
         );
         // Optional context is inline in every HashMap entry, including None.
         // Also count any tag storage added by making the old report optional.
+        let question_index = row.instance_id.len()
+            .saturating_add(row.profile_digest.len())
+            .saturating_add(row.report_id.len())
+            .saturating_mul(2)
+            .saturating_add(256);
         let with_added_slots = original
+            .saturating_add(question_index)
             .saturating_add(std::mem::size_of::<Option<ImmutableReportContext>>())
             // Keep the original inline/report allowances conservatively and
             // charge the shared allocation's strong/weak counter words too.
@@ -9015,23 +9208,21 @@ impl AdmittedReportMemo {
             context
                 .as_ref()
                 .or_else(|| prior.and_then(|entry| entry.context.as_ref())),
-        );
+        ).saturating_add(digest.len().saturating_sub(row.profile_digest.len()).saturating_mul(2));
         if size > max_bytes {
             return;
         }
-        let old = self.entries.remove(&key);
-        if let Some(old) = old.as_ref() {
-            self.bytes = self.bytes.saturating_sub(old.weight);
-        }
+        let old = self.remove(&key);
         let prior = old.filter(|_| same_row);
         let (old_context, old_report) =
             prior.map_or((None, None), |entry| (entry.context, entry.report));
         if self.bytes.saturating_add(size) > max_bytes {
             #[cfg(test)]
             RECONSTRUCTION_MEMO_CLEARS.with(|count| count.set(count.get() + 1));
-            self.entries.clear();
-            self.bytes = 0;
+            self.clear();
         }
+        self.by_question.entry((digest.to_owned(), row.instance_id.clone()))
+            .or_default().insert(row.report_id.clone());
         self.entries.insert(
             key,
             AdmittedMemoEntry {

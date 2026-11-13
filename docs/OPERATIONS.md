@@ -1182,14 +1182,15 @@ is bounded by the new rows, the referenced closure, and the schema:
   acquisition, and on the reference machine 16 ms to 27 ms for such a `qualify`
   between 500 and 5,000 retained acquisitions (roughly 0.25 s at 100,000).
   Indexing these columns needs a schema change.
-- Each evaluation still reads every retained admitted report of its instance
-  and compares its immutable binding against the current configured context.
+- Full-input evaluation paths read every retained admitted report of their instance
+  and compare each immutable binding against the current configured context.
   This is evaluation input, not open validation. Earlier cold-pass measurements
   on the reference machine found one `acquire-next-local` took
   about 0.2 s, 0.6 s, and 2.1 to 2.6 s with 500, 2,000, and 5,000 retained
   acquisitions, about 0.45 ms per retained report. At that slope an
   acquisition reaches a 60-second bound at roughly 100,000 retained
-  acquisitions, about 70 to 80 days at one acquisition per minute.
+  acquisitions, about 70 to 80 days at one acquisition per minute. These
+  measurements predate the scoped current-question path described below.
   Within one process, successful immutable canonical/protocol context validation
   and profile reconstruction share the existing bounded memo. Repeated selection
   reuses validated binding fields, then compares every current watcher field;
@@ -1214,30 +1215,39 @@ is bounded by the new rows, the referenced closure, and the schema:
   not the complete source read or per-row selection.
 
   For the specifically audited compiled I/O-pressure v1, memory-pressure v1
-  and systemd-unit v3 semantic identities, ordinary preparation shares cached
-  parsed reports through immutable `Arc` handles. It still reconstructs and
-  profile-validates every matching cold row in the original order, but deep
-  copies only the newest same-instance report into its historical detector
-  input. A newly admitted occurrence participates in that same durable-sequence
-  selection, including a failed or stale newest report. All matching source
-  rows, watermarks and older finding citations remain available. Exact compiled
-  semantic and detector identities gate this allocation optimization; a changed
-  or unrecognized identity falls back to the complete detector input until
-  independently re-audited. Named diagnostic selection and full-snapshot
-  freshness/successor guards are unchanged.
+  and systemd-unit v3 semantic identities, ordinary non-diagnostic preparation
+  uses a separate current-question proof. It reads the absolute instance head
+  and the exact current finding lineage's cited reports. Full selected reports
+  receive canonical, protocol, current-context and cold profile validation;
+  compact citations retain their historical identity without becoming detector
+  testimony. The newest same-instance report alone enters the detector input,
+  including a failed or stale newest occurrence. The newly admitted report
+  participates in that same durable-sequence selection.
+
+  The scoped proof does not establish the integrity of unreferenced older raw
+  bytes. The complete-source API and full audit retain that contract. A compact
+  absolute head, mismatching current context, or unknown compiled semantic or
+  detector identity selects the full path. Diagnostics and named successor
+  paths keep their existing full proof and snapshot restrictions.
 
   This bounds historical detector-input copying for those three compiled laws,
-  not total collection cost. Raw snapshot reads, memo-binding hashes, selector
-  traversal and cold profile validation still follow retained history.
+  not total collection cost. The selected head/citation closure can itself grow;
+  replay after cursor loss, full fallback and current-finding projection still
+  have broader costs. No whole-operation constant-cost claim follows.
   Shared parsed payloads can outlive memo eviction until the current operation
   releases its handles. The memo's estimate charges the Arc counter allocation
   conservatively while retaining the existing report allowances; it remains
   an estimated entry-retention budget, not a process RSS or operation peak bound.
-  Current-answer cost is still proportional to retained history.
+  A per-profile/per-instance memo membership index prunes entries outside the
+  currently selected full sources. It visits only that question's keys; a
+  previously established full cache may require one larger prune. Compact
+  citations need no parsed payload entry. Index strings and control storage
+  are charged conservatively within the existing estimate, including cleanup
+  on replacement, eviction and clear.
   The memo is in memory only,
   is not persisted, and starts empty at every process start. A one-shot
-  command (`collect`, `acquire-next-local`) therefore pays the full
-  per-report cost above on its first pass. The long-lived daemon's
+  command starts with cold validation of its selected source closure. Full
+  fallback retains the per-report cost above. The long-lived daemon's
   collection engine benefits on later collections and sweeps. The memo is
   limited to an estimated 512 MiB of row weight. The estimate is not an exact
   allocation or RSS bound: it counts the row's variable fields and a fixed
@@ -1248,7 +1258,7 @@ is bounded by the new rows, the referenced closure, and the schema:
   reconstruction allowances and all other headroom remain. The commitment,
   length and saved accounting word are added to the estimate. This does not
   make the estimate an exact heap bound or establish that a deployed working
-  set fits. Raw-byte hashing still traverses retained input on warm hits.
+  set fits. Raw-byte hashing still traverses each selected source on warm hits.
   Full-input fallback also clones every selected detector report; the three
   audited current-only laws share old parsed payloads and copy only their
   selected historical detector input.
@@ -1269,18 +1279,22 @@ is bounded by the new rows, the referenced closure, and the schema:
   `profile_semantic_id`) refuses the old store and cannot archive it, and a
   refused writable open still checkpoints the WAL. The sealed archive is the
   provenance link between the retired generation and the new store.
-- Ordinary collection and freshness sweeps prepare historical context selection
+- Ordinary collection and freshness sweeps prepare context selection
   and report reconstruction before taking the common writer guard. The guarded
   transaction rechecks the captured retention generation. A consumed Store-owned
-  snapshot binds the complete prepared source to its originating handle and
+  proof binds its prepared source to its originating handle and
   pre-read SQLite data version, total-change counter and schema cookie. If those
   stamps still match after guarded validation, the existing source vector moves
-  into the transaction's resolved snapshot. A changed stamp or different handle
-  instead reads the complete current source and compares exact membership and
-  bytes. An unrelated commit or rollback can therefore fall back and succeed.
+  into the transaction's resolved snapshot. For a complete-source proof, a
+  changed stamp or different handle rereads the complete current source and
+  compares exact ordered membership and bytes. For a current-question proof,
+  it reselects the absolute head and the exact lineage's current citations,
+  comparing full bytes and compact metadata literally. A finding citation
+  replacement is observed even when no report was appended. An unrelated commit
+  or rollback can therefore reconcile and succeed.
   The newly inserted report is read by its exact instance, report identity and
-  receipt sequence; watermarks, compact citations and findings are read in the
-  current transaction. A changed same-instance report set refuses,
+  receipt sequence; its watermark and finding construction remain in the
+  current transaction. A changed same-instance absolute head refuses,
   including an appended report outside the matching profile/context; an append
   for another instance alone does not. This is conservative optimistic admission,
   not a fairness or latency guarantee. The five-second guard refusal and the
@@ -1291,9 +1305,9 @@ is bounded by the new rows, the referenced closure, and the schema:
   only against the Store proof's ordered source; finding and citation consumers
   then borrow those resolved rows. Cold local-successor context checks also
   borrow selected rows. This does not skip raw-byte hashing, canonical/protocol
-  validation or complete source reconciliation. The unchanged path avoids a second retained-source
-  materialization; the fallback still reads the full current source. Preparation
-  and detector inputs still grow with retained instance history. Prepared
+  validation or reconciliation within the selected proof's scope. A complete
+  proof still checks all retained source; ordinary current support checks its
+  selected head and citation closure. Prepared
   evaluations retain an additional
   report copy only for diagnostic artifact emission; ordinary collection and
   freshness sweeps do not keep that unused diagnostic copy. This reduces
@@ -1312,8 +1326,8 @@ is bounded by the new rows, the referenced closure, and the schema:
   exact finding lineage's current citation closure. A compact absolute head
   returns `None` for complete-source fallback. The caller still owns eligibility
   of the exact compiled detector law, canonical context/profile validation and
-  fallback; the presence of this Store API does not switch ordinary collection
-  or diagnostic selection to it.
+  fallback. Core selects it only for the audited ordinary laws described above;
+  diagnostic and complete-source fallback paths keep the full proof.
   Its two `*_current_prepared_validated` commit methods consume this distinct
   proof under the existing writer guard. Retention-generation changes refuse.
   Changed handle/stamp paths reselect both the absolute head and current
