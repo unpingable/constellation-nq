@@ -6085,8 +6085,8 @@ impl PreparedHistoricalReports {
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
         let selection_timing =
             nq_store::operation_timing::PhaseTiming::start("core.historical_selection");
-        let matching_indices =
-            evaluation_context_indices(&snapshot.reports, watcher, digest.as_str())?;
+        let selected = select_historical_reports(&snapshot.reports, watcher, digest.as_str())?;
+        let matching_indices = selected.iter().map(|(index, _)| *index).collect::<Vec<_>>();
         selection_timing.value("selected_rows", matching_indices.len() as i64);
         drop(selection_timing);
         #[cfg(test)]
@@ -6098,11 +6098,9 @@ impl PreparedHistoricalReports {
         });
         let reconstruction_timing =
             nq_store::operation_timing::PhaseTiming::start("core.historical_reconstruction");
-        let reports = matching_indices
-            .iter()
-            .map(|&index| {
-                reconstruct_admitted_cached(&snapshot.reports[index], profile, digest.as_str())
-            })
+        let reports = selected
+            .into_iter()
+            .map(|(_, selected)| selected.reconstruct(profile))
             .collect::<Result<Vec<_>, _>>()?;
         drop(reconstruction_timing);
         Ok((source, Self {
@@ -6534,24 +6532,7 @@ fn report_matches_evaluation_context(
         None => {
             #[cfg(test)]
             CONTEXT_SELECTOR_VALIDATIONS.with(|count| count.set(count.get() + 1));
-            let document = CanonicalDocument::from_canonical_bytes(row.canonical_json.clone())?;
-            if document.digest() != row.semantic_digest {
-                return Err(EngineError::Invariant(format!(
-                    "admitted report {} semantic digest was substituted",
-                    row.report_id
-                )));
-            }
-            let report: nq_protocol::EvidenceReport = serde_json::from_slice(document.as_bytes())
-                .map_err(|error| {
-                EngineError::Invariant(format!("stored report cannot decode: {error}"))
-            })?;
-            nq_protocol::validate_report(&report).map_err(|error| {
-                EngineError::Invariant(format!("stored report is invalid: {error}"))
-            })?;
-            let context = ImmutableReportContext {
-                profile: report.profile,
-                binding: report.binding,
-            };
+            let context = validate_immutable_report_context(row)?;
             if let Ok(mut memo) = admitted_report_memo().lock() {
                 memo.remember(
                     row,
@@ -6566,14 +6547,120 @@ fn report_matches_evaluation_context(
     };
     // The memo contains immutable testimony only. Current configuration is
     // compared afresh; neither a prior true nor false is a reusable decision.
-    Ok(context.profile.id.as_str() == watcher.profile.id
+    Ok(context_matches_watcher(&context, watcher, profile_digest))
+}
+
+fn validate_immutable_report_context(
+    row: &nq_store::AdmittedReportRow,
+) -> Result<ImmutableReportContext, EngineError> {
+    let document = CanonicalDocument::from_canonical_bytes(row.canonical_json.clone())?;
+    if document.digest() != row.semantic_digest {
+        return Err(EngineError::Invariant(format!(
+            "admitted report {} semantic digest was substituted", row.report_id
+        )));
+    }
+    let report: nq_protocol::EvidenceReport = serde_json::from_slice(document.as_bytes())
+        .map_err(|error| EngineError::Invariant(format!("stored report cannot decode: {error}")))?;
+    nq_protocol::validate_report(&report).map_err(|error| {
+        EngineError::Invariant(format!("stored report is invalid: {error}"))
+    })?;
+    Ok(ImmutableReportContext { profile: report.profile, binding: report.binding })
+}
+
+fn context_matches_watcher(
+    context: &ImmutableReportContext,
+    watcher: &WatcherConfig,
+    profile_digest: &str,
+) -> bool {
+    context.profile.id.as_str() == watcher.profile.id
         && context.profile.version.to_string() == watcher.profile.version.to_string()
         && context.profile.digest.as_str() == profile_digest
         && context.binding.subject.as_str() == watcher.subject
         && context.binding.scope.kind.as_str() == watcher.scope.kind
         && context.binding.scope.value == watcher.scope.value
         && context.binding.vantage.kind.as_str() == watcher.vantage.kind
-        && context.binding.vantage.value == watcher.vantage.value)
+        && context.binding.vantage.value == watcher.vantage.value
+}
+
+/// One selection's testimony, bound to the borrowed immutable source row.
+/// Keep all selectors before reconstruction and never hold the memo mutex
+/// across protocol/profile validation. An eviction cannot change this result.
+struct SelectedHistoricalReport<'row> {
+    row: &'row nq_store::AdmittedReportRow,
+    profile_digest: &'row str,
+    body_commitment: [u8; 32],
+    cached_report: Option<DetectorReport>,
+}
+
+impl<'row> SelectedHistoricalReport<'row> {
+    fn select(
+        row: &'row nq_store::AdmittedReportRow,
+        watcher: &WatcherConfig,
+        digest: &'row str,
+    ) -> Result<Option<Self>, EngineError> {
+        #[cfg(test)]
+        CONTEXT_SELECTOR_CALLS.with(|count| count.set(count.get() + 1));
+        if !report_matches_profile_contract(row, &watcher.profile.id,
+            &watcher.profile.version.to_string(), digest) {
+            return Ok(None);
+        }
+        let body_commitment = AdmittedMemoRow::body_commitment(&row.canonical_json);
+        let (context, cached_report) = admitted_report_memo().lock().ok().and_then(|memo| {
+            memo.exact_with_commitment(row, digest, &body_commitment).map(|entry| {
+                // Avoid cloning a reconstructed payload for a known nonmatch.
+                let matching = entry.context.as_ref()
+                    .is_none_or(|context| context_matches_watcher(context, watcher, digest));
+                (entry.context.clone(), if matching { entry.report.clone() } else { None })
+            })
+        }).unwrap_or((None, None));
+        let context = match context {
+            Some(context) => context,
+            None => {
+                #[cfg(test)]
+                CONTEXT_SELECTOR_VALIDATIONS.with(|count| count.set(count.get() + 1));
+                let context = validate_immutable_report_context(row)?;
+                if let Ok(mut memo) = admitted_report_memo().lock() {
+                    memo.remember_with_commitment(row, digest, Some(context.clone()), None,
+                        ADMITTED_MEMO_MAX_BYTES, body_commitment);
+                }
+                context
+            }
+        };
+        Ok(context_matches_watcher(&context, watcher, digest).then_some(Self {
+            row, profile_digest: digest, body_commitment, cached_report,
+        }))
+    }
+
+    fn reconstruct(
+        self,
+        profile: &'static dyn ProfileModule,
+    ) -> Result<DetectorReport, EngineError> {
+        if let Some(report) = self.cached_report {
+            #[cfg(test)]
+            RECONSTRUCTION_MEMO_HITS.with(|count| count.set(count.get() + 1));
+            return Ok(report);
+        }
+        let report = reconstruct_admitted(self.row, profile)?;
+        if let Ok(mut memo) = admitted_report_memo().lock() {
+            memo.remember_with_commitment(self.row, self.profile_digest, None, Some(report.clone()),
+                ADMITTED_MEMO_MAX_BYTES, self.body_commitment);
+        }
+        Ok(report)
+    }
+}
+
+fn select_historical_reports<'row>(
+    rows: &'row [nq_store::AdmittedReportRow],
+    watcher: &WatcherConfig,
+    digest: &'row str,
+) -> Result<Vec<(usize, SelectedHistoricalReport<'row>)>, EngineError> {
+    rows.iter().enumerate().filter_map(|(index, row)| {
+        match SelectedHistoricalReport::select(row, watcher, digest) {
+            Ok(Some(selected)) => Some(Ok((index, selected))),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        }
+    }).collect()
 }
 
 fn evaluation_context_rows<'rows>(
@@ -8627,7 +8714,7 @@ impl AdmittedMemoRow {
         sha2::Sha256::digest(bytes).into()
     }
 
-    fn from_row(row: &nq_store::AdmittedReportRow) -> Self {
+    fn from_row_with_commitment(row: &nq_store::AdmittedReportRow, body_commitment: [u8; 32]) -> Self {
         Self {
             report_sequence: row.report_sequence,
             report_id: row.report_id.clone(),
@@ -8640,11 +8727,16 @@ impl AdmittedMemoRow {
             report_status: row.report_status.clone(),
             semantic_digest: row.semantic_digest.clone(),
             canonical_len: row.canonical_json.len(),
-            canonical_sha256: Self::body_commitment(&row.canonical_json),
+            canonical_sha256: body_commitment,
         }
     }
 
     fn matches(&self, row: &nq_store::AdmittedReportRow) -> bool {
+        self.matches_metadata(row)
+            && self.canonical_sha256 == Self::body_commitment(&row.canonical_json)
+    }
+
+    fn matches_metadata(&self, row: &nq_store::AdmittedReportRow) -> bool {
         self.report_sequence == row.report_sequence
             && self.report_id == row.report_id
             && self.instance_id == row.instance_id
@@ -8656,7 +8748,6 @@ impl AdmittedMemoRow {
             && self.report_status == row.report_status
             && self.semantic_digest == row.semantic_digest
             && self.canonical_len == row.canonical_json.len()
-            && self.canonical_sha256 == Self::body_commitment(&row.canonical_json)
     }
 }
 
@@ -8686,6 +8777,19 @@ impl AdmittedReportMemo {
         self.entries
             .get(&(digest.to_owned(), row.report_id.clone()))
             .filter(|entry| entry.row.matches(row))
+    }
+
+    /// The commitment was computed from this operation's borrowed immutable
+    /// raw row. Metadata remains literal, including the stored semantic digest.
+    fn exact_with_commitment(
+        &self,
+        row: &nq_store::AdmittedReportRow,
+        digest: &str,
+        body_commitment: &[u8; 32],
+    ) -> Option<&AdmittedMemoEntry> {
+        self.entries.get(&(digest.to_owned(), row.report_id.clone()))
+            .filter(|entry| entry.row.matches_metadata(row)
+                && &entry.row.canonical_sha256 == body_commitment)
     }
 
     /// Remove only the original retained body copy's allowance; keep the two
@@ -8778,8 +8882,21 @@ impl AdmittedReportMemo {
         report: Option<DetectorReport>,
         max_bytes: usize,
     ) {
+        self.remember_with_commitment(row, digest, context, report, max_bytes,
+            AdmittedMemoRow::body_commitment(&row.canonical_json));
+    }
+
+    fn remember_with_commitment(
+        &mut self,
+        row: &nq_store::AdmittedReportRow,
+        digest: &str,
+        context: Option<ImmutableReportContext>,
+        report: Option<DetectorReport>,
+        max_bytes: usize,
+        body_commitment: [u8; 32],
+    ) {
         let key = (digest.to_owned(), row.report_id.clone());
-        let prior = self.exact(row, digest);
+        let prior = self.exact_with_commitment(row, digest, &body_commitment);
         let same_row = prior.is_some();
         let size = Self::weight(
             row,
@@ -8806,7 +8923,7 @@ impl AdmittedReportMemo {
         self.entries.insert(
             key,
             AdmittedMemoEntry {
-                row: AdmittedMemoRow::from_row(row),
+                row: AdmittedMemoRow::from_row_with_commitment(row, body_commitment),
                 context: context.or(old_context),
                 report: report.or(old_report),
                 weight: size,
@@ -20058,6 +20175,10 @@ sys.stdout.write("\n")
                 report_matches_evaluation_context(&row, watcher, &fixture.profile_digest).unwrap(),
                 "an unrelated context must not cache false for the original watcher"
             );
+            assert!(SelectedHistoricalReport::select(&row, &current, &fixture.profile_digest)
+                .unwrap().is_none(), "prepared selection must recompare current context");
+            assert!(SelectedHistoricalReport::select(&row, watcher, &fixture.profile_digest)
+                .unwrap().is_some());
         }
     }
 
@@ -20086,6 +20207,9 @@ sys.stdout.write("\n")
             change(&mut changed);
             assert!(memo.exact(&changed, &fixture.profile_digest).is_none(),
                 "changed nonbody field {field} reused cached testimony");
+            let body = AdmittedMemoRow::body_commitment(&changed.canonical_json);
+            assert!(memo.exact_with_commitment(&changed, &fixture.profile_digest, &body).is_none(),
+                "prepared selection reused changed metadata field {field}");
         }
         assert!(memo.exact(&row, "different compiled descriptor").is_none());
     }
@@ -20132,6 +20256,15 @@ sys.stdout.write("\n")
                 assert!(first.contains("not canonical"), "original canonical refusal: {first}");
             }
             assert_eq!(CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get) - before, 2);
+            let before = CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get);
+            for _ in 0..2 {
+                let actual = SelectedHistoricalReport::select(
+                    &changed, fixture.watcher(), &fixture.profile_digest,
+                ).err().expect("prepared selection refuses changed raw bytes").to_string();
+                assert_eq!(actual, first);
+            }
+            assert_eq!(CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get) - before, 2,
+                "prepared selection must not cache a refusal");
         }
     }
 
@@ -20285,6 +20418,42 @@ sys.stdout.write("\n")
             0,
             "even the valid first report must wait for all selector checks"
         );
+    }
+
+    #[test]
+    fn prepared_selection_validates_all_selectors_before_any_reconstruction() {
+        let fixture = SemanticLineageFixture::new();
+        let first = reconstruction_fixture_row(&fixture,
+            &format!("report:prepared-selector-order-{}", Uuid::new_v4()));
+        let mut second = first.clone();
+        second.report_id.push_str("-invalid");
+        second.report_sequence += 1;
+        second.canonical_json = b"{ }".to_vec();
+        let before = RECONSTRUCTIONS.with(std::cell::Cell::get);
+        let error = select_historical_reports(&[first, second], fixture.watcher(),
+            &fixture.profile_digest).err().expect("later invalid selector refuses");
+        assert!(error.to_string().contains("not canonical"));
+        assert_eq!(RECONSTRUCTIONS.with(std::cell::Cell::get) - before, 0);
+    }
+
+    #[test]
+    fn prepared_selection_keeps_exact_testimony_after_memo_replacement() {
+        let fixture = SemanticLineageFixture::new();
+        let row = reconstruction_fixture_row(&fixture,
+            &format!("report:prepared-memo-replacement-{}", Uuid::new_v4()));
+        let expected = reconstruct_admitted_cached(&row, fixture.profile,
+            &fixture.profile_digest).unwrap();
+        let selected = SelectedHistoricalReport::select(&row, fixture.watcher(),
+            &fixture.profile_digest).unwrap().unwrap();
+        let mut replacement = row.clone();
+        replacement.report_sequence += 1;
+        let replacement_report = reconstruct_admitted(&replacement, fixture.profile).unwrap();
+        admitted_report_memo().lock().unwrap().remember(&replacement,
+            &fixture.profile_digest, None, Some(replacement_report), ADMITTED_MEMO_MAX_BYTES);
+        let before = RECONSTRUCTIONS.with(std::cell::Cell::get);
+        let actual = selected.reconstruct(fixture.profile).unwrap();
+        assert_eq!(actual, expected, "the token belongs to its borrowed source, not the latest memo slot");
+        assert_eq!(RECONSTRUCTIONS.with(std::cell::Cell::get) - before, 0);
     }
 
     #[test]

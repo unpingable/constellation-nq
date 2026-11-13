@@ -1203,7 +1203,17 @@ is bounded by the new rows, the referenced closure, and the schema:
   literal body equality. A mismatch runs the original validation and preserves
   its refusal. Store prepared-source reconciliation and its fallback still use
   literal byte equality; this cache supplies no current authority. Refusals are
-  never reused. The memo is in memory only,
+  never reused. Ordinary historical preparation computes one fresh raw-body
+  memo commitment for each profile-eligible row. Its private operation-local
+  selection retains the exact immutable cached reconstruction, when present,
+  until all context selectors have succeeded. Reconstruction then consumes
+  that result without hashing the same body again. Misses retain the original
+  canonical, protocol and profile validation; these validations can themselves
+  compute digests. Cache replacement or eviction between the two phases cannot
+  substitute another row's testimony. This removes redundant memo hashing,
+  not the complete source read, per-row selection or reconstructed-report
+  cloning. Current-answer cost is still proportional to retained history.
+  The memo is in memory only,
   is not persisted, and starts empty at every process start. A one-shot
   command (`collect`, `acquire-next-local`) therefore pays the full
   per-report cost above on its first pass. The long-lived daemon's
