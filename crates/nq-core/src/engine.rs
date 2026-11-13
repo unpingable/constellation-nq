@@ -15836,6 +15836,91 @@ sys.stdout.write("\n")
     }
 
     #[test]
+    fn full_semantic_validation_does_not_repeat_run_history_work() {
+        const RUNS: usize = 64;
+        // The unrelated semantic planes are empty in both stores. Allow a
+        // small fixed difference for their boundary probes, not another
+        // history-sized traversal on top of the complete status/run audit.
+        const FIXED_OVERHEAD_SLACK: u64 = 512;
+        let mut measured = Vec::new();
+        for runs in [0, RUNS] {
+            let directory = tempfile::tempdir().expect("full-validation cost fixture");
+            let path = directory.path().join("full-validation-cost.db");
+            let mut store = Store::initialize_with_capacity(
+                &path, 604_800, Some(64 * 1024 * 1024), Some(0), Some(0),
+            ).expect("bounded fixture store");
+            store.append_genesis(&GenesisInput {
+                genesis_id: "genesis-full-validation-cost".into(),
+                legacy_manifest_digest: None,
+                created_at: "2026-07-20T12:00:00.000Z".into(),
+                detail: canonical(&json!({"fixture": "full-validation-cost"})).unwrap(),
+            }).expect("fixture genesis");
+            let profile: &'static dyn ProfileModule = &nq_profiles::conformance::MODULE;
+            let instance = "full.validation.cost";
+            // One admission and real atomic failed-collection records; no
+            // helper process, evaluator identity override or synthetic SQL rows.
+            let admission = seed_compiled_admission(
+                &mut store, profile, instance, "full-validation-cost",
+            );
+            for index in 0..runs {
+                let suffix = format!("full-validation-cost-{index:03}");
+                let run = test_run(
+                    &store, profile, instance, &suffix, admission.clone(),
+                    AcquisitionOutcome::Timeout,
+                );
+                let outcome = CollectionOutcome::acquisition_failed(
+                    instance.into(), run.run_id.clone(), AcquisitionOutcome::Timeout,
+                ).expect("typed timeout outcome");
+                commit_test_non_success(&mut store, run, None, &outcome, &suffix);
+            }
+            assert_eq!(store.latest_evaluation_sequence().unwrap(), 0);
+            assert!(store.admitted_report_ids_bounded(1, None).unwrap().is_empty());
+            assert!(store.rejected_custody_bounded(1, None).unwrap().is_empty());
+            drop(store);
+
+            nq_store::start_sql_work_count();
+            let result = Store::validate_full_snapshot(
+                &path,
+                engine_validation_rules(),
+                |snapshot| -> Result<_, EngineError> {
+                    // Compare existing validators in the same native full
+                    // snapshot. The status audit already proves every run's
+                    // resource/profile identity and every historical result.
+                    let before = nq_store::sql_work_count().expect("counting");
+                    let statuses = validate_status_history_v2(snapshot)?;
+                    let status_work = nq_store::sql_work_count().unwrap() - before;
+                    assert_eq!(statuses, runs);
+                    let before = nq_store::sql_work_count().unwrap();
+                    let state = validate_semantic_planes_in_full(snapshot)?;
+                    let full_work = nq_store::sql_work_count().unwrap() - before;
+                    // Complete the real full-validation contract before a
+                    // watermark can be published; these checks are not timed.
+                    validate_provider_intake_history(snapshot)?;
+                    validate_diagnostic_artifact_history(snapshot)?;
+                    Ok(((status_work, full_work),
+                        nq_store::SemanticCertification::Established(state)))
+                },
+                |_| Ok::<bool, EngineError>(true),
+            ).expect("full snapshot retains every semantic/refusal check");
+            let total = nq_store::stop_sql_work_count().expect("counting");
+            assert!(result.watermark.is_some(), "valid full history is certified");
+            assert!(total >= result.value.0 + result.value.1);
+            eprintln!("full validation runs={runs}: status={} full-semantic={} total={total}",
+                result.value.0, result.value.1);
+            measured.push(result.value);
+        }
+        let [(empty_status, empty_full), (history_status, history_full)] = measured.as_slice()
+        else { unreachable!("empty and populated stores"); };
+        assert!(history_status > empty_status, "the reference audit must visit real history");
+        let empty_overhead = empty_full.checked_sub(*empty_status).expect("empty full overhead");
+        let history_overhead = history_full.checked_sub(*history_status).expect("full overhead");
+        assert!(history_overhead <= empty_overhead + FIXED_OVERHEAD_SLACK,
+            "full semantic validation must not repeat the complete run history audit: \
+             empty excess={empty_overhead}, {RUNS}-run excess={history_overhead}, \
+             fixed allowance={FIXED_OVERHEAD_SLACK}; status={history_status}, full={history_full}");
+    }
+
+    #[test]
     fn full_snapshot_validation_matches_full_semantics_and_refuses_substitution() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("full-snapshot-core.db");
