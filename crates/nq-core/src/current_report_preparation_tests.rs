@@ -4,6 +4,7 @@
 // resource bound.
 mod current_report_preparation {
     use super::*;
+    include!("current_report_cost_measurement.rs");
 
     const MACHINE: &str = "0123456789abcdef0123456789abcdef";
 
@@ -247,6 +248,7 @@ sys.stdout.write("\n")
             }
             evict_own_reports(&watcher.instance_id);
             let before = RECONSTRUCTIONS.with(std::cell::Cell::get);
+            let copies_before = PREPARED_REPORT_DEEP_COPIES.with(std::cell::Cell::get);
             let (source, prepared) =
                 PreparedHistoricalReports::prepare(&mut engine.store, &watcher, profile).unwrap();
             let validations = RECONSTRUCTIONS.with(std::cell::Cell::get) - before;
@@ -276,7 +278,59 @@ sys.stdout.write("\n")
                 1,
                 "audited current-only detector preparation must not retain history-sized report copies"
             );
+            assert_eq!(PREPARED_REPORT_DEEP_COPIES.with(std::cell::Cell::get) - copies_before, 1,
+                "cold historical preparation copies only its selected parsed input");
+            let validations_before = RECONSTRUCTIONS.with(std::cell::Cell::get);
+            let copies_before = PREPARED_REPORT_DEEP_COPIES.with(std::cell::Cell::get);
+            let (warm_source, warm) =
+                PreparedHistoricalReports::prepare(&mut engine.store, &watcher, profile).unwrap();
+            assert_eq!(RECONSTRUCTIONS.with(std::cell::Cell::get) - validations_before, 0);
+            assert_eq!(PREPARED_REPORT_DEEP_COPIES.with(std::cell::Cell::get) - copies_before, 1,
+                "warm history must not deep-copy each cached parsed payload");
+            assert_eq!(source.snapshot().reports, warm_source.snapshot().reports);
+            assert_eq!(prepared.reports, warm.reports);
+            println!("current_report_copies source_rows={count} cold_copies=1 warm_copies=1 warm_revalidations=0");
         }
+    }
+
+    #[test]
+    fn changed_semantic_or_detector_identity_keeps_full_input() {
+        for profile in audited_profiles() {
+            assert_eq!(HistoricalInputLaw::for_profile(profile).unwrap(), HistoricalInputLaw::NewestCurrent);
+            let descriptor = profile.detectors()[0].descriptor();
+            assert_eq!(HistoricalInputLaw::for_identity("unrecognized-semantic-identity", descriptor),
+                HistoricalInputLaw::AllMatching);
+            let semantic = profile_semantic_id(profile.descriptor()).unwrap();
+            let mut changed = descriptor.clone();
+            changed.id.push_str(".successor");
+            assert_eq!(HistoricalInputLaw::for_identity(semantic.as_str(), &changed), HistoricalInputLaw::AllMatching);
+            changed = descriptor.clone();
+            changed.version += 1;
+            assert_eq!(HistoricalInputLaw::for_identity(semantic.as_str(), &changed), HistoricalInputLaw::AllMatching);
+        }
+        assert_eq!(HistoricalInputLaw::for_profile(&nq_profiles::host::MODULE).unwrap(),
+            HistoricalInputLaw::AllMatching);
+    }
+
+    #[test]
+    fn newest_input_uses_instance_sequence_and_last_maximum() {
+        let profile = &nq_profiles::host_io::MODULE;
+        let watcher = question(Path::new("/fixture"), profile);
+        let now = parse_timestamp("2026-11-13T12:00:00.000Z").unwrap();
+        let first = occurrence(&watcher, profile,
+            &testimony(&watcher, profile, now, false, false), 2);
+        let mut reports = Vec::new();
+        HistoricalInputLaw::NewestCurrent.retain(&mut reports, first.clone(), &watcher.instance_id);
+        let mut different = first.clone();
+        different.report.instance_id.push_str(".other");
+        different.report_sequence = 99;
+        HistoricalInputLaw::NewestCurrent.retain(&mut reports, different, &watcher.instance_id);
+        let mut lower = first.clone(); lower.report_sequence = 1;
+        HistoricalInputLaw::NewestCurrent.retain(&mut reports, lower, &watcher.instance_id);
+        assert_eq!(reports, [first.clone()]);
+        let mut tied = first; tied.report_id.push_str(".last");
+        HistoricalInputLaw::NewestCurrent.retain(&mut reports, tied.clone(), &watcher.instance_id);
+        assert_eq!(reports, [tied]);
     }
 
     #[test]
@@ -379,56 +433,45 @@ sys.stdout.write("\n")
 
     #[test]
     fn audited_cold_preparation_still_refuses_an_invalid_older_profile_report() {
-        let profile = &nq_profiles::host_io::MODULE;
-        let watcher = question(Path::new("/fixture"), profile);
-        let now = parse_timestamp("2026-11-13T12:00:00.000Z").unwrap();
-        let mut rows: Vec<_> = (1..=2)
-            .map(|sequence| {
-                let report = testimony(&watcher, profile, now - Duration::seconds(1), false, false);
-                let admitted = occurrence(&watcher, profile, &report, sequence);
-                nq_store::AdmittedReportRow {
-                    report_sequence: i64::try_from(sequence).unwrap(),
-                    report_id: admitted.report_id,
-                    instance_id: watcher.instance_id.clone(),
-                    profile_id: watcher.profile.id.clone(),
-                    profile_version: watcher.profile.version.to_string(),
-                    profile_digest: profile.descriptor().digest().unwrap().as_str().to_owned(),
-                    observed_at: timestamp(report.observed_at),
-                    received_at: timestamp(now),
-                    report_status: "complete".to_owned(),
-                    canonical_json: canonical(&report).unwrap().as_bytes().to_vec(),
-                    semantic_digest: admitted.report.report_digest,
-                }
-            })
-            .collect();
-        // Keep canonical/protocol/context validity and an exact source digest;
-        // only the old profile payload disagrees with its enrolled machine.
-        let mut older: nq_protocol::EvidenceReport =
-            serde_json::from_slice(&rows[0].canonical_json).unwrap();
-        older.observations[0].payload["machine_id"] = json!("ffffffffffffffffffffffffffffffff");
-        nq_protocol::validate_report(&older).unwrap();
-        let document = canonical(&older).unwrap();
-        rows[0].semantic_digest = document.digest().to_owned();
-        rows[0].canonical_json = document.as_bytes().to_vec();
-        let snapshot = EvidenceSnapshot {
-            watermarks: Vec::new(),
-            reports: rows,
-            expired_citations: Vec::new(),
-        };
-        let error = prepare_instance_evaluations(
-            &watcher,
-            profile,
-            None,
-            &snapshot,
-            &[],
-            nq_protocol::sha256_bytes(b"current-report-fixture").as_str(),
-            EvaluationReportSelection::AllMatching,
-        )
-        .err()
-        .expect("an invalid older profile report must still refuse cold preparation");
-        assert!(
-            error.to_string().contains("no longer validates"),
-            "original profile refusal: {error}"
-        );
+        let root = tempfile::tempdir().unwrap();
+        let (mut engine, watcher, _) = live_fixture(root.path(), false);
+        let profile = resolve(&watcher).unwrap();
+        for _ in 0..2 {
+            assert!(engine.collect(&watcher).unwrap().is_success());
+        }
+        let rows = engine.store.evidence_snapshot(std::slice::from_ref(&watcher.instance_id))
+            .unwrap().reports;
+        assert_eq!(rows.len(), 2);
+        let oldest = &rows[0];
+        // Keep canonical/protocol/context validity and an exact raw digest;
+        // substitute only the old payload's enrolled machine. This isolated
+        // temporary-store mutation must reach the actual prepared-history
+        // consumer before any later guarded transaction or semantic audit.
+        let mut report: nq_protocol::EvidenceReport =
+            serde_json::from_slice(&oldest.canonical_json).unwrap();
+        report.observations[0].payload["machine_id"] = json!("ffffffffffffffffffffffffffffffff");
+        nq_protocol::validate_report(&report).unwrap();
+        let document = canonical(&report).unwrap();
+        let connection = rusqlite::Connection::open(&engine.config.database_path).unwrap();
+        // As in Store's existing substitution fixtures, temporarily remove
+        // this test database's exact update trigger, then restore its original
+        // text. The normal append-only interface correctly rejects the edit.
+        connection.pragma_update(None, "foreign_keys", "OFF").unwrap();
+        let trigger: String = connection.query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='immutable_admitted_reports_update'",
+            [], |row| row.get(0),
+        ).unwrap();
+        connection.execute_batch("DROP TRIGGER immutable_admitted_reports_update").unwrap();
+        assert_eq!(connection.execute(
+            "UPDATE admitted_reports SET canonical_json=?1,semantic_digest=?2 WHERE report_id=?3",
+            rusqlite::params![document.as_bytes(), document.digest(), oldest.report_id],
+        ).unwrap(), 1);
+        connection.execute_batch(&trigger).unwrap();
+        drop(connection);
+        evict_own_reports(&watcher.instance_id);
+        let error = PreparedHistoricalReports::prepare(&mut engine.store, &watcher, profile)
+            .err().expect("an invalid older profile report still refuses actual prepared history");
+        assert!(error.to_string().contains("no longer validates"),
+            "original profile refusal from actual historical preparation: {error}");
     }
 }

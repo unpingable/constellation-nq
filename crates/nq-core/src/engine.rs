@@ -6,6 +6,7 @@ use std::fs::{self, File};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
@@ -6063,6 +6064,55 @@ struct PreparedHistoricalReports {
     generation: i64,
     matching_indices: Vec<usize>,
     reports: Vec<DetectorReport>,
+    input_law: HistoricalInputLaw,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HistoricalInputLaw {
+    AllMatching,
+    NewestCurrent,
+}
+
+impl HistoricalInputLaw {
+    fn for_profile(profile: &'static dyn ProfileModule) -> Result<Self, EngineError> {
+        let semantic = profile_semantic_id(profile.descriptor())
+            .map_err(|error| EngineError::Canonical(error.to_string()))?;
+        let [detector] = profile.detectors() else { return Ok(Self::AllMatching); };
+        Ok(Self::for_identity(semantic.as_str(), detector.descriptor()))
+    }
+
+    // These exact source-bound compiled laws select only max(report_sequence)
+    // after filtering the input instance. A descriptor name/version alone is
+    // not that law. Any changed semantic closure falls back until re-audited.
+    fn for_identity(semantic: &str, detector: &nq_profiles::DetectorDescriptor) -> Self {
+        let audited = match semantic {
+            "sha256:f6d0d14e1123a31a4176867c4556c5a593580ee81d7c04a4826e4a08f602f122" =>
+                detector.id == nq_profiles::host_io::DETECTOR_ID && detector.version == 1,
+            "sha256:1f9b490d01edcc7d42242efd6b7b7fab37aef36bbb10dd685db0cd5ecaf2d848" =>
+                detector.id == nq_profiles::host_memory::DETECTOR_ID && detector.version == 1,
+            "sha256:b1d3422f69f291ed2ff2449f6c3760acb24845aca1e7a35b1f4d367cda7044c2" =>
+                detector.id == nq_profiles::systemd_unit_v3::DETECTOR_ID
+                    && detector.version == nq_profiles::systemd_unit_v3::DETECTOR_VERSION,
+            _ => false,
+        };
+        if audited { Self::NewestCurrent } else { Self::AllMatching }
+    }
+
+    fn retain(self, reports: &mut Vec<DetectorReport>, report: DetectorReport, instance: &str) {
+        match self {
+            Self::AllMatching => reports.push(report),
+            Self::NewestCurrent if newest_current_candidate(&report, reports.last(), instance) => {
+                reports.clear();
+                reports.push(report);
+            }
+            Self::NewestCurrent => {},
+        }
+    }
+}
+
+fn newest_current_candidate(report: &DetectorReport, previous: Option<&DetectorReport>, instance: &str) -> bool {
+    report.report.instance_id == instance
+        && previous.is_none_or(|last| report.report_sequence >= last.report_sequence)
 }
 
 impl PreparedHistoricalReports {
@@ -6098,15 +6148,31 @@ impl PreparedHistoricalReports {
         });
         let reconstruction_timing =
             nq_store::operation_timing::PhaseTiming::start("core.historical_reconstruction");
-        let reports = selected
-            .into_iter()
-            .map(|(_, selected)| selected.reconstruct(profile))
-            .collect::<Result<Vec<_>, _>>()?;
+        let input_law = HistoricalInputLaw::for_profile(profile)?;
+        let mut reports = Vec::new();
+        let mut newest: Option<Arc<DetectorReport>> = None;
+        // Preserve every old profile validation and its refusal order. Only
+        // the retained parsed detector input changes for audited current laws.
+        for (_, selected) in selected {
+            let report = selected.reconstruct_shared(profile)?;
+            match input_law {
+                HistoricalInputLaw::AllMatching => reports.push(clone_detector_report(&report)),
+                HistoricalInputLaw::NewestCurrent if newest_current_candidate(
+                    &report, newest.as_deref(), &watcher.instance_id) => {
+                    newest = Some(report);
+                }
+                HistoricalInputLaw::NewestCurrent => {},
+            }
+        }
+        if let Some(report) = newest {
+            reports.push(clone_detector_report(&report));
+        }
         drop(reconstruction_timing);
         Ok((source, Self {
             generation,
             matching_indices,
             reports,
+            input_law,
         }))
     }
 
@@ -6149,6 +6215,7 @@ impl PreparedHistoricalReports {
         let Self {
             matching_indices,
             mut reports,
+            input_law,
             ..
         } = self;
         // The consumed Store proof has already reconciled the complete source,
@@ -6166,14 +6233,17 @@ impl PreparedHistoricalReports {
             && report_matches_evaluation_context(current, watcher, digest)?
         {
             matching_rows.push(current);
-            reports.push(reconstruct_admitted_cached(current, profile, digest)?);
+            input_law.retain(&mut reports,
+                reconstruct_admitted_cached(current, profile, digest)?, &watcher.instance_id);
         }
         Ok((matching_rows, reports))
     }
 }
 
-/// The normal evaluator consumes its complete matching context. A named local
-/// successor has a separately retained selection law: its newly admitted
+/// The normal evaluator retains its complete matching source context for
+/// provenance; audited current-only prepared inputs may project the detector
+/// slice without discarding that context. A named local successor has a
+/// separately retained selection law: its newly admitted
 /// occurrence is the only detector input while earlier matching reports remain
 /// durable history, deliberately excluded from that detector invocation.
 #[derive(Clone, Copy)]
@@ -6589,7 +6659,7 @@ struct SelectedHistoricalReport<'row> {
     row: &'row nq_store::AdmittedReportRow,
     profile_digest: &'row str,
     body_commitment: [u8; 32],
-    cached_report: Option<DetectorReport>,
+    cached_report: Option<Arc<DetectorReport>>,
 }
 
 impl<'row> SelectedHistoricalReport<'row> {
@@ -6631,18 +6701,26 @@ impl<'row> SelectedHistoricalReport<'row> {
         }))
     }
 
+    #[cfg(test)]
     fn reconstruct(
         self,
         profile: &'static dyn ProfileModule,
     ) -> Result<DetectorReport, EngineError> {
+        Ok(clone_detector_report(self.reconstruct_shared(profile)?.as_ref()))
+    }
+
+    fn reconstruct_shared(
+        self,
+        profile: &'static dyn ProfileModule,
+    ) -> Result<Arc<DetectorReport>, EngineError> {
         if let Some(report) = self.cached_report {
             #[cfg(test)]
             RECONSTRUCTION_MEMO_HITS.with(|count| count.set(count.get() + 1));
             return Ok(report);
         }
-        let report = reconstruct_admitted(self.row, profile)?;
+        let report = Arc::new(reconstruct_admitted(self.row, profile)?);
         if let Ok(mut memo) = admitted_report_memo().lock() {
-            memo.remember_with_commitment(self.row, self.profile_digest, None, Some(report.clone()),
+            memo.remember_shared_with_commitment(self.row, self.profile_digest, None, Some(Arc::clone(&report)),
                 ADMITTED_MEMO_MAX_BYTES, self.body_commitment);
         }
         Ok(report)
@@ -8673,6 +8751,8 @@ thread_local! {
     static RECONSTRUCTION_MEMO_CLEARS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Actual raw canonical bytes hashed to bind immutable memo testimony.
     static MEMO_BODY_BYTES_HASHED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Deep copies into prepared detector inputs, excluding shared Arc handles.
+    static PREPARED_REPORT_DEEP_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// One test pauses the real reconstruction consumer to try another writer.
     static HISTORICAL_RECONSTRUCTION_FOR_TEST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     /// Reports kept after evaluation solely for diagnostic emission.
@@ -8754,7 +8834,7 @@ impl AdmittedMemoRow {
 struct AdmittedMemoEntry {
     row: AdmittedMemoRow,
     context: Option<ImmutableReportContext>,
-    report: Option<DetectorReport>,
+    report: Option<Arc<DetectorReport>>,
     weight: usize,
 }
 
@@ -8825,6 +8905,9 @@ impl AdmittedReportMemo {
         // Also count any tag storage added by making the old report optional.
         let with_added_slots = original
             .saturating_add(std::mem::size_of::<Option<ImmutableReportContext>>())
+            // Keep the original inline/report allowances conservatively and
+            // charge the shared allocation's strong/weak counter words too.
+            .saturating_add(2 * std::mem::size_of::<usize>())
             .saturating_add(
                 std::mem::size_of::<Option<DetectorReport>>()
                     .saturating_sub(std::mem::size_of::<DetectorReport>()),
@@ -8895,6 +8978,19 @@ impl AdmittedReportMemo {
         max_bytes: usize,
         body_commitment: [u8; 32],
     ) {
+        self.remember_shared_with_commitment(row, digest, context, report.map(Arc::new),
+            max_bytes, body_commitment);
+    }
+
+    fn remember_shared_with_commitment(
+        &mut self,
+        row: &nq_store::AdmittedReportRow,
+        digest: &str,
+        context: Option<ImmutableReportContext>,
+        report: Option<Arc<DetectorReport>>,
+        max_bytes: usize,
+        body_commitment: [u8; 32],
+    ) {
         let key = (digest.to_owned(), row.report_id.clone());
         let prior = self.exact_with_commitment(row, digest, &body_commitment);
         let same_row = prior.is_some();
@@ -8944,11 +9040,11 @@ fn reconstruct_admitted_cached(
     if let Ok(memo) = admitted_report_memo().lock()
         && let Some(report) = memo
             .exact(row, profile_digest)
-            .and_then(|entry| entry.report.as_ref())
+            .and_then(|entry| entry.report.as_deref())
     {
         #[cfg(test)]
         RECONSTRUCTION_MEMO_HITS.with(|count| count.set(count.get() + 1));
-        return Ok(report.clone());
+        return Ok(clone_detector_report(report));
     }
     let report = reconstruct_admitted(row, profile)?;
     if let Ok(mut memo) = admitted_report_memo().lock() {
@@ -8961,6 +9057,12 @@ fn reconstruct_admitted_cached(
         );
     }
     Ok(report)
+}
+
+fn clone_detector_report(report: &DetectorReport) -> DetectorReport {
+    #[cfg(test)]
+    PREPARED_REPORT_DEEP_COPIES.with(|count| count.set(count.get() + 1));
+    report.clone()
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -19890,7 +19992,7 @@ sys.stdout.write("\n")
         for _ in 0..2 {
             let actual = rows.iter().zip(&contexts).map(|(row, context)| {
                 if let Some(report) = memo.exact(row, &fixture.profile_digest)
-                    .and_then(|entry| entry.report.as_ref())
+                    .and_then(|entry| entry.report.as_deref())
                 {
                     hits += 1;
                     report.clone()
@@ -20285,7 +20387,7 @@ sys.stdout.write("\n")
         memo.remember(&row, &fixture.profile_digest, None, Some(expected.clone()), cap);
         let upgraded = memo.exact(&row, &fixture.profile_digest).unwrap();
         assert!(upgraded.context.is_some());
-        assert_eq!(upgraded.report.as_ref(), Some(&expected));
+        assert_eq!(upgraded.report.as_deref(), Some(&expected));
         assert_eq!(memo.bytes, cap);
         assert_eq!(memo.entries.len(), 1);
     }

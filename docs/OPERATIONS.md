@@ -1211,8 +1211,29 @@ is bounded by the new rows, the referenced closure, and the schema:
   canonical, protocol and profile validation; these validations can themselves
   compute digests. Cache replacement or eviction between the two phases cannot
   substitute another row's testimony. This removes redundant memo hashing,
-  not the complete source read, per-row selection or reconstructed-report
-  cloning. Current-answer cost is still proportional to retained history.
+  not the complete source read or per-row selection.
+
+  For the specifically audited compiled I/O-pressure v1, memory-pressure v1
+  and systemd-unit v3 semantic identities, ordinary preparation shares cached
+  parsed reports through immutable `Arc` handles. It still reconstructs and
+  profile-validates every matching cold row in the original order, but deep
+  copies only the newest same-instance report into its historical detector
+  input. A newly admitted occurrence participates in that same durable-sequence
+  selection, including a failed or stale newest report. All matching source
+  rows, watermarks and older finding citations remain available. Exact compiled
+  semantic and detector identities gate this allocation optimization; a changed
+  or unrecognized identity falls back to the complete detector input until
+  independently re-audited. Named diagnostic selection and full-snapshot
+  freshness/successor guards are unchanged.
+
+  This bounds historical detector-input copying for those three compiled laws,
+  not total collection cost. Raw snapshot reads, memo-binding hashes, selector
+  traversal and cold profile validation still follow retained history.
+  Shared parsed payloads can outlive memo eviction until the current operation
+  releases its handles. The memo's estimate charges the Arc counter allocation
+  conservatively while retaining the existing report allowances; it remains
+  an estimated entry-retention budget, not a process RSS or operation peak bound.
+  Current-answer cost is still proportional to retained history.
   The memo is in memory only,
   is not persisted, and starts empty at every process start. A one-shot
   command (`collect`, `acquire-next-local`) therefore pays the full
@@ -1227,13 +1248,15 @@ is bounded by the new rows, the referenced closure, and the schema:
   reconstruction allowances and all other headroom remain. The commitment,
   length and saved accounting word are added to the estimate. This does not
   make the estimate an exact heap bound or establish that a deployed working
-  set fits. Raw-byte hashing and detector-report cloning still traverse the
-  retained input on warm hits.
+  set fits. Raw-byte hashing still traverses retained input on warm hits.
+  Full-input fallback also clones every selected detector report; the three
+  audited current-only laws share old parsed payloads and copy only their
+  selected historical detector input.
   A row heavier than
   the limit is never stored, and the memo is cleared when it fills. When an
   instance's retained reports exceed the memo, repeated clearing can
-  eliminate most reuse. Each miss retains row metadata and a body commitment,
-  and clones the reconstructed report. The opt-in `core.historical_snapshot`,
+  eliminate most reuse. Entries retain row metadata, a body commitment and any
+  successful shared reconstruction within that budget. The opt-in `core.historical_snapshot`,
   `core.historical_selection` and `core.historical_reconstruction` timings
   separate source loading, selection and reconstruction; a combined preparation
   duration alone does not attribute the cost or establish effective reuse. The memo changes no validation rule, profile,
