@@ -3916,11 +3916,16 @@ impl Store {
             .map(i64::try_from)
             .transpose()
             .map_err(|_| StoreError::Invariant("artifact sequence cursor overflowed".into()))?;
-        let mut statement = self.connection.prepare(
+        let range = if after_sequence.is_some() {
+            "artifact_sequence > ?1"
+        } else {
+            "?1 IS NULL"
+        };
+        let mut statement = self.connection.prepare(&format!(
             "SELECT artifact_id FROM diagnostic_artifact_commitments
-             WHERE ?1 IS NULL OR artifact_sequence > ?1
-             ORDER BY artifact_sequence LIMIT ?2",
-        )?;
+             WHERE {range}
+             ORDER BY artifact_sequence LIMIT ?2"
+        ))?;
         let artifact_ids = statement
             .query_map(params![after_sequence, limit], |row| {
                 row.get::<_, String>(0)
@@ -4751,13 +4756,18 @@ impl Store {
         after_run_id: Option<&str>,
     ) -> Result<Vec<LegacyProviderIntakeGapRow>, StoreError> {
         validate_public_limit(limit)?;
-        let mut statement = self.connection.prepare(
+        let range = if after_run_id.is_some() {
+            "run_id > ?1"
+        } else {
+            "?1 IS NULL"
+        };
+        let mut statement = self.connection.prepare(&format!(
             "SELECT run_id, source_schema_version, source_schema_artifact_digest,
                     limitation_code, detail_json, migrated_at
              FROM legacy_v3_watcher_run_intake_gaps
-             WHERE ?1 IS NULL OR run_id > ?1
-             ORDER BY run_id LIMIT ?2",
-        )?;
+             WHERE {range}
+             ORDER BY run_id LIMIT ?2"
+        ))?;
         statement
             .query_map(params![after_run_id, limit], |row| {
                 Ok(LegacyProviderIntakeGapRow {
@@ -4887,10 +4897,15 @@ impl Store {
         after_report_id: Option<&str>,
     ) -> Result<Vec<String>, StoreError> {
         validate_public_limit(limit)?;
+        let range = if after_report_id.is_some() {
+            "report_id > ?1"
+        } else {
+            "?1 IS NULL"
+        };
         let mut statement = self.connection.prepare(
             &format!(
                 "SELECT report_id FROM admitted_reports AS report
-             WHERE (?1 IS NULL OR report_id > ?1) AND {}
+             WHERE {range} AND {}
              ORDER BY report_id LIMIT ?2",
                 retention::full_source_condition(&self.connection, "report")?
             ),
@@ -5007,7 +5022,14 @@ impl Store {
         after_run_id: Option<&str>,
     ) -> Result<Vec<WatcherRunOutcomeRow>, StoreError> {
         validate_public_limit(limit)?;
-        let mut statement = self.connection.prepare(
+        // Keep the cursor a range constraint; a nullable OR scans the sorted
+        // index from its start again for every page of a full traversal.
+        let range = if after_run_id.is_some() {
+            "run.run_id > ?1"
+        } else {
+            "?1 IS NULL"
+        };
+        let mut statement = self.connection.prepare(&format!(
             "SELECT run.run_id, run.request_id, run.instance_id, run.admission_id,
                     run.profile_id, run.profile_version, run.profile_digest,
                     admission.instance_id, admission.profile_id,
@@ -5019,10 +5041,10 @@ impl Store {
              FROM watcher_runs AS run
              LEFT JOIN admission_records AS admission
                ON admission.admission_id = run.admission_id
-             WHERE ?1 IS NULL OR run.run_id > ?1
+             WHERE {range}
              ORDER BY run.run_id
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        ))?;
         let rows = statement.query_map(params![after_run_id, limit], |row| {
             Ok(WatcherRunOutcomeRow {
                 run_id: row.get(0)?,
@@ -15069,6 +15091,11 @@ mod tests {
     mod prepared_evidence_tests {
         use super::*;
         include!("prepared_evidence_tests.rs");
+    }
+
+    mod history_paging_tests {
+        use super::*;
+        include!("history_paging_tests.rs");
     }
 
     const TIME: &str = "2026-07-16T12:00:00.000Z";

@@ -6061,7 +6061,7 @@ struct PreparedEvaluation {
 /// at admission rather than silently become this context's new boundary.
 struct PreparedHistoricalReports {
     generation: i64,
-    matching_rows: Vec<nq_store::AdmittedReportRow>,
+    matching_indices: Vec<usize>,
     reports: Vec<DetectorReport>,
 }
 
@@ -6085,8 +6085,9 @@ impl PreparedHistoricalReports {
             .map_err(|error| EngineError::Canonical(error.to_string()))?;
         let selection_timing =
             nq_store::operation_timing::PhaseTiming::start("core.historical_selection");
-        let matching_rows = evaluation_context_rows(&snapshot.reports, watcher, digest.as_str())?;
-        selection_timing.value("selected_rows", matching_rows.len() as i64);
+        let matching_indices =
+            evaluation_context_indices(&snapshot.reports, watcher, digest.as_str())?;
+        selection_timing.value("selected_rows", matching_indices.len() as i64);
         drop(selection_timing);
         #[cfg(test)]
         HISTORICAL_RECONSTRUCTION_FOR_TEST.with(|hook| {
@@ -6097,14 +6098,16 @@ impl PreparedHistoricalReports {
         });
         let reconstruction_timing =
             nq_store::operation_timing::PhaseTiming::start("core.historical_reconstruction");
-        let reports = matching_rows
+        let reports = matching_indices
             .iter()
-            .map(|row| reconstruct_admitted_cached(row, profile, digest.as_str()))
+            .map(|&index| {
+                reconstruct_admitted_cached(&snapshot.reports[index], profile, digest.as_str())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         drop(reconstruction_timing);
         Ok((source, Self {
             generation,
-            matching_rows,
+            matching_indices,
             reports,
         }))
     }
@@ -6121,14 +6124,14 @@ impl PreparedHistoricalReports {
     /// Store has consumed and resolved the complete immutable source under the
     /// original writer guard. The newly inserted current occurrence is the
     /// sole extra row; its identity, context and reconstruction stay checked here.
-    fn reconcile(
+    fn reconcile<'snapshot>(
         self,
-        snapshot: &EvidenceSnapshot,
+        snapshot: &'snapshot EvidenceSnapshot,
         watcher: &WatcherConfig,
         profile: &'static dyn ProfileModule,
         digest: &str,
         current_report_id: Option<&str>,
-    ) -> Result<(Vec<nq_store::AdmittedReportRow>, Vec<DetectorReport>), EngineError> {
+    ) -> Result<(Vec<&'snapshot nq_store::AdmittedReportRow>, Vec<DetectorReport>), EngineError> {
         let current = match current_report_id {
             Some(id) => {
                 let (current, _) = snapshot.reports.split_last().ok_or_else(|| {
@@ -6146,14 +6149,25 @@ impl PreparedHistoricalReports {
             None => None,
         };
         let Self {
-            mut matching_rows,
+            matching_indices,
             mut reports,
             ..
         } = self;
+        // The consumed Store proof has already reconciled the complete source,
+        // including row order, under its writer guard. Keep only positions
+        // during preparation and borrow the resolved rows for this evaluation.
+        let mut matching_rows = matching_indices
+            .into_iter()
+            .map(|index| {
+                snapshot.reports.get(index).ok_or_else(|| {
+                    EngineError::Invariant("prepared matching row is absent after reconciliation".into())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         if let Some(current) = current
             && report_matches_evaluation_context(current, watcher, digest)?
         {
-            matching_rows.push(current.clone());
+            matching_rows.push(current);
             reports.push(reconstruct_admitted_cached(current, profile, digest)?);
         }
         Ok((matching_rows, reports))
@@ -6267,7 +6281,7 @@ fn prepare_instance_evaluations_with_history(
                         selected.len()
                     )));
                 };
-                vec![(*selected).clone()]
+                vec![**selected]
             }
         };
         drop(context_timing);
@@ -6562,15 +6576,27 @@ fn report_matches_evaluation_context(
         && context.binding.vantage.value == watcher.vantage.value)
 }
 
-fn evaluation_context_rows(
+fn evaluation_context_rows<'rows>(
+    rows: &'rows [nq_store::AdmittedReportRow],
+    watcher: &WatcherConfig,
+    profile_digest: &str,
+) -> Result<Vec<&'rows nq_store::AdmittedReportRow>, EngineError> {
+    Ok(evaluation_context_indices(rows, watcher, profile_digest)?
+        .into_iter()
+        .map(|index| &rows[index])
+        .collect())
+}
+
+fn evaluation_context_indices(
     rows: &[nq_store::AdmittedReportRow],
     watcher: &WatcherConfig,
     profile_digest: &str,
-) -> Result<Vec<nq_store::AdmittedReportRow>, EngineError> {
+) -> Result<Vec<usize>, EngineError> {
     rows.iter()
+        .enumerate()
         .filter_map(
-            |row| match report_matches_evaluation_context(row, watcher, profile_digest) {
-                Ok(true) => Some(Ok(row.clone())),
+            |(index, row)| match report_matches_evaluation_context(row, watcher, profile_digest) {
+                Ok(true) => Some(Ok(index)),
                 Ok(false) => None,
                 Err(error) => Some(Err(error)),
             },
@@ -8891,7 +8917,7 @@ fn build_finding_event(
     governed_refusal: Option<&GovernedRefusal>,
     evaluated_at: DateTime<Utc>,
     current: Option<&nq_store::FindingSnapshotRow>,
-    rows: &[nq_store::AdmittedReportRow],
+    rows: &[&nq_store::AdmittedReportRow],
     expired_citations: &[nq_store::AdmittedReportRow],
 ) -> Result<Option<FindingEventInput>, EngineError> {
     if current.is_none() && result.state != DetectorState::Present {
@@ -8963,6 +8989,7 @@ fn build_finding_event(
         .iter()
         .filter_map(|evidence| {
             rows.iter()
+                .copied()
                 .chain(expired_citations)
                 .find(|row| row.report_id == evidence.report_id)
         })
@@ -9035,7 +9062,7 @@ fn build_finding_event(
 /// re-verified bytes, and is accepted by identity (`expired_citations`).
 fn retained_finding_evidence(
     finding: &nq_store::FindingSnapshotRow,
-    rows: &[nq_store::AdmittedReportRow],
+    rows: &[&nq_store::AdmittedReportRow],
     expired_citations: &[nq_store::AdmittedReportRow],
 ) -> Result<Vec<FindingEvidenceInput>, EngineError> {
     let references: Vec<PublicEvidenceReference> = serde_json::from_str(&finding.evidence_json)
@@ -9046,7 +9073,7 @@ fn retained_finding_evidence(
         .into_iter()
         .enumerate()
         .map(|(ordinal, reference)| {
-            if !rows.iter().chain(expired_citations).any(|row| {
+            if !rows.iter().copied().chain(expired_citations).any(|row| {
                 row.report_id == reference.report_id
                     && row.semantic_digest == reference.semantic_digest
             }) {
@@ -9071,7 +9098,7 @@ fn visibility_for(
     result: &nq_profiles::DetectorResult,
     profile: &'static dyn ProfileModule,
     evaluated_at: DateTime<Utc>,
-    rows: &[nq_store::AdmittedReportRow],
+    rows: &[&nq_store::AdmittedReportRow],
 ) -> (&'static str, Value) {
     if result.state != DetectorState::CannotEvaluate {
         return ("sufficient", json!({"state": "current"}));
@@ -19236,7 +19263,7 @@ sys.stdout.write("\n")
             None,
             fixture.observed_at,
             changed_current,
-            std::slice::from_ref(&new_report),
+            &[&new_report],
             &[],
         )
         .expect("changed lineage finding is well formed")
@@ -19354,13 +19381,10 @@ sys.stdout.write("\n")
             &other_boundary,
             nq_protocol::ReportStatus::Complete,
         );
-        let owned = evaluation_context_rows(
-            &[matching.clone(), unrelated],
-            watcher,
-            &fixture.profile_digest,
-        )
-        .expect("select exact evaluation context");
-        assert_eq!(owned, vec![matching.clone()]);
+        let source = [matching.clone(), unrelated];
+        let owned = evaluation_context_rows(&source, watcher, &fixture.profile_digest)
+            .expect("select exact evaluation context");
+        assert_eq!(owned, vec![&matching]);
 
         let detector_input = DetectorInput {
             instance_id: &watcher.instance_id,
@@ -19495,6 +19519,33 @@ sys.stdout.write("\n")
         }
     }
 
+    #[test]
+    fn evaluation_context_selection_borrows_canonical_source() {
+        let fixture = SemanticLineageFixture::new();
+        let rows: Vec<_> = (1..=32)
+            .map(|sequence| {
+                let mut row = reconstruction_fixture_row(
+                    &fixture,
+                    &format!("report:borrowed-selection-{}-{sequence}", Uuid::new_v4()),
+                );
+                row.report_sequence = sequence;
+                row
+            })
+            .collect();
+        let selected =
+            evaluation_context_rows(&rows, fixture.watcher(), &fixture.profile_digest).unwrap();
+        assert_eq!(selected.len(), rows.len());
+        for (selected, source) in selected.iter().zip(&rows) {
+            assert_eq!(selected.report_id, source.report_id);
+            assert_eq!(selected.canonical_json, source.canonical_json);
+            assert_eq!(
+                selected.canonical_json.as_ptr(),
+                source.canonical_json.as_ptr(),
+                "selection must not duplicate the retained canonical body"
+            );
+        }
+    }
+
     /// Constructed owning Store fixture; never reads a deployed store. Run
     /// alone with the existing timing opt-in to separate SQLite snapshot,
     /// canonical selection and reconstruction costs on two unchanged passes.
@@ -19539,7 +19590,7 @@ sys.stdout.write("\n")
         let second = PreparedHistoricalReports::prepare(&mut store, &watcher, profile).unwrap();
         assert_eq!(first.0.snapshot().reports.len(), 12);
         assert_eq!(first.0.snapshot().reports, second.0.snapshot().reports);
-        assert_eq!(first.1.matching_rows, second.1.matching_rows);
+        assert_eq!(first.1.matching_indices, second.1.matching_indices);
         assert_eq!(first.1.reports, second.1.reports);
         assert_eq!(first.1.generation, generation);
         assert_eq!(store.retention_generation().unwrap(), generation);
@@ -19813,7 +19864,7 @@ sys.stdout.write("\n")
             let selected =
                 evaluation_context_rows(&rows, fixture.watcher(), &fixture.profile_digest)
                     .expect("exact context selection");
-            assert_eq!(selected, rows);
+            assert_eq!(selected, rows.iter().collect::<Vec<_>>());
             outputs.push(
                 selected
                     .iter()
@@ -20201,10 +20252,11 @@ sys.stdout.write("\n")
                 canonical_json: Vec::new(),
                 semantic_digest: semantic_digest.clone(),
             };
-        let rows = [
+        let source = [
             report_row(1, "report:old", &old_received_at),
             report_row(2, "report:new", &new_received_at),
         ];
+        let rows = source.iter().collect::<Vec<_>>();
         let result = nq_profiles::DetectorResult {
             state: DetectorState::Present,
             condition: descriptor.condition.clone(),

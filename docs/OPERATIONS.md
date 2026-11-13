@@ -1242,14 +1242,25 @@ is bounded by the new rows, the referenced closure, and the schema:
   for another instance alone does not. This is conservative optimistic admission,
   not a fairness or latency guarantee. The five-second guard refusal and the
   existing memo budget remain unchanged. `core.historical_preparation` records
-  the preparation cost. Its source/matching vectors and reconstructed reports
-  are owned by one operation. The unchanged path avoids a second retained-source
+  the preparation cost. Its source vector, matching indices and reconstructed
+  reports belong to one operation. Selection borrows canonical source rows
+  rather than cloning their bodies. Prepared matching indices are resolved
+  only against the Store proof's ordered source; finding and citation consumers
+  then borrow those resolved rows. Cold local-successor context checks also
+  borrow selected rows. This does not skip raw-byte hashing, canonical/protocol
+  validation or complete source reconciliation. The unchanged path avoids a second retained-source
   materialization; the fallback still reads the full current source. Preparation
   and detector inputs still grow with retained instance history. Prepared
   evaluations retain an additional
   report copy only for diagnostic artifact emission; ordinary collection and
   freshness sweeps do not keep that unused diagnostic copy. This reduces
   temporary report copies, without an RSS bound or measured reduction claim.
+  Complete history walks page report identities, watcher outcomes, diagnostic
+  commitments and legacy intake gaps with indexed cursor ranges. A later page
+  seeks past its cursor instead of scanning the already-consumed prefix again.
+  Filters, ordering, page limits and refusal behavior are unchanged. Full
+  validation still visits all required rows; neither a bounded response page
+  nor this query correction establishes a whole-operation time or resource bound.
   Named local-successor exact-current selection
   keeps its existing path.
 - Each scoped admitted-run validator groups the uncovered evaluations by run
