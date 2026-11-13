@@ -13787,6 +13787,8 @@ fn parse_severity(value: &str) -> Result<Severity, EngineError> {
 
 #[cfg(test)]
 mod tests {
+    include!("current_report_preparation_tests.rs");
+
     use std::collections::{BTreeMap, BTreeSet};
     use std::os::unix::fs::PermissionsExt;
 

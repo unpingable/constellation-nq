@@ -238,7 +238,7 @@ sys.stdout.write("\n")
 
     #[test]
     fn audited_current_profile_preparation_retains_only_newest_detector_report() {
-        for count in [1, 64] {
+        for count in [1, 4, 64] {
             let root = tempfile::tempdir().unwrap();
             let (mut engine, watcher, _) = live_fixture(root.path(), false);
             let profile = resolve(&watcher).unwrap();
