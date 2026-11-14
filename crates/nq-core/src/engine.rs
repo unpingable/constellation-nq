@@ -6167,6 +6167,8 @@ impl HistoricalInputLaw {
                 detector.id == nq_profiles::host_io::DETECTOR_ID && detector.version == 1,
             "sha256:1f9b490d01edcc7d42242efd6b7b7fab37aef36bbb10dd685db0cd5ecaf2d848" =>
                 detector.id == nq_profiles::host_memory::DETECTOR_ID && detector.version == 1,
+            "sha256:6b3d94d93533893265a074ffe43338fe52f3e5031566b56c495de3cd33727c4b" =>
+                detector.id == nq_profiles::systemd_unit_v2::DETECTOR_ID && detector.version == 1,
             "sha256:b1d3422f69f291ed2ff2449f6c3760acb24845aca1e7a35b1f4d367cda7044c2" =>
                 detector.id == nq_profiles::systemd_unit_v3::DETECTOR_ID
                     && detector.version == nq_profiles::systemd_unit_v3::DETECTOR_VERSION,

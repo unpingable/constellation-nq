@@ -1215,7 +1215,7 @@ is bounded by the new rows, the referenced closure, and the schema:
   not the complete source read or per-row selection.
 
   For the specifically audited compiled I/O-pressure v1, memory-pressure v1
-  and systemd-unit v3 semantic identities, ordinary non-diagnostic preparation
+  and systemd-unit v2/v3 semantic identities, ordinary non-diagnostic preparation
   uses a separate current-question proof. It reads the absolute instance head
   and the exact current finding lineage's cited reports. Full selected reports
   receive canonical, protocol, current-context and cold profile validation;
@@ -1223,6 +1223,12 @@ is bounded by the new rows, the referenced closure, and the schema:
   testimony. The newest same-instance report alone enters the detector input,
   including a failed or stale newest occurrence. The newly admitted report
   participates in that same durable-sequence selection.
+  Systemd v2 keeps its existing manager-state testimony without a boot identity;
+  v3 retains its separate boot-bound contract. This eligibility change requires
+  no profile-version upgrade. A partial v2 report is still profile-refused before
+  admission and adds no detector evaluation. Selecting a candidate binary here
+  does not update another resident evaluator: each installed consumer still
+  needs its own pinned upgrade, admission and guarded deployment procedure.
 
   The scoped proof does not establish the integrity of unreferenced older raw
   bytes. The complete-source API and full audit retain that contract. A compact
@@ -1230,7 +1236,7 @@ is bounded by the new rows, the referenced closure, and the schema:
   detector identity selects the full path. Diagnostics and named successor
   paths keep their existing full proof and snapshot restrictions.
 
-  This bounds historical detector-input copying for those three compiled laws,
+  This bounds historical detector-input copying for those four compiled laws,
   not total collection cost. The selected head/citation closure can itself grow;
   replay after cursor loss, full fallback and current-finding projection still
   have broader costs. No whole-operation constant-cost claim follows.
