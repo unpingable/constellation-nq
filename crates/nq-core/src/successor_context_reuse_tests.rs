@@ -24,6 +24,143 @@ mod successor_context_reuse {
         (engine, watcher)
     }
 
+    // These counters observe their named consumers, not all source BLOB reads
+    // or process resource use. In particular, ordinary PREPARED_SOURCE counters
+    // do not cover the named successor's complete snapshots.
+    fn measure_existing_successor_phase<T>(operation: impl FnOnce() -> T) -> (T, Value) {
+        let selectors = CONTEXT_SELECTOR_CALLS.with(std::cell::Cell::get);
+        let validations = CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get);
+        let reconstructions = RECONSTRUCTIONS.with(std::cell::Cell::get);
+        let hashes = MEMO_BODY_BYTES_HASHED.with(std::cell::Cell::get);
+        nq_store::start_sql_work_count();
+        let started = std::time::Instant::now();
+        let value = operation();
+        let elapsed_micros = started.elapsed().as_micros();
+        let sql_operations = nq_store::stop_sql_work_count().expect("SQL counting was active");
+        assert!(
+            sql_operations > 0,
+            "each measured phase must observe real SQL work"
+        );
+        (
+            value,
+            json!({
+                "context_selector_calls": CONTEXT_SELECTOR_CALLS.with(std::cell::Cell::get) - selectors,
+                "context_validations": CONTEXT_SELECTOR_VALIDATIONS.with(std::cell::Cell::get) - validations,
+                "report_reconstructions": RECONSTRUCTIONS.with(std::cell::Cell::get) - reconstructions,
+                "memo_raw_bytes_hashed": MEMO_BODY_BYTES_HASHED.with(std::cell::Cell::get) - hashes,
+                "sqlite_vm_operations": sql_operations,
+                "instrumented_elapsed_micros": elapsed_micros,
+            }),
+        )
+    }
+
+    /// Characterize the existing complete-source contract at two finite sizes.
+    /// A lost occurrence, changed replay or unqualified artifact must fail;
+    /// work growth itself is reported, not declared a correctness failure.
+    /// This uses the real generic host fixture, not the filesystem-capacity law.
+    #[test]
+    #[ignore = "bounded 1/64 real-helper characterization; run explicitly and serially"]
+    fn named_successor_full_contract_work_at_one_and_sixty_four_reports() {
+        for prior in [1usize, 64] {
+            let root = tempfile::tempdir().unwrap();
+            let (mut engine, watcher) = admitted_history(root.path(), prior);
+            // Setup, its cache warming and this inventory are outside all
+            // measured phases. Each size starts in its own temporary store.
+            let before = engine
+                .store
+                .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))
+                .unwrap();
+            assert_eq!(before.reports.len(), prior);
+            let retained_raw_bytes: usize = before
+                .reports
+                .iter()
+                .map(|row| row.canonical_json.len())
+                .sum();
+            drop(before);
+            let acquisition_id = "full-contract-work-current";
+            let (artifact, acquire_work) = measure_existing_successor_phase(|| {
+                engine.store.count_sql_work_on_this_handle();
+                engine
+                    .diagnostic_acquire_successor_local(&watcher, acquisition_id)
+                    .expect("real named successor acquisition")
+            });
+            let original = artifact.canonical_bytes().unwrap();
+            let SupportedDiagnosticExecution::V2(value) = &artifact else {
+                panic!("local v2 artifact");
+            };
+            assert_eq!(value.inputs.selected.len(), 1);
+            assert_eq!(value.inputs.admitted.len(), 1);
+            assert_eq!(
+                value.outcome.condition,
+                DiagnosticConditionV1::ExplicitlyAbsent
+            );
+
+            let (replay, replay_work) = measure_existing_successor_phase(|| {
+                engine.store.count_sql_work_on_this_handle();
+                engine
+                    .diagnostic_replay_local_successor(&watcher, acquisition_id)
+                    .expect("same-handle replay")
+            });
+            assert_eq!(replay.canonical_bytes().unwrap(), original);
+            let (admission, qualify_work) = measure_existing_successor_phase(|| {
+                engine.store.count_sql_work_on_this_handle();
+                qualify_diagnostic_admission(&engine.store, artifact.artifact_id().as_digest())
+                    .expect("existing full qualification")
+            });
+            admission.validate().expect("valid admission carrier");
+            assert_eq!(
+                &admission.artifact.artifact_id,
+                artifact.artifact_id().as_digest()
+            );
+            assert_eq!(
+                admission.artifact.canonical_bytes_sha256,
+                nq_protocol::sha256_bytes(&original)
+            );
+
+            let config = engine.config.clone();
+            drop(engine);
+            // This is one writable engine reopen after the above operations,
+            // not three independent CLI process opens or a cold-cache trial.
+            let (mut reopened, reopen_work) = measure_existing_successor_phase(|| {
+                let identity = EvaluatorRuntimeIdentity::for_test(nq_protocol::sha256_bytes(
+                    b"successor-context-reuse-evaluator",
+                ));
+                CollectionEngine::open_with_evaluator_identity(&config, Ok(identity))
+                    .expect("real engine reopen")
+            });
+            assert_eq!(
+                reopened
+                    .diagnostic_replay_local_successor(&watcher, acquisition_id)
+                    .unwrap()
+                    .canonical_bytes()
+                    .unwrap(),
+                original
+            );
+            assert_eq!(
+                reopened
+                    .store
+                    .evidence_snapshot(std::slice::from_ref(&watcher.instance_id))
+                    .unwrap()
+                    .reports
+                    .len(),
+                prior + 1,
+                "replay, qualification and reopen never collect another occurrence"
+            );
+            println!(
+                "successor_full_contract_work {}",
+                json!({
+                    "retained_reports_before": prior,
+                    "retained_raw_bytes_before": retained_raw_bytes,
+                    "profile": watcher.profile,
+                    "acquire": acquire_work,
+                    "same_handle_replay": replay_work,
+                    "same_handle_qualify": qualify_work,
+                    "writable_engine_reopen_after_qualify": reopen_work,
+                })
+            );
+        }
+    }
+
     #[test]
     fn named_successor_does_not_repeat_context_selection_in_one_snapshot() {
         let mut measured = Vec::new();

@@ -125,3 +125,33 @@ also bind the conservative source/dependency closure, so a dependency update
 may rotate an ID without changing descriptor bytes. Do not replace a pinned
 consumer expectation with whatever ID happened to arrive. Verify the new
 source/runtime combination and explicitly enroll its identity in each consumer.
+
+
+## Measuring uncovered and certified history
+
+The ignored Core test
+`named_successor_full_contract_work_at_one_and_sixty_four_reports` measures
+existing acquire, same-handle replay, same-handle qualification and one writable
+reopen at 1 and 64 retained reports. It seeds history on one already-open engine:
+that history is beyond the engine's certified frontier. Growth in qualification
+or first-reopen work there is not evidence that ordinary CLI commands rescan
+previously certified history. This fixture changes no acquisition or proof API.
+
+Run it explicitly with the context and refusal controls:
+
+```sh
+cargo test --locked -p nq-core --lib engine::tests::successor_context_reuse -- --include-ignored --nocapture --test-threads=1
+```
+
+For the normal certified-history order, use the existing
+`hot_path_work_does_not_grow_with_covered_history` test. It certifies the retained
+prefix, acquires one new artifact, reopens/replays it, then qualifies through a
+fresh read-only Store. Require its printed work measurements as well as the
+passing test: an unavailable native fixture can otherwise return early.
+
+The SQL counters cover instrumented connections, not complete file reads or
+physical I/O. Reopen SQL before installation of the Store inspection hook is
+excluded. Raw retained-body bytes are fixture inventory, not operation read
+bytes. These are warmed generic-host fixtures, not filesystem-law qualification
+or installed Host Posture performance. Instrumented debug elapsed times do not
+establish production CPU, memory, latency or resource bounds.
