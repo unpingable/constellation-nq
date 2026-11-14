@@ -226,6 +226,9 @@ pub enum ConfigCommand {
     Check {
         /// Candidate path; defaults to the global configuration.
         path: Option<PathBuf>,
+        /// Check observation configuration/profiles without checking delivery policy.
+        #[arg(long)]
+        observation_only: bool,
     },
     /// Compare canonical intent without treating formatting as drift.
     Diff {
@@ -471,6 +474,15 @@ pub enum RefusalsCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum NotificationCommand {
+    /// Show the validated effective escalation document and its digest.
+    Policy {
+        /// Check an attention registry export against the same policy.
+        #[arg(long)]
+        check_registry: Option<PathBuf>,
+        /// Require registry pages to be deliverable on this route.
+        #[arg(long, requires = "check_registry")]
+        route: Option<String>,
+    },
     /// Retain one explicit operator/Nightshift intent and perform at most one
     /// transport attempt. Network dispatch is disabled unless explicitly named.
     Submit {
@@ -1471,6 +1483,16 @@ async fn notification_command(
 ) -> Result<()> {
     let config = NqConfig::load(config_path)?;
     match command {
+        NotificationCommand::Policy {
+            check_registry,
+            route,
+        } => {
+            let policy = crate::escalation::Policy::load(&config)?;
+            if let Some(path) = check_registry {
+                policy.check_registry(&path, route.as_deref())?;
+            }
+            print_value(&policy.inspect(), json_output)
+        }
         NotificationCommand::Submit {
             intent,
             route,
@@ -1571,6 +1593,10 @@ fn initialize(config_path: &Path, arguments: InitArgs, json_output: bool) -> Res
     print_value(
         &json!({
             "initialized": true,
+            "escalation_policy": match crate::escalation::Policy::load(&config) {
+                Ok(policy) => policy.status(),
+                Err(error) => json!({"state":"failed", "diagnostic":format!("{error:#}")}),
+            },
             "database": config.database_path,
             "schema_version": nq_store::SCHEMA_VERSION,
         }),
@@ -1580,12 +1606,30 @@ fn initialize(config_path: &Path, arguments: InitArgs, json_output: bool) -> Res
 
 fn config_command(active: &Path, command: ConfigCommand, json_output: bool) -> Result<()> {
     match command {
-        ConfigCommand::Check { path } => {
+        ConfigCommand::Check {
+            path,
+            observation_only,
+        } => {
             let path = path.unwrap_or_else(|| active.to_path_buf());
             let config = NqConfig::load(&path)
                 .with_context(|| format!("cannot validate {}", path.display()))?;
             validate_compiled_profiles(&config)?;
+            if !observation_only {
+                crate::escalation::Policy::load(&config)?.require_installed()?;
+            }
             let digest = semantic_digest(&config)?.to_string();
+            if observation_only {
+                return print_value(
+                    &json!({
+                        "scope": "observation",
+                        "observation_valid": true,
+                        "notification_policy_checked": false,
+                        "path": path,
+                        "config_digest": digest,
+                    }),
+                    json_output,
+                );
+            }
             print_value(
                 &json!({"valid": true, "path": path, "config_digest": digest}),
                 json_output,
@@ -1597,6 +1641,8 @@ fn config_command(active: &Path, command: ConfigCommand, json_output: bool) -> R
             let candidate_config = NqConfig::load(&candidate)
                 .with_context(|| format!("cannot load candidate {}", candidate.display()))?;
             validate_compiled_profiles(&candidate_config)?;
+            crate::escalation::Policy::load(&current)?;
+            crate::escalation::Policy::load(&candidate_config)?.require_installed()?;
             let current_digest = semantic_digest(&current)?.to_string();
             let candidate_digest = semantic_digest(&candidate_config)?.to_string();
             print_value(
@@ -1612,6 +1658,7 @@ fn config_command(active: &Path, command: ConfigCommand, json_output: bool) -> R
             let loaded = LoadedConfig::load(&candidate)
                 .with_context(|| format!("cannot load candidate {}", candidate.display()))?;
             validate_compiled_profiles(loaded.config())?;
+            crate::escalation::Policy::load(loaded.config())?.require_installed()?;
             let config_digest = semantic_digest(loaded.config())?.to_string();
             activate_loaded_config(&loaded, active)
                 .with_context(|| format!("cannot activate candidate {}", candidate.display()))?;
@@ -2233,6 +2280,11 @@ fn validation_watermark_value(store: &Store) -> Result<Value> {
 fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
     let config = NqConfig::load(config_path)?;
     validate_compiled_profiles(&config)?;
+    let escalation_policy = match crate::escalation::Policy::load(&config) {
+        Ok(policy) => policy.status(),
+        Err(error) => json!({"state": "failed", "diagnostic": format!("{error:#}"),
+            "notification_admission": "refused"}),
+    };
     let store = Store::open_read_only(&config.database_path)?;
     let validation_watermark = validation_watermark_value(&store)?;
     store.validate()?;
@@ -2331,6 +2383,7 @@ fn doctor(config_path: &Path, json_output: bool) -> Result<()> {
     print_value(
         &json!({
             "healthy": healthy,
+            "escalation_policy": escalation_policy,
             "database": database,
             "retention": retention,
             "expiry_schedule": expiry_schedule,

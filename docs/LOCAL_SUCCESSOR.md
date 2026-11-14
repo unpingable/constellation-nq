@@ -4,16 +4,22 @@ Use this bounded local profile when an admitted local watcher has already
 produced a diagnostic and a workflow needs another observation from the same
 store and configuration. It is not a scheduler or permission to act on a result.
 
-Prerequisites: current schema13, the same admitted watcher and helper, retained
+Prerequisites: current schema15, the same admitted watcher and helper, retained
 matching diagnostic history, and a caller-selected acquisition ID. This uses
 the existing local helper path; it does not establish hardware or remote-host
 provenance. The ordinary `diagnostics execute` entry point remains the initial
 diagnostic path and refuses an incompatible prior-history shape.
 
+Define the canonical capped `nq_helper_command` from
+[Operations](OPERATIONS.md#test-and-admit-a-watcher) first, with the selected
+collector's exact paths and limits. Acquisition executes the admitted helper;
+replay opens the writable engine even when returning an existing artifact, so
+it must retain that store envelope. Neither command is a bare login-shell read.
+
 ```sh
-nq --config /path/to/nq.toml diagnostics acquire-next-local host-local \
+nq_helper_command --config /path/to/nq.toml diagnostics acquire-next-local host-local \
   --acquisition-id local-check-002 > observation.json
-nq --config /path/to/nq.toml diagnostics replay-local-successor host-local \
+nq_helper_command --config /path/to/nq.toml diagnostics replay-local-successor host-local \
   --acquisition-id local-check-002 > replay.json
 cmp observation.json replay.json
 artifact=$(jq -er .artifact_id observation.json)

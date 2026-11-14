@@ -76,6 +76,19 @@ pub struct NqConfig {
     /// is resolved only at an enabled dispatch boundary and is never stored.
     #[serde(default)]
     pub notification_routes: Vec<NotificationRouteConfig>,
+    /// Optional operator-approved escalation document. Absence grants no paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation_policy: Option<EscalationPolicyConfig>,
+}
+
+/// Exact bytes approved separately from notification-provider credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EscalationPolicyConfig {
+    /// Absolute regular-file location, normally beside the routes configuration.
+    pub path: PathBuf,
+    /// SHA-256 of the exact installed bytes, approved outside the document.
+    pub sha256: String,
 }
 
 /// Retention policy overrides. Automatic sizing is chosen once and persisted;

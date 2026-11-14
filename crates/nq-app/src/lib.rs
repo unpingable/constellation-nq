@@ -7,6 +7,7 @@ pub mod cli;
 pub mod continuity_cli;
 pub mod daemon;
 pub mod docket_cli;
+mod escalation;
 pub mod labelwatch_cleanup_cli;
 pub mod labelwatch_relief_cli;
 pub mod notification;

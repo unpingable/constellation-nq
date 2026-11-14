@@ -120,6 +120,15 @@ max_file_bytes = 67108864
         String::from_utf8_lossy(&admitted.stderr)
     );
 
+    // A broken escalation document cannot stop collection of an admitted watcher.
+    let mut configuration = fs::read_to_string(&config_path).unwrap();
+    configuration.push_str(&format!(
+        "\n[escalation_policy]\npath = \"{}/missing-policy.json\"\nsha256 = \"sha256:{}\"\n",
+        root.display(),
+        "0".repeat(64)
+    ));
+    fs::write(&config_path, configuration).unwrap();
+
     let collected = Command::new(nqd)
         .arg("--config")
         .arg(&config_path)
@@ -138,7 +147,8 @@ max_file_bytes = 67108864
     );
     assert!(collected.status.success(), "nqd --once failed:\n{log}");
     assert!(
-        log.contains("collection admitted")
+        log.contains("observation continues")
+            && log.contains("collection admitted")
             && log.contains(r#""outcome":"admitted""#)
             && log.contains(r#""schema":"nq.evaluation_envelope.v2""#)
             && log.contains(r#""evaluator_artifact_digest":"sha256:"#),
