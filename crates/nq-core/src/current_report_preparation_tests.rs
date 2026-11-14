@@ -6,6 +6,7 @@ mod current_report_preparation {
     use super::*;
     include!("current_report_cost_measurement.rs");
     include!("current_evidence_core_tests.rs");
+    include!("current_systemd2_input_tests.rs");
 
     const MACHINE: &str = "0123456789abcdef0123456789abcdef";
 
@@ -37,6 +38,13 @@ mod current_report_preparation {
                 nq_profiles::host_memory::SCOPE_SCHEMA,
                 nq_profiles::host_memory::subject_for(MACHINE),
                 json!({"machine_id": MACHINE}),
+            ),
+            nq_profiles::systemd_unit_v2::PROFILE_ID
+                if descriptor.profile.version == nq_profiles::systemd_unit_v2::PROFILE_VERSION => (
+                nq_profiles::systemd_unit_v2::SCOPE_KIND,
+                nq_profiles::systemd_unit_v2::SCOPE_SCHEMA,
+                nq_profiles::systemd_unit_v2::subject_for(MACHINE, "cron.service"),
+                json!({"machine_id": MACHINE, "unit_name": "cron.service"}),
             ),
             nq_profiles::systemd_unit_v3::PROFILE_ID => (
                 nq_profiles::systemd_unit_v3::SCOPE_KIND,
@@ -81,8 +89,7 @@ mod current_report_preparation {
             json!({
                 "machine_id": MACHINE, "unit_name": "cron.service", "load_state": "loaded",
                 "active_state": if present { "failed" } else { "active" },
-                "sub_state": if present { "failed" } else { "running" },
-                "boot_id": "7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c"
+                "sub_state": if present { "failed" } else { "running" }
             })
         } else {
             let pressure = if present { 3_000 } else { 0 };
@@ -91,6 +98,9 @@ mod current_report_preparation {
             json!({"machine_id": MACHINE, "boot_age_seconds": 3_600,
                 "some": line, "full": line})
         };
+        if systemd && descriptor.profile.version == nq_profiles::systemd_unit_v3::PROFILE_VERSION {
+            payload["boot_id"] = json!("7e3e2a67-f95e-437a-b6c6-d2bf99d44e0c");
+        }
         payload["evidence_basis"] = json!({
             "scope": watcher.scope, "vantage": watcher.vantage,
             "access_path": if systemd { "systemd_dbus" } else { "procfs_pressure" },
@@ -163,7 +173,14 @@ mod current_report_preparation {
     // Reuse the existing helper/admission/ordinary-collection path. Only the
     // public helper testimony changes; no direct SQL or manufactured admissions.
     fn live_fixture(root: &Path, present: bool) -> (CollectionEngine, WatcherConfig, PathBuf) {
-        let profile = &nq_profiles::host_io::MODULE;
+        live_fixture_for_profile(root, &nq_profiles::host_io::MODULE, present)
+    }
+
+    fn live_fixture_for_profile(
+        root: &Path,
+        profile: &'static dyn ProfileModule,
+        present: bool,
+    ) -> (CollectionEngine, WatcherConfig, PathBuf) {
         let (mut config, original, _) = host_diagnostic_fixture(root);
         let mut watcher = question(root, profile);
         watcher.command = original.command;
