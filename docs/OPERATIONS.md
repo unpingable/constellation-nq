@@ -1318,8 +1318,13 @@ is bounded by the new rows, the referenced closure, and the schema:
   Filters, ordering, page limits and refusal behavior are unchanged. Full
   validation still visits all required rows; neither a bounded response page
   nor this query correction establishes a whole-operation time or resource bound.
-  Named local-successor exact-current selection
-  keeps its existing path.
+  Named local successors select the guarded post-insertion context once,
+  sharing the borrowed matching rows between their retained-prior witness
+  check and evaluation. Their separate pre-dispatch prior-history check and
+  complete raw-source validation remain. Exact-current detector selection
+  still reconstructs only the newly admitted report; this change removes a
+  duplicate context traversal, without narrowing diagnostic integrity or
+  establishing a whole-operation time or resource bound.
 - Store also exposes a separate opt-in `PreparedCurrentEvidenceSnapshot` for
   ordinary current questions. `prepare_current_evidence_snapshot` captures the
   absolute instance head, including compact rows as an append sentinel, and the

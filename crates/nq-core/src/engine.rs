@@ -3643,13 +3643,21 @@ impl CollectionEngine {
                                     &watcher.instance_id,
                                 ))?,
                             };
-                            if emit_diagnostic {
+                            let matching_context = if emit_diagnostic {
                                 if local_successor_acquisition_id.is_some() {
-                                    require_successor_diagnostic_snapshot(&snapshot, watcher, descriptor_digest.as_str(), &report_id)?;
+                                    Some(require_successor_diagnostic_snapshot(
+                                        &snapshot,
+                                        watcher,
+                                        descriptor_digest.as_str(),
+                                        &report_id,
+                                    )?)
                                 } else {
                                     require_fresh_diagnostic_snapshot(&snapshot, watcher, descriptor_digest.as_str(), &report_id)?;
+                                    None
                                 }
-                            }
+                            } else {
+                                None
+                            };
                             let current_findings = view.finding_snapshots()?;
                             let prepared = prepare_instance_evaluations_with_history(
                                 watcher,
@@ -3664,6 +3672,7 @@ impl CollectionEngine {
                                     EvaluationReportSelection::AllMatching
                                 },
                                 history.map(|history| (history, Some(report_id.as_str()))),
+                                matching_context,
                                 diagnostic_context.is_some(),
                             )?;
                             let (diagnostic_artifact_id, diagnostic_artifact) =
@@ -4521,6 +4530,7 @@ impl CollectionEngine {
                 &evaluator_artifact_digest,
                 EvaluationReportSelection::AllMatching,
                 Some((history, None)),
+                None,
                 false,
             )?;
             drop(prepare_timing);
@@ -6448,6 +6458,7 @@ fn prepare_instance_evaluations(
         evaluator_artifact_digest,
         selection,
         None,
+        None,
         false,
     )
 }
@@ -6462,6 +6473,7 @@ fn prepare_instance_evaluations_with_history(
     evaluator_artifact_digest: &str,
     selection: EvaluationReportSelection<'_>,
     history: Option<(PreparedHistoricalReports, Option<&str>)>,
+    matching_context: Option<Vec<&nq_store::AdmittedReportRow>>,
     retain_diagnostic_reports: bool,
 ) -> Result<Vec<PreparedEvaluation>, EngineError> {
     let _timing = nq_store::operation_timing::PhaseTiming::start("core.prepare_evaluations");
@@ -6488,8 +6500,13 @@ fn prepare_instance_evaluations_with_history(
     } else {
         let context_timing =
             nq_store::operation_timing::PhaseTiming::start("core.context_and_selection");
-        let matching_rows =
-            evaluation_context_rows(&snapshot.reports, watcher, profile_digest.as_str())?;
+        // A named successor's witness check already selected this same
+        // immutable guarded snapshot. Reuse its borrowed rows; all other cold
+        // callers still validate and select their complete context here.
+        let matching_rows = match matching_context {
+            Some(rows) => rows,
+            None => evaluation_context_rows(&snapshot.reports, watcher, profile_digest.as_str())?,
+        };
         let selected_rows = match selection {
             EvaluationReportSelection::AllMatching => matching_rows.clone(),
             EvaluationReportSelection::ExactCurrent(report_id) => {
@@ -7276,12 +7293,12 @@ fn require_fresh_diagnostic_snapshot(
     Ok(())
 }
 
-fn require_successor_diagnostic_snapshot(
-    snapshot: &EvidenceSnapshot,
+fn require_successor_diagnostic_snapshot<'rows>(
+    snapshot: &'rows EvidenceSnapshot,
     watcher: &WatcherConfig,
     profile_digest: &str,
     current_report_id: &str,
-) -> Result<(), EngineError> {
+) -> Result<Vec<&'rows nq_store::AdmittedReportRow>, EngineError> {
     let matching = evaluation_context_rows(&snapshot.reports, watcher, profile_digest)?;
     if matching.len() < 2
         || !matching
@@ -7293,7 +7310,7 @@ fn require_successor_diagnostic_snapshot(
             watcher.instance_id
         )));
     }
-    Ok(())
+    Ok(matching)
 }
 
 struct DryExchange {
