@@ -3488,7 +3488,7 @@ fn validate_v3_upgrade_source_semantics(path: &Path) -> Result<()> {
     nq_core::engine::validate_status_history_v2(&store)?;
     nq_core::engine::validate_rejected_custody_history(&store)?;
     nq_core::engine::validate_evaluation_refusal_history(&store)?;
-    nq_core::engine::status_snapshot_v3(&store)?;
+    nq_core::engine::status_snapshot_v3_for_v3_upgrade_source(&store)?;
     Ok(())
 }
 

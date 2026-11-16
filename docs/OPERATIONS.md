@@ -1579,6 +1579,12 @@ notification delivery, or saved-check results. Every backup is complete before
 the corresponding source write; failure leaves that transition's source
 transactionally unchanged.
 
+The exact schema-v3 preflight validates its complete typed status history in
+one read-only snapshot and rechecks the qualified schema inside that snapshot.
+It does not request tables introduced by later schemas or create a current
+validation watermark. The mandatory verified backup and every separately
+receipted migration still precede their corresponding source writes.
+
 Store continuity across NQ builds is **not qualified**. A migrated store can
 still be refused when it is reopened: historical diagnostic artifacts are
 checked against the running build's compiled profile surface and

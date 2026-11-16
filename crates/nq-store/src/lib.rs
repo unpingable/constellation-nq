@@ -2319,6 +2319,33 @@ impl Store {
         validate_v3_upgrade_source_connection(&self.connection)
     }
 
+    /// Read the exact qualified schema-v3 source in one read-only snapshot.
+    /// Recheck its identity and invariants inside that snapshot, without
+    /// constructing a current-schema frontier or certifying current history.
+    pub fn with_v3_upgrade_source_snapshot<T, E, F>(&self, read: F) -> Result<T, E>
+    where
+        E: From<StoreError>,
+        F: FnOnce(&Self) -> Result<T, E>,
+    {
+        if !self
+            .connection
+            .is_readonly("main")
+            .map_err(StoreError::from)
+            .map_err(E::from)?
+        {
+            return Err(E::from(StoreError::Invariant(
+                "schema-v3 semantic snapshot requires a read-only source connection".into(),
+            )));
+        }
+        let snapshot = Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+            .map_err(StoreError::from)
+            .map_err(E::from)?;
+        validate_v3_upgrade_source_connection(&snapshot).map_err(E::from)?;
+        let value = read(self)?;
+        drop(snapshot);
+        Ok(value)
+    }
+
     /// Open the exact qualified schema-v4 store read-only for the separately
     /// authorized v4-to-v5 migration.
     pub fn open_v4_upgrade_source_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
@@ -15195,6 +15222,90 @@ mod tests {
                 params![SCHEMA_V3_ARTIFACT_DIGEST, TIME],
             )
             .expect("record exact schema-v3 identity");
+    }
+
+    #[test]
+    fn exact_v3_upgrade_snapshot_is_read_only_without_current_certification() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("v3-snapshot.db");
+        write_empty_exact_v3(&path);
+        let before = std::fs::read(&path).expect("original v3 bytes");
+        let store = Store::open_v3_upgrade_source_read_only(&path).expect("exact v3 source");
+        store
+            .with_v3_upgrade_source_snapshot(|source| {
+                assert!(!source.connection.is_autocommit());
+                let write = source.connection.execute(
+                    "INSERT INTO retention_tombstones (
+                        tombstone_id, target_kind, target_id, target_digest,
+                        reason_code, detail_json, created_at
+                     ) VALUES ('refused-write', 'fixture', 'fixture', NULL,
+                               'fixture', CAST('{}' AS BLOB), ?1)",
+                    [TIME],
+                );
+                assert!(matches!(
+                    write,
+                    Err(rusqlite::Error::SqliteFailure(error, _))
+                        if error.code == rusqlite::ErrorCode::ReadOnly
+                ));
+                Ok::<_, StoreError>(())
+            })
+            .expect("read-only exact-v3 snapshot");
+        assert!(store.connection.is_autocommit());
+        assert!(!watermark_path(&path).exists());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        // An exact schema on a writable connection is not the promised
+        // read-only upgrade-source boundary, even before any callback runs.
+        let mut substituted = store;
+        substituted.connection = Connection::open(&path).expect("writable fixture connection");
+        let reached = std::cell::Cell::new(false);
+        let refused = substituted.with_v3_upgrade_source_snapshot(|_| {
+            reached.set(true);
+            Ok::<_, StoreError>(())
+        });
+        assert!(refused.is_err());
+        assert!(!reached.get());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn exact_v3_upgrade_snapshot_rechecks_schema_before_reading() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("v3-schema-changed.db");
+        write_empty_exact_v3(&path);
+        let reader = Store::open_v3_upgrade_source_read_only(&path).expect("exact v3 source");
+        Connection::open(&path)
+            .expect("independent fixture writer")
+            .execute_batch("DROP INDEX watcher_runs_by_instance;")
+            .expect("substitute the schema after opening the reader");
+        let reached = std::cell::Cell::new(false);
+        let refused = reader.with_v3_upgrade_source_snapshot(|_| {
+            reached.set(true);
+            Ok::<_, StoreError>(())
+        });
+        assert!(matches!(refused, Err(StoreError::Integrity(_))));
+        assert!(!reached.get());
+        assert!(reader.connection.is_autocommit());
+        assert!(!watermark_path(&path).exists());
+    }
+
+    #[test]
+    fn current_read_snapshot_refuses_missing_diagnostic_history_table() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("current-table-missing.db");
+        drop(Store::initialize(&path).expect("current schema fixture"));
+        let reader = Store::open_read_only(&path).expect("valid current reader");
+        Connection::open(&path)
+            .expect("independent fixture writer")
+            .execute_batch("DROP TABLE diagnostic_artifact_commitments;")
+            .expect("remove a required current history table after opening");
+        let reached = std::cell::Cell::new(false);
+        let refused = reader.with_read_snapshot(|_, _| {
+            reached.set(true);
+            Ok::<_, StoreError>(())
+        });
+        assert!(refused.is_err());
+        assert!(!reached.get());
     }
 
     fn write_empty_exact_v4(path: &Path) {

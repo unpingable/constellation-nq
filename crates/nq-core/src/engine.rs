@@ -11228,6 +11228,21 @@ pub fn status_snapshot_v3(store: &Store) -> Result<StatusSnapshotV3, EngineError
     })
 }
 
+/// Validate and project the exact schema-v3 upgrade source's status history.
+///
+/// This read-only pre-migration snapshot does not request current-schema
+/// history tables or create a validation certification.
+///
+/// # Errors
+///
+/// Returns when the source is not an exact read-only qualified schema-v3
+/// store, or its complete typed status and evaluation history cannot reopen.
+pub fn status_snapshot_v3_for_v3_upgrade_source(
+    store: &Store,
+) -> Result<StatusSnapshotV3, EngineError> {
+    store.with_v3_upgrade_source_snapshot(status_snapshot_v3_from_complete_history)
+}
+
 /// [`status_snapshot_v3`] over the complete immutable history, whatever the
 /// store's validation watermark certifies.
 fn status_snapshot_v3_from_complete_history(
