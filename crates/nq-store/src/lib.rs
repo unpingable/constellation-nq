@@ -2322,6 +2322,10 @@ impl Store {
     /// Read the exact qualified schema-v3 source in one read-only snapshot.
     /// Recheck its identity and invariants inside that snapshot, without
     /// constructing a current-schema frontier or certifying current history.
+    ///
+    /// # Errors
+    ///
+    /// Returns if the source is writable, is not exact v3, or the read fails.
     pub fn with_v3_upgrade_source_snapshot<T, E, F>(&self, read: F) -> Result<T, E>
     where
         E: From<StoreError>,
