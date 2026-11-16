@@ -707,7 +707,6 @@ struct RetainedArtifact {
     file: File,
     path: PathBuf,
     proc_path: PathBuf,
-    sha256: String,
     size: u64,
     device: u64,
     inode: u64,
@@ -746,12 +745,11 @@ impl RetainedArtifact {
             &self.path,
             "descriptor_mode",
         )?;
-        verify_seals(&self.file, &self.path)?;
-        compare_field(
-            hash_descriptor(&self.file, self.size)? == self.sha256,
-            &self.path,
-            "descriptor_sha256",
-        )
+        // retained() checked the digest after applying all four seals. The
+        // same owned inode cannot change bytes while WRITE/GROW/SHRINK/SEAL
+        // remain set, so repeating a payload hash adds no new evidence.
+        // Mutable directory and startup-runtime checks remain separate.
+        verify_seals(&self.file, &self.path)
     }
 }
 
@@ -938,7 +936,6 @@ fn retained(opened: OpenedArtifact, executable: bool) -> Result<RetainedArtifact
         file,
         path: source_path,
         proc_path,
-        sha256: source_digest,
         size: source_size,
         device: metadata.dev(),
         inode: metadata.ino(),
@@ -1741,6 +1738,60 @@ mod tests {
     }
 
     #[test]
+    fn matching_snapshot_bytes_without_write_seal_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixed-data");
+        let bytes = b"qualified fixed bytes";
+        fs::write(&path, bytes).unwrap();
+        let opened = open_regular_artifact(&path, &mut ArtifactBudget::default()).unwrap();
+        let mut artifact = retained(opened, false).unwrap();
+        artifact.verify().expect("fully sealed qualified snapshot");
+        let expected_digest = hash_descriptor(&artifact.file, artifact.size).unwrap();
+
+        // Model a construction defect: all cached identity fields and bytes
+        // match this replacement descriptor, but it lacks the required seals.
+        let mut unsealed = create_executable_memfd().unwrap();
+        unsealed.write_all(bytes).unwrap();
+        fchmod(unsealed.as_raw_fd(), Mode::from_bits_truncate(0o444)).unwrap();
+        let metadata = unsealed.metadata().unwrap();
+        artifact.device = metadata.dev();
+        artifact.inode = metadata.ino();
+        artifact.proc_path = PathBuf::from(format!("/proc/self/fd/{}", unsealed.as_raw_fd()));
+        artifact.file = unsealed;
+        assert_eq!(
+            hash_descriptor(&artifact.file, artifact.size).unwrap(),
+            expected_digest
+        );
+        assert!(matches!(
+            artifact.verify(),
+            Err(IdentityError::Drift {
+                field: "snapshot_seals",
+                ..
+            })
+        ));
+
+        // Size seals alone still permit an in-place byte change. Never treat
+        // them as the immutable proof supplied by F_SEAL_WRITE.
+        fcntl(
+            artifact.file.as_raw_fd(),
+            FcntlArg::F_ADD_SEALS(required_seals() - SealFlag::F_SEAL_WRITE),
+        )
+        .unwrap();
+        artifact.file.write_at(b"X", 0).unwrap();
+        assert_ne!(
+            hash_descriptor(&artifact.file, artifact.size).unwrap(),
+            expected_digest
+        );
+        assert!(matches!(
+            artifact.verify(),
+            Err(IdentityError::Drift {
+                field: "snapshot_seals",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn same_inode_native_source_mutation_leaves_snapshot_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let executable = dir.path().join("helper");
@@ -1756,7 +1807,7 @@ mod tests {
         };
         let launch = VerifiedLaunch::open(&command).expect("qualify native executable");
         let inode = fs::metadata(&executable).unwrap().ino();
-        let snapshot_digest = launch.retained[0].sha256.clone();
+        let snapshot_digest = launch.identity.sha256.clone();
 
         fs::copy("/bin/false", &executable).unwrap();
         assert_eq!(fs::metadata(&executable).unwrap().ino(), inode);

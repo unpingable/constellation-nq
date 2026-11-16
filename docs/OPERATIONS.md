@@ -398,15 +398,24 @@ no inherited checkpoint.
 For each later launch, NQ opens and compares the configured executable chain,
 then starts the helper from the retained opened files. Replacing a pathname
 cannot redirect the qualified launch, and changing the retained bytes in place
-causes refusal before spawn. The same rule applies to one-shot stdio helpers
-and to persistent Unix-helper restarts. Executable/interpreter snapshots have
-read/execute-only `0555` mode and fixed data snapshots have read-only `0444`
+is prevented by the required kernel seals. Missing seals or altered snapshot
+identity or metadata cause refusal before spawn. The same rule applies to
+one-shot stdio helpers and to persistent Unix-helper restarts.
+Executable/interpreter snapshots have read/execute-only `0555` mode and fixed
+data snapshots have read-only `0444`
 mode, so an isolated UID can use the sealed copies without broadening access to
 the original source files. The retained working-directory descriptor closes on
 exec; packaged helpers use the read-only `/usr/lib/nq/helpers` directory, never
 NQ's state directory. This protects the admitted byte chain; it does not turn a
 digest into a qualification or replace the separate profile, protocol,
 capability, and conformance checks.
+
+The snapshot digest is checked after sealing at construction. Later launches
+recheck the same owned descriptor's identity, size, mode and full
+write/grow/shrink/seal set instead of rereading its immutable byte payload.
+This relies on the [Linux file-seal contract](https://man7.org/linux/man-pages/man2/F_ADD_SEALS.2const.html).
+Working-directory metadata and the mutable startup-runtime closure are still
+verified again before every spawn; no source-file or library check is waived.
 
 For native ELF startup, NQ first parses the exact retained executable, the
 known glibc loader, and the complete bounded `DT_NEEDED` graph without running
