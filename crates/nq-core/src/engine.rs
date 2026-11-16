@@ -3320,6 +3320,7 @@ impl CollectionEngine {
                 .as_deref()
                 .map(|node_id| {
                     prepare_non_success_diagnostic(
+                        &self.store,
                         node_id,
                         watcher,
                         profile,
@@ -3375,6 +3376,7 @@ impl CollectionEngine {
                     .as_deref()
                     .map(|node_id| {
                         prepare_non_success_diagnostic(
+                            &self.store,
                             node_id,
                             watcher,
                             profile,
@@ -3424,6 +3426,7 @@ impl CollectionEngine {
                     .as_deref()
                     .map(|node_id| {
                         prepare_non_success_diagnostic(
+                            &self.store,
                             node_id,
                             watcher,
                             profile,
@@ -3479,6 +3482,7 @@ impl CollectionEngine {
                             .as_deref()
                             .map(|node_id| {
                                 prepare_non_success_diagnostic(
+                                    &self.store,
                                     node_id,
                                     watcher,
                                     profile,
@@ -3538,6 +3542,7 @@ impl CollectionEngine {
                             .as_deref()
                             .map(|node_id| {
                                 prepare_non_success_diagnostic(
+                                    &self.store,
                                     node_id,
                                     watcher,
                                     profile,
@@ -3578,6 +3583,7 @@ impl CollectionEngine {
                             .as_deref()
                             .map(|node_id| {
                                 prepare_diagnostic_emission(
+                                    &self.store,
                                     node_id,
                                     watcher,
                                     profile,
@@ -5205,16 +5211,8 @@ fn validate_local_v2_provider_correspondence(
         &admission.profile_digest,
         &admission.detector_identity_digest,
     )?;
-    let historical_surface = local_v2_historical_surface(
-        &profile_identity,
-        &expected_question,
-        &admission.evaluator_artifact_digest,
-        &admission.evaluator_source_digest,
-        &admission.artifact_identity_method,
-        &admission.target_triple,
-        &admission.platform_runtime_version,
-        &admission.protocol_version,
-    )?;
+    let historical_surface =
+        local_v2_historical_surface(&profile_identity, &expected_question, &admission)?;
     let expected_scope = semantic_identity(
         format!("nq.scope.{}", scope.kind),
         profile_identity.version.clone(),
@@ -7673,17 +7671,19 @@ struct LocalV2HistoricalSurface {
     nonclaims: Vec<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
+// Emission and historical validation use the same frozen source admission.
+// Ambient runtime metadata is observed separately, never substituted here.
 fn local_v2_historical_surface(
     profile: &SemanticIdentityV1,
     question: &SemanticIdentityV1,
-    evaluator_artifact_digest: &str,
-    evaluator_source_digest: &str,
-    artifact_identity_method: &str,
-    target_triple: &str,
-    platform_runtime_version: &str,
-    protocol_version: &str,
+    admission: &nq_store::AdmissionRow,
 ) -> Result<LocalV2HistoricalSurface, EngineError> {
+    let evaluator_artifact_digest = admission.evaluator_artifact_digest.as_str();
+    let evaluator_source_digest = admission.evaluator_source_digest.as_str();
+    let artifact_identity_method = admission.artifact_identity_method.as_str();
+    let target_triple = admission.target_triple.as_str();
+    let platform_runtime_version = admission.platform_runtime_version.as_str();
+    let protocol_version = admission.protocol_version.as_str();
     let build = semantic_identity(
         "nq.evaluator_build",
         "2",
@@ -7847,6 +7847,7 @@ fn local_v2_threshold_policy(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn prepare_diagnostic_emission_base(
+    store: &Store,
     node_id: &str,
     watcher: &WatcherConfig,
     profile: &'static dyn ProfileModule,
@@ -7897,16 +7898,24 @@ fn prepare_diagnostic_emission_base(
                 .into(),
         ));
     }
-    let historical_surface = local_v2_historical_surface(
-        &profile_identity,
-        &question,
-        evaluator.artifact_digest().as_str(),
-        EVALUATOR_SOURCE_DIGEST,
-        evaluator.artifact_identity_method(),
-        evaluator.target_triple(),
-        evaluator.platform_runtime_version(),
-        &provider.protocol_identity,
-    )?;
+    let admission = store
+        .admission(&provider.source_admission_id)?
+        .ok_or_else(|| {
+            EngineError::Invariant(format!(
+                "diagnostic provider source admission {} is missing",
+                provider.source_admission_id
+            ))
+        })?;
+    if admission.admission_context_digest != provider.admission_context_digest.as_str()
+        || admission.evaluator_artifact_digest != provider.evaluator_artifact_digest.as_str()
+        || admission.profile_semantic_id != provider.profile_semantic_id.as_str()
+        || admission.protocol_version != provider.protocol_identity
+    {
+        return Err(EngineError::Invariant(
+            "diagnostic source admission differs from its verified provider context".into(),
+        ));
+    }
+    let historical_surface = local_v2_historical_surface(&profile_identity, &question, &admission)?;
     let scope = semantic_identity(
         format!("nq.scope.{}", watcher.scope.kind),
         profile_descriptor.profile.version.to_string(),
@@ -8058,6 +8067,7 @@ fn prepare_diagnostic_emission_base(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)] // One closed mapping from collection failure to diagnostic artifact.
 fn prepare_non_success_diagnostic(
+    store: &Store,
     node_id: &str,
     watcher: &WatcherConfig,
     profile: &'static dyn ProfileModule,
@@ -8077,6 +8087,7 @@ fn prepare_non_success_diagnostic(
         ));
     }
     let base = prepare_diagnostic_emission_base(
+        store,
         node_id,
         watcher,
         profile,
@@ -8240,6 +8251,7 @@ fn prepare_non_success_diagnostic(
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn prepare_diagnostic_emission(
+    store: &Store,
     node_id: &str,
     watcher: &WatcherConfig,
     profile: &'static dyn ProfileModule,
@@ -8256,6 +8268,7 @@ fn prepare_diagnostic_emission(
     deliberate_successor: bool,
 ) -> Result<DiagnosticEmissionContext, EngineError> {
     let base = prepare_diagnostic_emission_base(
+        store,
         node_id,
         watcher,
         profile,
@@ -14117,6 +14130,7 @@ fn parse_severity(value: &str) -> Result<Severity, EngineError> {
 mod tests {
     include!("current_report_preparation_tests.rs");
     include!("successor_context_reuse_tests.rs");
+    include!("local_v2_platform_context_tests.rs");
 
     use std::collections::{BTreeMap, BTreeSet};
     use std::os::unix::fs::PermissionsExt;

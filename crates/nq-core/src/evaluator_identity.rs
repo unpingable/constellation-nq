@@ -85,6 +85,18 @@ impl EvaluatorRuntimeIdentity {
             platform_runtime_version: "test".to_owned(),
         }
     }
+
+    /// Same test executable identity observed under another ambient kernel.
+    #[cfg(test)]
+    pub(crate) fn for_test_with_platform_runtime(
+        artifact_digest: Sha256Digest,
+        platform_runtime_version: &str,
+    ) -> Self {
+        Self {
+            platform_runtime_version: platform_runtime_version.to_owned(),
+            ..Self::for_test(artifact_digest)
+        }
+    }
 }
 
 /// A structured refusal to establish evaluator identity. There is no fabricated

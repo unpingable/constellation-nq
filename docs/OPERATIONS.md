@@ -563,6 +563,16 @@ artifact. Other profiles and historical runs do not receive reconstructed
 artifacts. The frozen v1 contract remains a supported compatibility boundary,
 not the current live-emission format.
 
+For a locally emitted v2 artifact, `producer.build` describes the evaluator
+context frozen in that run's source admission, including the platform runtime
+version recorded at admission. It is not a seal of the kernel executing a later
+acquisition. Emission and historical validation derive this descriptor from the
+same retained admission. The running evaluator's platform version remains a
+separate observation: admitted-report verification reports `RuntimeDrift`
+without refusing platform drift alone. Evaluator artifact and identity-method
+checks, helper startup-runtime verification, and exact artifact correspondence
+remain required; this does not admit executable or library drift.
+
 After process restart, use the contract-owned artifact ID from the document:
 
 ```sh
@@ -1596,6 +1606,17 @@ continuity. A completed acquisition replays exact recorded bytes; unresolved
 acquisitions refuse without automatically invoking the helper again.
 
 There is no arbitrary migration from modified or unknown schema artifacts.
+The forward correction for local v2 producer-build metadata does not repair
+artifacts previously emitted with a later kernel's metadata instead of their
+source admission's descriptor. Such history still fails exact `producer.build`
+correspondence. Do not rewrite artifacts or admissions, skip validation, or use
+the present kernel as a historical fallback. Once inconsistent history exists,
+typed backup and export can already refuse even under the old binary, so the
+pre-upgrade export step above may no longer be available. Preserve the original
+store and admissions in integrity custody and use a separately authorized fresh
+epoch when needed; this correction supplies no automatic history repair or
+typed continuity claim for those refused artifacts.
+
 `nqd` and the
 command reject those representations before any rewrite. Validation compares
 the compiled definitions of tables, indexes, triggers, and views as well as the
