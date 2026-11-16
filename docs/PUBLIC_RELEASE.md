@@ -24,7 +24,7 @@ This is combined-candidate preparation, not a component release tag or BC1.
 
 ## NQ 0.2.4 source candidate
 
-The source tree is version 0.2.4, an unreleased candidate. A daemon
+For this unreleased candidate, the source tree was version 0.2.4. A daemon
 collection engine no longer replays the evaluation history from its open on
 every collection, which made collection cost grow with `nqd` uptime (about
 1 s an hour after start to about 400 s after nine hours on an operated store
@@ -50,7 +50,7 @@ No 0.2.4 package or tag exists until the release owner publishes one.
 
 ## NQ 0.2.3 source candidate
 
-The source tree is version 0.2.3, an unreleased candidate. `nq status export`
+For this unreleased candidate, the source tree was version 0.2.3. `nq status export`
 and `GET /v3/status` no longer reopen the complete evaluation history on every
 call (and once more per admitted instance status), which made their cost grow
 linearly with the store's age (17.7 s at 1,740 collections on an operated
@@ -69,7 +69,7 @@ No 0.2.3 package or tag exists until the release owner publishes one.
 
 ## NQ 0.2.2 source candidate
 
-The source tree is version 0.2.2, an unreleased candidate. Notification
+For this unreleased candidate, the source tree was version 0.2.2. Notification
 intents carry a closed `response_class` (`informational`, `attention` or
 `page`) assigned by the evaluator. A PagerDuty route sends only
 `response_class: page`, for trigger and resolve alike, and retains every other
